@@ -253,7 +253,7 @@ pub struct SkylightConnection {
 assert_not_impl_any!(SkylightConnection: Send, Sync);
 
 impl SkylightConnection {
-    pub fn default_for_thread() -> Self {
+    pub fn new(_mtm: MainThreadMarker) -> Self {
         Self {
             cid: SLSDefaultConnectionForThread(),
             window_list: SortedVec::new(),

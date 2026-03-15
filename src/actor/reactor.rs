@@ -33,7 +33,7 @@ use super::mouse;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::layout::{self, LayoutCommand, LayoutEvent, LayoutManager, LayoutWindowInfo};
 use crate::actor::raise::{self, RaiseRequest};
-use crate::actor::{group_bars, status};
+use crate::actor::{group_bars, status, window_server, wm_controller};
 use crate::collections::{HashMap, HashSet};
 use crate::config::Config;
 use crate::log::{self, MetricsCommand};
@@ -45,7 +45,11 @@ use crate::sys::timer::Timer;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 pub type Sender = crate::actor::Sender<Event>;
-type Receiver = crate::actor::Receiver<Event>;
+pub type Receiver = crate::actor::Receiver<Event>;
+
+pub fn channel() -> (Sender, Receiver) {
+    crate::actor::channel()
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -261,6 +265,8 @@ impl From<WindowInfo> for WindowState {
 }
 
 impl Reactor {
+    /// Spawn the reactor on a dedicated thread, co-running a `WindowServer` in
+    /// the same executor. Use [`channel()`] to create reactor_tx.
     pub fn spawn(
         config: Arc<Config>,
         layout: LayoutManager,
@@ -268,19 +274,25 @@ impl Reactor {
         mouse_tx: mouse::Sender,
         status_tx: status::Sender,
         group_indicators_tx: group_bars::Sender,
-    ) -> Sender {
-        let (events_tx, events) = crate::actor::channel();
-        let events_tx_clone = events_tx.clone();
+        reactor_tx: Sender,
+        events: Receiver,
+        wm_tx: wm_controller::Sender,
+        ws_rx: window_server::Receiver,
+        skylight_tx: window_server::SkylightSender,
+    ) {
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
                 let mut reactor = Reactor::new(config, layout, record, group_indicators_tx);
                 reactor.mouse_tx.replace(mouse_tx);
                 reactor.status_tx.replace(status_tx);
-                Executor::run(reactor.run(events, events_tx_clone));
+                let window_server =
+                    window_server::WindowServer::new(wm_tx, reactor_tx.clone(), skylight_tx);
+                Executor::run(async move {
+                    tokio::join!(reactor.run(events, reactor_tx), window_server.run(ws_rx),);
+                });
             })
             .unwrap();
-        events_tx
     }
 
     pub fn new(

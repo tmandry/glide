@@ -17,7 +17,7 @@ use glide_wm::actor::notification_center::NotificationCenter;
 use glide_wm::actor::reactor::{self, Reactor};
 use glide_wm::actor::server::MessageServer;
 use glide_wm::actor::status::Status;
-use glide_wm::actor::window_server::WindowServer;
+use glide_wm::actor::window_server::{self, SkylightWatcher};
 use glide_wm::actor::wm_controller::{self, WmController};
 use glide_wm::actor::{channel, server};
 use glide_wm::config::{Config, restore_file};
@@ -122,14 +122,8 @@ fn main() {
     let (status_tx, status_rx) = channel();
 
     let (group_indicators_tx, group_indicators_rx) = glide_wm::actor::channel();
-    let events_tx = Reactor::spawn(
-        config.clone(),
-        layout,
-        reactor::Record::new(opt.record.as_deref()),
-        mouse_tx.clone(),
-        status_tx.clone(),
-        group_indicators_tx.clone(),
-    );
+    let (events_tx, events_rx) = reactor::channel();
+    let (skylight_tx, skylight_rx) = glide_wm::actor::channel::<window_server::SkylightRequest>();
     let wm_config = wm_controller::Config {
         one_space: opt.one,
         restore_file: restore_file(),
@@ -141,11 +135,25 @@ fn main() {
         wm_config,
         events_tx.clone(),
         mouse_tx.clone(),
-        status_tx,
+        status_tx.clone(),
         ws_tx,
-        group_indicators_tx,
+        group_indicators_tx.clone(),
     );
-    let window_server = WindowServer::new(mtm, wm_controller_tx.clone(), events_tx.clone());
+    let skylight_watcher = SkylightWatcher::new(mtm);
+    Reactor::spawn(
+        config.clone(),
+        layout,
+        reactor::Record::new(opt.record.as_deref()),
+        mouse_tx.clone(),
+        status_tx.clone(),
+        group_indicators_tx,
+        events_tx.clone(),
+        events_rx,
+        wm_controller_tx.clone(),
+        ws_rx,
+        skylight_tx,
+    );
+
     let notification_center =
         NotificationCenter::new(wm_controller_tx.clone(), notification_center_ws_tx);
     let mouse = Mouse::new(config.clone(), events_tx.clone(), mouse_rx);
@@ -169,7 +177,7 @@ fn main() {
             notification_center.watch_for_notifications(),
             mouse.run(),
             status.run(),
-            window_server.run(ws_rx),
+            skylight_watcher.run(skylight_rx),
             dock.run(),
             group_bars.run(),
             message_server.run(),

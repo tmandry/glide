@@ -19,21 +19,19 @@ use crate::sys::window_server::{
 
 pub use crate::actor::app::pid_t;
 
-pub struct WindowServer(Rc<RefCell<State>>);
+// ---------------------------------------------------------------------------
+// WindowServer – off main thread
+// ---------------------------------------------------------------------------
 
-struct State {
-    #[expect(unused)]
-    mtm: MainThreadMarker,
-    connection: SkylightConnection,
-    notifiers: Vec<SkylightNotifier>,
-    weak_self: Weak<RefCell<Self>>,
+/// Actor that takes events from app actors and adds information from the window
+/// server before sending them on to the Reactor.
+pub struct WindowServer {
     screen_cache: ScreenCache,
-    /// Registered windows (for SkyLight destruction tracking).
-    registered_windows: HashMap<WindowServerId, (WindowId, AppThreadHandle)>,
     /// Window server IDs currently visible on screen.
     visible_window_ids: Vec<WindowServerId>,
     wm_tx: wm_controller::Sender,
     reactor_tx: reactor::Sender,
+    skylight_tx: SkylightSender,
 }
 
 #[derive(Debug)]
@@ -63,73 +61,30 @@ pub type Receiver = actor::Receiver<Request>;
 
 impl WindowServer {
     pub fn new(
-        mtm: MainThreadMarker,
         wm_tx: wm_controller::Sender,
         reactor_tx: reactor::Sender,
+        skylight_tx: SkylightSender,
     ) -> Self {
-        Self(Rc::new_cyclic(|weak_self: &Weak<RefCell<State>>| {
-            let mut state = State {
-                mtm,
-                connection: SkylightConnection::default_for_thread(),
-                notifiers: vec![],
-                weak_self: weak_self.clone(),
-                screen_cache: ScreenCache::new(),
-                registered_windows: HashMap::default(),
-                visible_window_ids: vec![],
-                wm_tx,
-                reactor_tx,
-            };
-            state.register_callbacks();
-            RefCell::new(state)
-        }))
-    }
-
-    pub async fn run(self, mut requests_rx: Receiver) {
-        while let Some((_span, request)) = requests_rx.recv().await {
-            let mut state = self.0.borrow_mut();
-            state.on_request(request);
+        Self {
+            screen_cache: ScreenCache::new(),
+            visible_window_ids: vec![],
+            wm_tx,
+            reactor_tx,
+            skylight_tx,
         }
     }
-}
 
-impl State {
-    fn register_callbacks(&mut self) {
-        self.register_callback(kCGSWindowIsTerminated, |this, wsid| {
-            this.on_window_destroyed(wsid)
-        });
-    }
-
-    fn register_callback(&mut self, event: u32, callback: fn(&mut Self, WindowServerId)) {
-        let weak_self = self.weak_self.clone();
-        let expected_event = event;
-        let notifier = self
-            .connection
-            .on_event(event, move |callback_event, data| {
-                if callback_event != expected_event {
-                    return;
-                }
-                let wsid = WindowServerId(u32::from_ne_bytes(
-                    data.try_into().expect("data should be a CGWindowID"),
-                ));
-                let Some(state) = weak_self.upgrade() else {
-                    warn!("could not upgrade state in callback");
-                    return;
-                };
-                callback(&mut state.borrow_mut(), wsid);
-            })
-            .expect("Initializing SkylightNotifier");
-        self.notifiers.push(notifier);
+    pub async fn run(mut self, mut requests_rx: Receiver) {
+        while let Some((_span, request)) = requests_rx.recv().await {
+            self.on_request(request);
+        }
     }
 
     #[instrument(skip(self))]
     fn on_request(&mut self, request: Request) {
         match request {
             Request::RegisterWindow(wsid, wid, tx) => {
-                debug!("Window registered: {wsid:?}");
-                self.registered_windows.insert(wsid, (wid, tx));
-                if let Err(e) = self.connection.add_window(wsid) {
-                    warn!("Failed to update SkylightConnection window list: {e}");
-                }
+                self.skylight_tx.send(SkylightRequest::TrackWindow(wsid, wid, tx));
             }
             Request::ScreenParametersChanged(ns_screens) => {
                 let Some((screens, converter)) = self.screen_cache.update_screen_config(ns_screens)
@@ -182,10 +137,101 @@ impl State {
     fn send_wm_event(&self, event: WmEvent) {
         _ = self.wm_tx.send((Span::current().clone(), event));
     }
+}
+
+// ---------------------------------------------------------------------------
+// SkylightWatcher – main thread only
+// ---------------------------------------------------------------------------
+
+/// Watches for Skylight window-server events. Requires the main thread because
+/// of `SkylightConnection`.
+pub struct SkylightWatcher(Rc<RefCell<SkylightWatcherState>>);
+
+struct SkylightWatcherState {
+    connection: SkylightConnection,
+    notifiers: Vec<SkylightNotifier>,
+    weak_self: Weak<RefCell<Self>>,
+    /// Registered windows (for SkyLight destruction tracking).
+    registered_windows: HashMap<WindowServerId, (WindowId, AppThreadHandle)>,
+}
+
+/// Commands sent from the reactor-thread `WindowServer` to the main-thread
+/// `SkylightWatcher`.
+#[derive(Debug)]
+pub enum SkylightRequest {
+    TrackWindow(WindowServerId, WindowId, AppThreadHandle),
+}
+
+pub type SkylightSender = actor::Sender<SkylightRequest>;
+pub type SkylightReceiver = actor::Receiver<SkylightRequest>;
+
+impl SkylightWatcher {
+    pub fn new(mtm: MainThreadMarker) -> Self {
+        Self(Rc::new_cyclic(
+            |weak_self: &Weak<RefCell<SkylightWatcherState>>| {
+                let mut state = SkylightWatcherState {
+                    connection: SkylightConnection::new(mtm),
+                    notifiers: vec![],
+                    weak_self: weak_self.clone(),
+                    registered_windows: HashMap::default(),
+                };
+                state.register_callbacks();
+                RefCell::new(state)
+            },
+        ))
+    }
+
+    pub async fn run(self, mut commands_rx: SkylightReceiver) {
+        while let Some((_span, command)) = commands_rx.recv().await {
+            let mut state = self.0.borrow_mut();
+            state.on_command(command);
+        }
+    }
+}
+
+impl SkylightWatcherState {
+    fn register_callbacks(&mut self) {
+        self.register_callback(kCGSWindowIsTerminated, |this, wsid| {
+            this.on_window_destroyed(wsid)
+        });
+    }
+
+    fn register_callback(&mut self, event: u32, callback: fn(&mut Self, WindowServerId)) {
+        let weak_self = self.weak_self.clone();
+        let expected_event = event;
+        let notifier = self
+            .connection
+            .on_event(event, move |callback_event, data| {
+                if callback_event != expected_event {
+                    return;
+                }
+                let wsid = WindowServerId(u32::from_ne_bytes(
+                    data.try_into().expect("data should be a CGWindowID"),
+                ));
+                let Some(state) = weak_self.upgrade() else {
+                    warn!("could not upgrade state in callback");
+                    return;
+                };
+                callback(&mut state.borrow_mut(), wsid);
+            })
+            .expect("Initializing SkylightNotifier");
+        self.notifiers.push(notifier);
+    }
+
+    fn on_command(&mut self, command: SkylightRequest) {
+        match command {
+            SkylightRequest::TrackWindow(wsid, wid, tx) => {
+                debug!("Window registered: {wsid:?}");
+                self.registered_windows.insert(wsid, (wid, tx));
+                if let Err(e) = self.connection.add_window(wsid) {
+                    warn!("Failed to update SkylightConnection window list: {e}");
+                }
+            }
+        }
+    }
 
     fn on_window_destroyed(&mut self, wsid: WindowServerId) {
         debug!("Window destroyed: {wsid:?}");
-        self.update_visible_window_ids();
         let Some((wid, tx)) = self.registered_windows.remove(&wsid) else {
             return;
         };
