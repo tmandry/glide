@@ -8,6 +8,7 @@ use objc2::MainThreadMarker;
 use tracing::{Span, debug, instrument, warn};
 
 use crate::actor::app::{self, AppThreadHandle, Quiet, WindowId, WindowInfo};
+use crate::actor::reactor::Event;
 use crate::actor::wm_controller::{self, WmEvent};
 use crate::actor::{self, reactor};
 use crate::collections::HashMap;
@@ -54,6 +55,11 @@ pub enum Request {
     ApplicationMainWindowChanged(pid_t, Option<WindowId>, Quiet),
     /// A window was minimized or unminimized.
     WindowVisibilityChanged(WindowId),
+    /// Reactor event passthrough.
+    ///
+    /// All reactor events go through us so they reach the reactor in the
+    /// correct order with respect to the other events above.
+    ReactorEvent(Event),
 }
 
 pub type Sender = actor::Sender<Request>;
@@ -75,7 +81,8 @@ impl WindowServer {
     }
 
     pub async fn run(mut self, mut requests_rx: Receiver) {
-        while let Some((_span, request)) = requests_rx.recv().await {
+        while let Some((span, request)) = requests_rx.recv().await {
+            let _span = span.entered();
             self.on_request(request);
         }
     }
@@ -112,21 +119,16 @@ impl WindowServer {
             Request::WindowCreated(wid, info, mouse_state) => {
                 self.update_visible_window_ids();
                 let ws_info = info.sys_id.and_then(sys_ws::get_window);
-                self.reactor_tx.send(reactor::Event::WindowCreated(
-                    wid,
-                    info,
-                    ws_info,
-                    mouse_state,
-                ));
+                self.reactor_tx.send(Event::WindowCreated(wid, info, ws_info, mouse_state));
             }
             Request::ApplicationMainWindowChanged(pid, wid, quiet) => {
                 self.update_visible_window_ids();
-                self.reactor_tx
-                    .send(reactor::Event::ApplicationMainWindowChanged(pid, wid, quiet));
+                self.reactor_tx.send(Event::ApplicationMainWindowChanged(pid, wid, quiet));
             }
             Request::WindowVisibilityChanged(_window_id) => {
                 self.update_visible_window_ids();
             }
+            Request::ReactorEvent(event) => self.reactor_tx.send(event),
         }
     }
 

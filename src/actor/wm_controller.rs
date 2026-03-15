@@ -319,13 +319,7 @@ impl WmController {
             }
             self.login_window_pid = Some(pid);
         }
-        actor::app::spawn_app_thread(
-            pid,
-            info,
-            self.events_tx.clone(),
-            self.ws_tx.clone(),
-            startup.clone(),
-        );
+        actor::app::spawn_app_thread(pid, info, self.ws_tx.clone(), startup.clone());
     }
 
     fn get_focused_space(&self) -> Option<SpaceId> {

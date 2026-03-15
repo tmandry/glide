@@ -46,7 +46,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 
-use crate::actor::reactor::{self, Event, Requested, TransactionId};
+use crate::actor::reactor::{Event, Requested, TransactionId};
 use crate::actor::{window_server, wm_controller};
 use crate::collections::HashMap;
 use crate::sys::app::{AXUIElementExt, NSRunningApplicationExt, ProcessInfo};
@@ -162,13 +162,12 @@ pub enum Quiet {
 pub fn spawn_app_thread(
     pid: pid_t,
     info: AppInfo,
-    events_tx: reactor::Sender,
     ws_tx: window_server::Sender,
     startup: Option<wm_controller::StartupToken>,
 ) {
     thread::Builder::new()
         .name(format!("{}({pid})", info.bundle_id.as_deref().unwrap_or("")))
-        .spawn(move || app_thread_main(pid, info, events_tx, ws_tx, startup))
+        .spawn(move || app_thread_main(pid, info, ws_tx, startup))
         .unwrap();
 }
 
@@ -178,7 +177,6 @@ struct State {
     running_app: Retained<NSRunningApplication>,
     app: AXUIElement,
     observer: Observer,
-    events_tx: reactor::Sender,
     ws_tx: window_server::Sender,
     requests_tx: WeakUnboundedSender<(Span, Request)>,
     windows: HashMap<WindowId, WindowState>,
@@ -343,16 +341,18 @@ impl State {
 
         // Send the ApplicationLaunched event.
         if self
-            .events_tx
-            .try_send(Event::ApplicationLaunched {
-                pid: self.pid,
-                handle,
-                info,
-                is_frontmost: self.is_frontmost,
-                main_window: self.main_window,
-                visible_windows: windows,
-                window_server_info,
-            })
+            .ws_tx
+            .try_send(window_server::Request::ReactorEvent(
+                Event::ApplicationLaunched {
+                    pid: self.pid,
+                    handle,
+                    info,
+                    is_frontmost: self.is_frontmost,
+                    main_window: self.main_window,
+                    visible_windows: windows,
+                    window_server_info,
+                },
+            ))
             .is_err()
         {
             debug!(pid = ?self.pid, "Failed to send ApplicationLaunched event, exiting thread");
@@ -1008,7 +1008,7 @@ impl State {
     }
 
     fn send_event(&self, event: Event) {
-        self.events_tx.send(event);
+        self.ws_tx.send(window_server::Request::ReactorEvent(event));
     }
 
     fn send_ws_request(&self, request: window_server::Request) {
@@ -1064,7 +1064,6 @@ impl State {
 fn app_thread_main(
     pid: pid_t,
     info: AppInfo,
-    events_tx: reactor::Sender,
     ws_tx: window_server::Sender,
     startup: Option<wm_controller::StartupToken>,
 ) {
@@ -1106,7 +1105,6 @@ fn app_thread_main(
         bundle_id: info.bundle_id.clone(),
         app: app.clone(),
         observer,
-        events_tx,
         ws_tx,
         requests_tx: requests_tx.downgrade(),
         windows: HashMap::default(),
