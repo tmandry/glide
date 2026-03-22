@@ -20,6 +20,12 @@ use crate::sys::window_server::{
     kCGSWindowIsTerminated,
 };
 
+/// CGWindowLevel values for windows we care about. Everything else (e.g.
+/// status bar items, screensavers, system overlays) is filtered out early.
+const LAYER_NORMAL: i32 = 0; // kCGNormalWindowLevel
+const LAYER_FLOATING: i32 = 3; // kCGFloatingWindowLevel
+const LAYER_STATUS: i32 = 8; // kCGStatusWindowLevel (used by some panels)
+
 // ---------------------------------------------------------------------------
 // WindowServer – off main thread
 // ---------------------------------------------------------------------------
@@ -135,7 +141,10 @@ impl WindowServer {
     }
 
     fn get_windows_on_screen(&mut self) -> WindowsOnScreen {
-        let windows = sys_ws::get_visible_windows_with_layer(None);
+        let windows: Vec<_> = sys_ws::get_visible_windows_with_layer(None)
+            .into_iter()
+            .filter(|w| matches!(w.layer, LAYER_NORMAL | LAYER_FLOATING | LAYER_STATUS))
+            .collect();
         self.visible_window_ids = windows.iter().map(|w| w.id).collect();
         WindowsOnScreen::new(windows)
     }
