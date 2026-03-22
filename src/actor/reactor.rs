@@ -358,7 +358,7 @@ impl Reactor {
                 }
                 _ = tick_timer.next(), if animating => {
                     self.layout.tick_viewports();
-                    self.update_layout(None, true);
+                    self.update_layout(&[], true);
                     if self.layout.has_active_scroll_animation() {
                         tick_timer.set_next_fire(tick_interval);
                     }
@@ -381,7 +381,7 @@ impl Reactor {
     fn handle_event(&mut self, event: Event) {
         self.record.on_event(&event);
         self.log_event(&event);
-        let mut animation_focus_wid = None;
+        let mut animation_focus_wids: Vec<WindowId> = Vec::new();
         let mut is_resize = false;
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {
@@ -447,7 +447,7 @@ impl Reactor {
                     && let Some(space) = self.best_space_for_window(&window.frame_monotonic)
                     && let Some(app) = self.apps.get(&wid.pid)
                 {
-                    animation_focus_wid = Some(wid);
+                    animation_focus_wids.push(wid);
                     let info = LayoutWindowInfo {
                         bundle_id: app.info.bundle_id.clone(),
                         title: window.title.clone().into(),
@@ -584,13 +584,13 @@ impl Reactor {
                 if let Some(&screen) = self.active_screen() {
                     if screen.space.is_some() {
                         if self.layout.update_interactive_resize(point, screen.frame) {
-                            self.update_layout(None, true);
+                            self.update_layout(&[], true);
                         } else if self.layout.update_interactive_move(
                             point,
                             screen.frame,
                             &self.config,
                         ) {
-                            self.update_layout(None, false);
+                            self.update_layout(&[], false);
                         }
                     }
                 }
@@ -696,7 +696,7 @@ impl Reactor {
             self.update_active_screen();
         }
         if !self.in_drag {
-            self.update_layout(animation_focus_wid, is_resize);
+            self.update_layout(&animation_focus_wids, is_resize);
         }
     }
 
@@ -909,7 +909,7 @@ impl Reactor {
     }
 
     #[instrument(skip(self), fields())]
-    pub fn update_layout(&mut self, new_wid: Option<WindowId>, skip_anim: bool) {
+    pub fn update_layout(&mut self, new_wids: &[WindowId], skip_anim: bool) {
         let main_window = self.main_window();
         trace!(?main_window);
         let mut anim = Animation::new();
@@ -939,7 +939,7 @@ impl Reactor {
                 };
                 let txid = window.next_txid();
                 trace!(?wid, ?current_frame, ?target_frame);
-                let is_new = Some(wid) == new_wid;
+                let is_new = new_wids.contains(&wid);
                 anim.add_window(&app.handle, wid, current_frame, target_frame, is_new, txid);
                 window.frame_monotonic = target_frame;
             }
