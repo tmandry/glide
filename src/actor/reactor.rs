@@ -74,7 +74,17 @@ pub enum Event {
     /// There is one SpaceId per screen in the last ScreenParametersChanged
     /// event. `None` in the SpaceId vec disables managing windows on that
     /// screen until the next space change.
-    SpaceChanged(Vec<Option<SpaceId>>),
+    ///
+    /// WindowsOnScreen is included to avoid doing two updates in rapid
+    /// succession. If there are windows we know were destroyed in the new
+    /// space we'll start rearranging things, only to do so again if we
+    /// discover newly added windows.
+    ///
+    /// TODO: In the future WindowsOnScreenUpdated should include a mapping
+    /// of SpaceId to window list, and Reactor would maintain a list per
+    /// space. Then we can update the windows on screen for the space before
+    /// sending SpaceChanged.
+    SpaceChanged(Vec<Option<SpaceId>>, WindowsOnScreen),
 
     /// All running apps at launch have been registered.
     StartupComplete,
@@ -532,7 +542,8 @@ impl Reactor {
                 self.group_indicators_tx
                     .send(group_bars::Event::ScreenParametersChanged(spaces, converter));
             }
-            Event::SpaceChanged(spaces) => {
+            Event::SpaceChanged(spaces, on_screen) => {
+                self.update_complete_window_server_info(on_screen);
                 if spaces.len() != self.screens.len() {
                     warn!(
                         "Ignoring space change event: we have {} spaces, but {} screens",
@@ -1183,11 +1194,10 @@ pub mod tests {
         reactor.handle_event(Event::ApplicationGloballyActivated(1));
         reactor.handle_events(apps.simulate_events());
 
-        reactor.handle_event(Event::SpaceChanged(vec![Some(SpaceId::new(1))]));
-        reactor.handle_event(Event::WindowsOnScreenUpdated {
-            pid: None,
-            on_screen: WindowsOnScreen::new(ws_info),
-        });
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(SpaceId::new(1))],
+            WindowsOnScreen::new(ws_info),
+        ));
         reactor.handle_events(apps.simulate_events());
         assert_eq!(
             reactor.layout.selected_window(SpaceId::new(1)),

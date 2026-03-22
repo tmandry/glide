@@ -31,6 +31,7 @@ use crate::collections::HashSet;
 use crate::sys;
 use crate::sys::event::HotkeyManager;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
+use crate::sys::window_server::WindowsOnScreen;
 
 #[derive(Debug)]
 pub enum WmEvent {
@@ -241,7 +242,10 @@ impl WmController {
                     // reactor. This will be corrected when we get the
                     // ExposeExited event or switch back to the space again, but
                     // it adds visual noise so we try to avoid it.
-                    self.send_event(Event::SpaceChanged(self.active_spaces()));
+                    self.send_event(Event::SpaceChanged(
+                        self.active_spaces(),
+                        WindowsOnScreen::default(),
+                    ));
                 }
                 self.status_tx.send(status::Event::SpaceChanged(spaces));
                 self.status_tx.send(status::Event::SpaceEnabledChanged(
@@ -378,7 +382,10 @@ impl WmController {
     }
 
     fn send_space_changed(&mut self) {
-        self.send_event(reactor::Event::SpaceChanged(self.active_spaces()));
+        self.send_event(reactor::Event::SpaceChanged(
+            self.active_spaces(),
+            WindowsOnScreen::default(),
+        ));
     }
 
     fn ensure_hotkey_registration(&mut self) {
