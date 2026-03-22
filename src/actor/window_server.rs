@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::cell::RefCell;
+use std::mem;
 use std::rc::{Rc, Weak};
 
 use objc2::MainThreadMarker;
@@ -104,7 +105,6 @@ impl WindowServer {
                 else {
                     return;
                 };
-                let on_screen = self.get_windows_on_screen();
                 let event = WmEvent::ScreenParametersChanged {
                     screens: screens.iter().map(|s| s.id).collect(),
                     frames: screens.iter().map(|s| s.visible_frame).collect(),
@@ -113,30 +113,37 @@ impl WindowServer {
                     scale_factors: screens.iter().map(|s| s.scale_factor).collect(),
                 };
                 self.send_wm_event(event);
-                self.reactor_tx.send(Event::WindowsOnScreenUpdated { pid: None, on_screen });
+                self.send_windows_on_screen_if_changed(None);
             }
             Request::SpaceChanged => {
                 let spaces = self.screen_cache.get_screen_spaces();
-                let on_screen = self.get_windows_on_screen();
                 self.send_wm_event(WmEvent::SpaceChanged(spaces));
-                self.reactor_tx.send(Event::WindowsOnScreenUpdated { pid: None, on_screen });
+                self.send_windows_on_screen_if_changed(None);
             }
             Request::WindowCreated(wid, info, mouse_state) => {
-                let on_screen = self.get_windows_on_screen();
                 let pid = wid.pid;
                 self.reactor_tx.send(Event::WindowCreated(wid, info, mouse_state));
-                self.reactor_tx
-                    .send(Event::WindowsOnScreenUpdated { pid: Some(pid), on_screen });
+                self.send_windows_on_screen_if_changed(Some(pid));
                 self.reactor_tx.send(Event::WindowBecameVisible(wid));
             }
             Request::ApplicationMainWindowChanged(pid, wid, quiet) => {
                 self.update_visible_window_ids();
                 self.reactor_tx.send(Event::ApplicationMainWindowChanged(pid, wid, quiet));
             }
-            Request::WindowVisibilityChanged(_window_id) => {
-                self.update_visible_window_ids();
+            Request::WindowVisibilityChanged(window_id) => {
+                self.send_windows_on_screen_if_changed(Some(window_id.pid));
             }
             Request::ReactorEvent(event) => self.reactor_tx.send(event),
+        }
+    }
+
+    /// Queries the window server for visible windows and sends a
+    /// `WindowsOnScreenUpdated` event if the list changed.
+    fn send_windows_on_screen_if_changed(&mut self, pid: Option<pid_t>) {
+        let prev = mem::take(&mut self.visible_window_ids);
+        let on_screen = self.get_windows_on_screen();
+        if self.visible_window_ids != prev {
+            self.reactor_tx.send(Event::WindowsOnScreenUpdated { pid, on_screen });
         }
     }
 
