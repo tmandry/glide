@@ -17,7 +17,7 @@ use crate::actor::reactor;
 use crate::config::Config;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::{WindowServerId, WindowServerInfo, WindowsOnScreen};
 
 impl Reactor {
     pub fn new_for_test(layout: LayoutManager) -> Reactor {
@@ -129,7 +129,7 @@ impl Apps {
             handle,
             is_frontmost,
             main_window,
-            window_server_info: if with_ws_info {
+            on_screen: WindowsOnScreen::new(if with_ws_info {
                 windows
                     .iter()
                     .map(|info| WindowServerInfo {
@@ -141,7 +141,7 @@ impl Apps {
                     .collect()
             } else {
                 Default::default()
-            },
+            }),
             visible_windows: (1..).map(|idx| WindowId::new(pid, idx)).zip(windows).collect(),
         }]
     }

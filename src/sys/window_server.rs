@@ -77,6 +77,20 @@ pub struct WindowServerInfo {
     pub frame: CGRect,
 }
 
+/// A snapshot of windows currently visible on screen from the window server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowsOnScreen {
+    pub visible: Vec<WindowServerId>,
+    pub info: Vec<WindowServerInfo>,
+}
+
+impl WindowsOnScreen {
+    pub fn new(info: Vec<WindowServerInfo>) -> Self {
+        let visible = info.iter().map(|w| w.id).collect();
+        Self { visible, info }
+    }
+}
+
 /// Returns a list of windows visible on the screen, in order starting with the
 /// frontmost. Excludes desktop elements.
 pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInfo> {

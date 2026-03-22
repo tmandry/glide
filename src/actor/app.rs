@@ -334,7 +334,10 @@ impl State {
             }
             windows.push((wid, info));
         }
-        let window_server_info = crate::sys::window_server::get_windows(&wsids);
+        let on_screen = {
+            let info = crate::sys::window_server::get_windows(&wsids);
+            crate::sys::window_server::WindowsOnScreen::new(info)
+        };
 
         self.main_window = self.app.main_window().ok().and_then(|w| self.id(&w).ok());
         self.is_frontmost = self.app.frontmost().map(|b| b.into()).unwrap_or(false);
@@ -350,7 +353,7 @@ impl State {
                     is_frontmost: self.is_frontmost,
                     main_window: self.main_window,
                     visible_windows: windows,
-                    window_server_info,
+                    on_screen,
                 },
             ))
             .is_err()

@@ -7,6 +7,7 @@ use std::rc::{Rc, Weak};
 use objc2::MainThreadMarker;
 use tracing::{Span, debug, instrument, warn};
 
+pub use crate::actor::app::pid_t;
 use crate::actor::app::{self, AppThreadHandle, Quiet, WindowId, WindowInfo};
 use crate::actor::reactor::Event;
 use crate::actor::wm_controller::{self, WmEvent};
@@ -15,10 +16,9 @@ use crate::collections::HashMap;
 use crate::sys::event::MouseState;
 use crate::sys::screen::{NSScreenInfo, ScreenCache};
 use crate::sys::window_server::{
-    self as sys_ws, SkylightConnection, SkylightNotifier, WindowServerId, kCGSWindowIsTerminated,
+    self as sys_ws, SkylightConnection, SkylightNotifier, WindowServerId, WindowsOnScreen,
+    kCGSWindowIsTerminated,
 };
-
-pub use crate::actor::app::pid_t;
 
 // ---------------------------------------------------------------------------
 // WindowServer – off main thread
@@ -98,23 +98,21 @@ impl WindowServer {
                 else {
                     return;
                 };
-                let windows = sys_ws::get_visible_windows_with_layer(None);
-                self.visible_window_ids = windows.iter().map(|w| w.id).collect();
+                let on_screen = self.get_windows_on_screen();
                 let event = WmEvent::ScreenParametersChanged {
                     screens: screens.iter().map(|s| s.id).collect(),
                     frames: screens.iter().map(|s| s.visible_frame).collect(),
                     converter,
                     spaces: self.screen_cache.get_screen_spaces(),
                     scale_factors: screens.iter().map(|s| s.scale_factor).collect(),
-                    windows,
+                    on_screen,
                 };
                 self.send_wm_event(event);
             }
             Request::SpaceChanged => {
                 let spaces = self.screen_cache.get_screen_spaces();
-                let windows = sys_ws::get_visible_windows_with_layer(None);
-                self.visible_window_ids = windows.iter().map(|w| w.id).collect();
-                self.send_wm_event(WmEvent::SpaceChanged(spaces, windows));
+                let on_screen = self.get_windows_on_screen();
+                self.send_wm_event(WmEvent::SpaceChanged(spaces, on_screen));
             }
             Request::WindowCreated(wid, info, mouse_state) => {
                 self.update_visible_window_ids();
@@ -131,6 +129,12 @@ impl WindowServer {
             }
             Request::ReactorEvent(event) => self.reactor_tx.send(event),
         }
+    }
+
+    fn get_windows_on_screen(&mut self) -> WindowsOnScreen {
+        let windows = sys_ws::get_visible_windows_with_layer(None);
+        self.visible_window_ids = windows.iter().map(|w| w.id).collect();
+        WindowsOnScreen::new(windows)
     }
 
     fn update_visible_window_ids(&mut self) {

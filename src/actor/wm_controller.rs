@@ -31,7 +31,7 @@ use crate::collections::HashSet;
 use crate::sys;
 use crate::sys::event::HotkeyManager;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
-use crate::sys::window_server::WindowServerInfo;
+use crate::sys::window_server::WindowsOnScreen;
 
 #[derive(Debug)]
 pub enum WmEvent {
@@ -41,14 +41,14 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
-    SpaceChanged(Vec<Option<SpaceId>>, Vec<WindowServerInfo>),
+    SpaceChanged(Vec<Option<SpaceId>>, WindowsOnScreen),
     ScreenParametersChanged {
         screens: Vec<ScreenId>,
         frames: Vec<CGRect>,
         spaces: Vec<Option<SpaceId>>,
         scale_factors: Vec<f64>,
         converter: CoordinateConverter,
-        windows: Vec<WindowServerInfo>,
+        on_screen: WindowsOnScreen,
     },
     ExposeEntered,
     ExposeExited,
@@ -197,7 +197,7 @@ impl WmController {
                     // Disable all spaces to prevent errors.
                     info!("Login window activated");
                     self.login_window_active = true;
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                    self.send_space_changed();
                 }
                 self.send_event(Event::ApplicationGloballyActivated(pid));
             }
@@ -207,7 +207,7 @@ impl WmController {
                     // the set of visible windows on screen and their positions.
                     info!("Login window deactivated");
                     self.login_window_active = false;
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                    self.send_space_changed();
                 }
                 self.send_event(Event::ApplicationGloballyDeactivated(pid));
             }
@@ -220,14 +220,14 @@ impl WmController {
                 scale_factors,
                 spaces,
                 converter,
-                windows,
+                on_screen,
             } => {
                 self.cur_screen_id = ids;
                 self.handle_space_changed(spaces.clone());
                 self.send_event(Event::ScreenParametersChanged {
                     frames: frames.clone(),
                     spaces: self.active_spaces(),
-                    windows,
+                    on_screen,
                     converter,
                     scale_factors,
                 });
@@ -237,7 +237,7 @@ impl WmController {
                 ));
                 self.mouse_tx.send(mouse::Request::ScreenParametersChanged(frames, converter));
             }
-            SpaceChanged(spaces, windows) => {
+            SpaceChanged(spaces, on_screen) => {
                 self.handle_space_changed(spaces.clone());
                 if !self.expose_active {
                     // During expose windows from all spaces are returned to
@@ -245,7 +245,7 @@ impl WmController {
                     // reactor. This will be corrected when we get the
                     // ExposeExited event or switch back to the space again, but
                     // it adds visual noise so we try to avoid it.
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), windows));
+                    self.send_event(Event::SpaceChanged(self.active_spaces(), Some(on_screen)));
                 }
                 self.status_tx.send(status::Event::SpaceChanged(spaces));
                 self.status_tx.send(status::Event::SpaceEnabledChanged(
@@ -260,7 +260,7 @@ impl WmController {
                 // We just need the reactor to update the list of visible
                 // windows for the current space. Everything else is handled by
                 // the SpaceChanged event.
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.send_space_changed();
             }
             Command(Wm(ToggleSpaceActivated)) => {
                 let Some(space) = self.get_focused_space() else { return };
@@ -277,7 +277,7 @@ impl WmController {
                 }
                 self.status_tx
                     .send(status::Event::SpaceEnabledChanged(self.is_space_enabled(space)));
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.send_space_changed();
             }
             Command(Wm(ToggleGlobalEnabled)) => {
                 self.is_globally_enabled = !self.is_globally_enabled;
@@ -289,7 +289,7 @@ impl WmController {
                 self.status_tx.send(status::Event::SpaceEnabledChanged(
                     self.is_current_space_enabled(),
                 ));
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.send_space_changed();
             }
             Command(Wm(Exec(cmd))) => {
                 self.exec_cmd(cmd);
@@ -381,6 +381,10 @@ impl WmController {
         self.events_tx.send(event);
     }
 
+    fn send_space_changed(&mut self) {
+        self.send_event(reactor::Event::SpaceChanged(self.active_spaces(), None));
+    }
+
     fn ensure_hotkey_registration(&mut self) {
         let all_spaces = !self.config.one_space;
         let active = self.starting_space.is_some()
@@ -413,13 +417,6 @@ impl WmController {
     fn unregister_hotkeys(&mut self) {
         debug!("unregister_hotkeys");
         self.hotkeys = None;
-    }
-
-    fn get_windows(&self) -> Vec<WindowServerInfo> {
-        #[cfg(not(test))]
-        return sys::window_server::get_visible_windows_with_layer(None);
-        #[cfg(test)]
-        vec![]
     }
 
     fn exec_cmd(&self, #[allow(unused)] cmd_args: ExecCmd) {
