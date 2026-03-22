@@ -11,9 +11,9 @@ use accessibility::AXUIElement;
 use anyhow::{Context, bail};
 use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::ns_string;
-use tracing::{Span, error, warn};
+use tracing::error;
 
-use crate::actor::wm_controller::{self, WmEvent};
+use crate::actor::space_manager;
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::observer::Observer;
 
@@ -23,7 +23,7 @@ pub struct Dock {
 }
 
 struct State {
-    wm_tx: wm_controller::Sender,
+    sm_tx: space_manager::Sender,
 }
 
 #[expect(non_upper_case_globals)]
@@ -43,18 +43,18 @@ const NOTIFICATIONS: &[&str] = &[
 ];
 
 impl Dock {
-    pub fn new(wm_tx: wm_controller::Sender) -> Self {
-        let observer = match Self::init(wm_tx) {
+    pub fn new(sm_tx: space_manager::Sender) -> Self {
+        let observer = match Self::init(sm_tx) {
             Ok(observer) => Some(observer),
             Err(e) => {
-                warn!("Failed to start dock actor: {e}");
+                tracing::warn!("Failed to start dock actor: {e}");
                 None
             }
         };
         Self { observer }
     }
 
-    fn init(wm_tx: wm_controller::Sender) -> anyhow::Result<Observer> {
+    fn init(sm_tx: space_manager::Sender) -> anyhow::Result<Observer> {
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!(
             "com.apple.dock"
         ))
@@ -67,7 +67,7 @@ impl Dock {
         };
         let pid = app.pid();
 
-        let state = Rc::new(RefCell::new(State { wm_tx }));
+        let state = Rc::new(RefCell::new(State { sm_tx }));
         let observer = Observer::new(pid)
             .context("Creating observer for Dock")?
             .install(move |_elem, notif| state.borrow_mut().handle_notification(notif));
@@ -92,10 +92,10 @@ impl State {
         #[expect(non_upper_case_globals)]
         match notif {
             kAXExposeShowAllWindows | kAXExposeShowFrontWindows | kAXExposeShowDesktop => {
-                _ = self.wm_tx.send((Span::current(), WmEvent::ExposeEntered));
+                self.sm_tx.send(space_manager::Event::ExposeActive(true));
             }
             kAXExposeExit => {
-                _ = self.wm_tx.send((Span::current(), WmEvent::ExposeExited));
+                self.sm_tx.send(space_manager::Event::ExposeActive(false));
             }
             _ => {
                 error!("Unhandled notification {notif:?} from Dock");

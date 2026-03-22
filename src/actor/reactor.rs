@@ -281,8 +281,10 @@ impl From<WindowInfo> for WindowState {
 impl Reactor {
     /// Spawn the reactor on a dedicated thread, co-running a `WindowServer` in
     /// the same executor. Use [`channel()`] to create reactor_tx.
+    #[expect(clippy::too_many_arguments)]
     pub fn spawn(
         config: Arc<Config>,
+        one_space: bool,
         layout: LayoutManager,
         record: Record,
         mouse_tx: mouse::Sender,
@@ -291,18 +293,30 @@ impl Reactor {
         reactor_tx: Sender,
         events: Receiver,
         wm_tx: wm_controller::Sender,
+        ws_tx: window_server::Sender,
         ws_rx: window_server::Receiver,
+        sm_tx: space_manager::Sender,
+        sm_rx: space_manager::Receiver,
         skylight_tx: window_server::SkylightSender,
     ) {
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
-                let mut reactor = Reactor::new(config, layout, record, group_indicators_tx);
-                reactor.mouse_tx.replace(mouse_tx);
-                reactor.status_tx.replace(status_tx);
-                let (sm_tx, sm_rx) = space_manager::channel();
-                let space_manager = SpaceManager::new(reactor_tx.clone());
-                let window_server = window_server::WindowServer::new(wm_tx, sm_tx, skylight_tx);
+                let mut reactor =
+                    Reactor::new(config.clone(), layout, record, group_indicators_tx.clone());
+                reactor.mouse_tx.replace(mouse_tx.clone());
+                reactor.status_tx.replace(status_tx.clone());
+                let space_manager = SpaceManager::new(
+                    one_space,
+                    config,
+                    reactor_tx.clone(),
+                    ws_tx,
+                    wm_tx,
+                    status_tx,
+                    group_indicators_tx,
+                    mouse_tx,
+                );
+                let window_server = window_server::WindowServer::new(sm_tx, skylight_tx);
                 Executor::run(async move {
                     tokio::join!(
                         reactor.run(events, reactor_tx),

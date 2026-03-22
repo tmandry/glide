@@ -74,14 +74,16 @@ The name "reactor" is a play on "reactive". It is responsible for synchronizing 
 Events flow inward to the Reactor from all sources, and requests flow outward to app threads:
 
 ```
-NotificationCenter ─(focused/terminated app)───→ WmController ──→ Reactor
+NotificationCenter ─(focused/terminated app)→ WmController → SpaceManager → Reactor
                    ─(launched app)─→ spawn App thread
-                   ─(screen/space)─→ WindowServer ─→ WmController ──→ Reactor
-Dock ───────────────────────────────────────────────→ WmController ──→ Reactor
-Mouse (CGEventTap) ───────────────────────────────────────────────────→ Reactor
-App threads (per-process) ──────────→ WindowServer ──────────────────→ Reactor
-Hotkeys ────────────────────────────────────────────→ WmController ──→ Reactor
-CLI (CFMessagePort) ──→ Server ────────────────────→ WmController ──→ Reactor
+                   ─(screen/space)─→ WindowServer ───→ SpaceManager ──→ Reactor
+Dock ─────────────────────────────────────────────────→ SpaceManager ──→ Reactor
+Mouse (CGEventTap) ─────────────────────────────────────────────────────→ Reactor
+App threads (per-process) ─────────→ WindowServer ───→ SpaceManager ──→ Reactor
+Hotkeys ────────────────────────────→ WmController ──→ SpaceManager ──→ Reactor
+CLI (CFMessagePort) ──→ Server ────→ WmController ──→ SpaceManager ──→ Reactor
+SpaceManager ─(HotkeysActive)───────→ WmController
+             ─(RequestSpaceRefresh)→ WindowServer
 ```
 
 The Reactor produces a cleaned up stream of events for the LayoutManager, which returns desired window frames (position and size), raises, and UI state. The reactor turns these into requests for the App threads (set window frame, raise, begin/end animation), the RaiseManager, GroupBars, and Status actors.
