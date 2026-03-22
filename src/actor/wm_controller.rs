@@ -31,7 +31,6 @@ use crate::collections::HashSet;
 use crate::sys;
 use crate::sys::event::HotkeyManager;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
-use crate::sys::window_server::WindowsOnScreen;
 
 #[derive(Debug)]
 pub enum WmEvent {
@@ -41,14 +40,13 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
-    SpaceChanged(Vec<Option<SpaceId>>, WindowsOnScreen),
+    SpaceChanged(Vec<Option<SpaceId>>),
     ScreenParametersChanged {
         screens: Vec<ScreenId>,
         frames: Vec<CGRect>,
         spaces: Vec<Option<SpaceId>>,
         scale_factors: Vec<f64>,
         converter: CoordinateConverter,
-        on_screen: WindowsOnScreen,
     },
     ExposeEntered,
     ExposeExited,
@@ -220,14 +218,12 @@ impl WmController {
                 scale_factors,
                 spaces,
                 converter,
-                on_screen,
             } => {
                 self.cur_screen_id = ids;
                 self.handle_space_changed(spaces.clone());
                 self.send_event(Event::ScreenParametersChanged {
                     frames: frames.clone(),
                     spaces: self.active_spaces(),
-                    on_screen,
                     converter,
                     scale_factors,
                 });
@@ -237,7 +233,7 @@ impl WmController {
                 ));
                 self.mouse_tx.send(mouse::Request::ScreenParametersChanged(frames, converter));
             }
-            SpaceChanged(spaces, on_screen) => {
+            SpaceChanged(spaces) => {
                 self.handle_space_changed(spaces.clone());
                 if !self.expose_active {
                     // During expose windows from all spaces are returned to
@@ -245,7 +241,7 @@ impl WmController {
                     // reactor. This will be corrected when we get the
                     // ExposeExited event or switch back to the space again, but
                     // it adds visual noise so we try to avoid it.
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), Some(on_screen)));
+                    self.send_event(Event::SpaceChanged(self.active_spaces()));
                 }
                 self.status_tx.send(status::Event::SpaceChanged(spaces));
                 self.status_tx.send(status::Event::SpaceEnabledChanged(
@@ -382,7 +378,7 @@ impl WmController {
     }
 
     fn send_space_changed(&mut self) {
-        self.send_event(reactor::Event::SpaceChanged(self.active_spaces(), None));
+        self.send_event(reactor::Event::SpaceChanged(self.active_spaces()));
     }
 
     fn ensure_hotkey_registration(&mut self) {

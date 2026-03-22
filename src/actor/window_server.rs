@@ -105,19 +105,22 @@ impl WindowServer {
                     converter,
                     spaces: self.screen_cache.get_screen_spaces(),
                     scale_factors: screens.iter().map(|s| s.scale_factor).collect(),
-                    on_screen,
                 };
                 self.send_wm_event(event);
+                self.reactor_tx.send(Event::WindowsOnScreenUpdated { pid: None, on_screen });
             }
             Request::SpaceChanged => {
                 let spaces = self.screen_cache.get_screen_spaces();
                 let on_screen = self.get_windows_on_screen();
-                self.send_wm_event(WmEvent::SpaceChanged(spaces, on_screen));
+                self.send_wm_event(WmEvent::SpaceChanged(spaces));
+                self.reactor_tx.send(Event::WindowsOnScreenUpdated { pid: None, on_screen });
             }
             Request::WindowCreated(wid, info, mouse_state) => {
-                self.update_visible_window_ids();
-                let ws_info = info.sys_id.and_then(sys_ws::get_window);
-                self.reactor_tx.send(Event::WindowCreated(wid, info, ws_info, mouse_state));
+                let on_screen = self.get_windows_on_screen();
+                let pid = wid.pid;
+                self.reactor_tx.send(Event::WindowCreated(wid, info, mouse_state));
+                self.reactor_tx
+                    .send(Event::WindowsOnScreenUpdated { pid: Some(pid), on_screen });
                 self.reactor_tx.send(Event::WindowBecameVisible(wid));
             }
             Request::ApplicationMainWindowChanged(pid, wid, quiet) => {
