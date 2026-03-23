@@ -117,6 +117,9 @@ pub enum Event {
         known_visible: Vec<WindowId>,
     },
     WindowCreated(WindowId, WindowInfo, Option<WindowServerInfo>, MouseState),
+
+    // TODO: Consider replacing with WindowsOnScreenUpdated.
+    WindowBecameVisible(WindowId),
     WindowDestroyed(WindowId),
     WindowFrameChanged(
         WindowId,
@@ -430,8 +433,18 @@ impl Reactor {
                 if let Some(info) = ws_info.clone() {
                     self.window_server_info.insert(info.id, info);
                 }
+                if mouse_state == MouseState::Down {
+                    self.in_drag = true;
+                    // Suppress updates while left button is pressed in case
+                    // a drag is in progress.
+                }
+            }
+            Event::WindowBecameVisible(wid) => {
                 if self.window_is_tracked(wid)
-                    && let Some(space) = self.best_space_for_window(&window.frame)
+                    && let Some(window) = self.windows.get(&wid)
+                    && let ws_info =
+                        window.window_server_id.and_then(|id| self.window_server_info.get(&id))
+                    && let Some(space) = self.best_space_for_window(&window.frame_monotonic)
                     && let Some(app) = self.apps.get(&wid.pid)
                 {
                     animation_focus_wid = Some(wid);
@@ -439,15 +452,10 @@ impl Reactor {
                         bundle_id: app.info.bundle_id.clone(),
                         title: window.title.clone().into(),
                         layer: ws_info.map(|i| i.layer),
-                        is_standard: window.is_standard,
+                        is_standard: window.is_ax_standard,
                         is_resizable: window.is_resizable,
                     };
                     self.send_layout_event(LayoutEvent::WindowAdded(space, wid, info));
-                }
-                if mouse_state == MouseState::Down {
-                    self.in_drag = true;
-                    // Suppress updates while left button is pressed in case
-                    // a drag is in progress.
                 }
             }
             Event::WindowDestroyed(wid) => {

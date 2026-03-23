@@ -80,6 +80,7 @@ impl MainWindowTracker {
             | Event::StartupComplete
             | Event::WindowsDiscovered { .. }
             | Event::WindowCreated(..)
+            | Event::WindowBecameVisible(..)
             | Event::WindowDestroyed(..)
             | Event::WindowFrameChanged(..)
             | Event::ScreenParametersChanged { .. }

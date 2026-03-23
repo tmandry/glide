@@ -120,6 +120,7 @@ impl WindowServer {
                 self.update_visible_window_ids();
                 let ws_info = info.sys_id.and_then(sys_ws::get_window);
                 self.reactor_tx.send(Event::WindowCreated(wid, info, ws_info, mouse_state));
+                self.reactor_tx.send(Event::WindowBecameVisible(wid));
             }
             Request::ApplicationMainWindowChanged(pid, wid, quiet) => {
                 self.update_visible_window_ids();
