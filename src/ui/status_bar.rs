@@ -17,11 +17,7 @@ use objc2_foundation::{NSData, NSObject, NSString, ns_string};
 use tracing::{Span, debug, error, warn};
 
 use crate::actor::reactor;
-/// Manages a menu bar icon that displays the current space ID.
-use crate::actor::reactor::{
-    Command, Event as ReactorEvent, ReactorCommand, Sender as ReactorSender,
-};
-use crate::actor::wm_controller::{self, WmCmd};
+use crate::actor::wm_controller::{self, WmCmd, WmCommand, WmEvent};
 use crate::config;
 
 const SAVE_AND_QUIT_TAG: i64 = 1;
@@ -42,7 +38,6 @@ impl StatusIcon {
     pub fn new(
         config: &config::StatusIconExperimental,
         mtm: MainThreadMarker,
-        reactor_tx: ReactorSender,
         wm_tx: wm_controller::Sender,
     ) -> Self {
         let status_bar = NSStatusBar::systemStatusBar();
@@ -60,7 +55,7 @@ impl StatusIcon {
         // This is needed to be able to manually set the menu item state
         menu.setAutoenablesItems(false);
 
-        let menu_handler = MenuHandler::new(mtm, reactor_tx, wm_tx);
+        let menu_handler = MenuHandler::new(mtm, wm_tx);
 
         let space_toggle_ns_title = ns_string!("Enable Space");
         let space_toggle_item = unsafe {
@@ -175,7 +170,6 @@ impl Drop for StatusIcon {
 }
 
 struct MenuHandlerIvars {
-    reactor_tx: reactor::Sender,
     wm_tx: wm_controller::Sender,
 }
 
@@ -193,27 +187,29 @@ define_class!(
                 tag
             };
             debug!("Menu action received with tag: {}", tag);
-            let reactor_tx = &self.ivars().reactor_tx;
             let wm_tx = &self.ivars().wm_tx;
             match tag {
                 SAVE_AND_QUIT_TAG => {
                     debug!("Sending SaveAndExit command");
-                    reactor_tx.send(ReactorEvent::Command(Command::Reactor(
-                        ReactorCommand::SaveAndExit,
-                    )));
+                    let _ = wm_tx.send((
+                        Span::current(),
+                        WmEvent::Command(WmCommand::ReactorCommand(
+                            reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit),
+                        )),
+                    ));
                 }
                 TOGGLE_GLOBAL_TAG => {
                     debug!("Sending ToggleGlobalEnabled command");
                     let _ = wm_tx.send((
                         Span::current(),
-                        wm_controller::WmEvent::Command(wm_controller::WmCommand::Wm(WmCmd::ToggleGlobalEnabled)),
+                        WmEvent::Command(WmCommand::Wm(WmCmd::ToggleGlobalEnabled)),
                     ));
                 }
                 TOGGLE_SPACE_TAG => {
                     debug!("Sending ToggleSpaceActivated command");
                     let _ = wm_tx.send((
                         Span::current(),
-                        wm_controller::WmEvent::Command(wm_controller::WmCommand::Wm(WmCmd::ToggleSpaceActivated)),
+                        WmEvent::Command(WmCommand::Wm(WmCmd::ToggleSpaceActivated)),
                     ));
                 }
                 SHOW_DOCS_TAG => {
@@ -235,13 +231,9 @@ define_class!(
 
 impl MenuHandler {
     /// Creates the parachute icon from the SVG file
-    pub fn new(
-        mtm: MainThreadMarker,
-        reactor_tx: reactor::Sender,
-        wm_tx: wm_controller::Sender,
-    ) -> Retained<Self> {
+    pub fn new(mtm: MainThreadMarker, wm_tx: wm_controller::Sender) -> Retained<Self> {
         let this = Self::alloc(mtm);
-        let this = this.set_ivars(MenuHandlerIvars { reactor_tx, wm_tx });
+        let this = this.set_ivars(MenuHandlerIvars { wm_tx });
         unsafe { msg_send![super(this), init] }
     }
 }

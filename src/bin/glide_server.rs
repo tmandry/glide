@@ -162,13 +162,7 @@ fn main() {
     let notification_center =
         NotificationCenter::new(wm_controller_tx.clone(), notification_center_ws_tx);
     let mouse = Mouse::new(config.clone(), events_tx.clone(), mouse_rx);
-    let status = Status::new(
-        config.clone(),
-        status_rx,
-        mtm,
-        events_tx.clone(),
-        wm_controller_tx.clone(),
-    );
+    let status = Status::new(config.clone(), status_rx, mtm, wm_controller_tx.clone());
     let group_bars = GroupBars::new(config.clone(), group_indicators_rx, mtm);
     let dock = Dock::new(dock_sm_tx);
 

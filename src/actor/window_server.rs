@@ -10,8 +10,7 @@ use tracing::{debug, instrument, warn};
 
 pub use crate::actor::app::pid_t;
 use crate::actor::app::{self, AppThreadHandle, Quiet, WindowId, WindowInfo};
-use crate::actor::reactor::Event;
-use crate::actor::{self, space_manager};
+use crate::actor::{self, reactor, space_manager};
 use crate::collections::HashMap;
 use crate::sys::event::MouseState;
 use crate::sys::screen::{NSScreenInfo, ScreenCache};
@@ -41,7 +40,7 @@ pub struct WindowServer {
 }
 
 #[derive(Debug)]
-pub enum Request {
+pub enum Event {
     // Sent by the NotificationCenter actor.
     /// Screen configuration changed. Carries NSScreenInfo gathered on the main thread.
     ScreenParametersChanged(Vec<NSScreenInfo>),
@@ -64,14 +63,14 @@ pub enum Request {
     ///
     /// All reactor events go through us so they reach the reactor in the
     /// correct order with respect to the other events above.
-    ReactorEvent(Event),
+    ReactorEvent(reactor::Event),
     /// Sent by SpaceManager when it needs a fresh window list (e.g. after
     /// toggling a space or exiting expose).
     RequestSpaceRefresh,
 }
 
-pub type Sender = actor::Sender<Request>;
-pub type Receiver = actor::Receiver<Request>;
+pub type Sender = actor::Sender<Event>;
+pub type Receiver = actor::Receiver<Event>;
 
 impl WindowServer {
     pub fn new(sm_tx: space_manager::Sender, skylight_tx: SkylightSender) -> Self {
@@ -83,20 +82,20 @@ impl WindowServer {
         }
     }
 
-    pub async fn run(mut self, mut requests_rx: Receiver) {
-        while let Some((span, request)) = requests_rx.recv().await {
+    pub async fn run(mut self, mut events_rx: Receiver) {
+        while let Some((span, event)) = events_rx.recv().await {
             let _span = span.entered();
-            self.on_request(request);
+            self.on_event(event);
         }
     }
 
     #[instrument(skip(self))]
-    fn on_request(&mut self, request: Request) {
-        match request {
-            Request::RegisterWindow(wsid, wid, tx) => {
+    fn on_event(&mut self, event: Event) {
+        match event {
+            Event::RegisterWindow(wsid, wid, tx) => {
                 self.skylight_tx.send(SkylightRequest::TrackWindow(wsid, wid, tx));
             }
-            Request::ScreenParametersChanged(ns_screens) => {
+            Event::ScreenParametersChanged(ns_screens) => {
                 let Some((screens, converter)) = self.screen_cache.update_screen_config(ns_screens)
                 else {
                     return;
@@ -111,25 +110,27 @@ impl WindowServer {
                     on_screen,
                 });
             }
-            Request::SpaceChanged | Request::RequestSpaceRefresh => {
+            Event::SpaceChanged | Event::RequestSpaceRefresh => {
                 let spaces = self.screen_cache.get_screen_spaces();
                 let on_screen = self.get_windows_on_screen();
                 self.sm_tx.send(space_manager::Event::SpaceChanged(spaces, on_screen));
             }
-            Request::WindowCreated(wid, info, mouse_state) => {
+            Event::WindowCreated(wid, info, mouse_state) => {
                 let pid = wid.pid;
-                self.send_reactor_event(Event::WindowCreated(wid, info, mouse_state));
+                self.send_reactor_event(reactor::Event::WindowCreated(wid, info, mouse_state));
                 self.send_windows_on_screen_if_changed(Some(pid));
-                self.send_reactor_event(Event::WindowBecameVisible(wid));
+                self.send_reactor_event(reactor::Event::WindowBecameVisible(wid));
             }
-            Request::ApplicationMainWindowChanged(pid, wid, quiet) => {
+            Event::ApplicationMainWindowChanged(pid, wid, quiet) => {
                 self.update_visible_window_ids();
-                self.send_reactor_event(Event::ApplicationMainWindowChanged(pid, wid, quiet));
+                self.send_reactor_event(reactor::Event::ApplicationMainWindowChanged(
+                    pid, wid, quiet,
+                ));
             }
-            Request::WindowVisibilityChanged(window_id) => {
+            Event::WindowVisibilityChanged(window_id) => {
                 self.send_windows_on_screen_if_changed(Some(window_id.pid));
             }
-            Request::ReactorEvent(event) => self.send_reactor_event(event),
+            Event::ReactorEvent(event) => self.send_reactor_event(event),
         }
     }
 
@@ -139,7 +140,7 @@ impl WindowServer {
         let prev = mem::take(&mut self.visible_window_ids);
         let on_screen = self.get_windows_on_screen();
         if self.visible_window_ids != prev {
-            self.send_reactor_event(Event::WindowsOnScreenUpdated { pid, on_screen });
+            self.send_reactor_event(reactor::Event::WindowsOnScreenUpdated { pid, on_screen });
         }
     }
 
@@ -156,7 +157,7 @@ impl WindowServer {
         self.visible_window_ids = sys_ws::get_visible_window_ids();
     }
 
-    fn send_reactor_event(&self, event: Event) {
+    fn send_reactor_event(&self, event: reactor::Event) {
         self.sm_tx.send(space_manager::Event::ReactorEvent(event));
     }
 }

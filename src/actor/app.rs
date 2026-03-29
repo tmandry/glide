@@ -146,7 +146,7 @@ pub enum Request {
     Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
 
     /// Sent by WindowServer actor when a window is destroyed.
-    /// See [`actor::window_server::Request::RegisterWindow`].
+    /// See [`actor::window_server::Event::RegisterWindow`].
     WindowDestroyed(WindowId),
 }
 
@@ -345,21 +345,19 @@ impl State {
             let info = crate::sys::window_server::get_windows(&wsids);
             crate::sys::window_server::WindowsOnScreen::new(info)
         };
-        _ = self.ws_tx.try_send(window_server::Request::ReactorEvent(
+        _ = self.ws_tx.try_send(window_server::Event::ReactorEvent(
             Event::WindowsOnScreenUpdated { pid: Some(pid), on_screen },
         ));
         if self
             .ws_tx
-            .try_send(window_server::Request::ReactorEvent(
-                Event::ApplicationLaunched {
-                    pid,
-                    handle,
-                    info,
-                    is_frontmost: self.is_frontmost,
-                    main_window: self.main_window,
-                    visible_windows: windows,
-                },
-            ))
+            .try_send(window_server::Event::ReactorEvent(Event::ApplicationLaunched {
+                pid,
+                handle,
+                info,
+                is_frontmost: self.is_frontmost,
+                main_window: self.main_window,
+                visible_windows: windows,
+            }))
             .is_err()
         {
             debug!(?pid, "Failed to send ApplicationLaunched event, exiting thread");
@@ -596,7 +594,7 @@ impl State {
                 let Some((window, wid)) = self.register_window(elem) else {
                     return;
                 };
-                self.send_ws_request(window_server::Request::WindowCreated(
+                self.send_ws_request(window_server::Event::WindowCreated(
                     wid,
                     window,
                     event::get_mouse_state(),
@@ -630,7 +628,7 @@ impl State {
             }
             kAXWindowMiniaturizedNotification | kAXWindowDeminiaturizedNotification => {
                 if let Ok(wid) = self.id(&elem) {
-                    self.send_ws_request(window_server::Request::WindowVisibilityChanged(wid));
+                    self.send_ws_request(window_server::Event::WindowVisibilityChanged(wid));
                 }
             }
             kAXTitleChangedNotification => {
@@ -842,7 +840,7 @@ impl State {
                     warn!(?self.pid, "Got MainWindowChanged on unknown window");
                     return None;
                 };
-                self.send_ws_request(window_server::Request::WindowCreated(
+                self.send_ws_request(window_server::Event::WindowCreated(
                     wid,
                     info,
                     event::get_mouse_state(),
@@ -860,7 +858,7 @@ impl State {
             Some(id) if id == wid => Quiet::Yes,
             _ => Quiet::No,
         };
-        self.send_ws_request(window_server::Request::ApplicationMainWindowChanged(
+        self.send_ws_request(window_server::Event::ApplicationMainWindowChanged(
             self.pid,
             Some(wid),
             quiet,
@@ -989,7 +987,7 @@ impl State {
         if let Some(wsid) = wsid
             && let Some(requests_tx) = self.requests_tx.upgrade()
         {
-            _ = self.ws_tx.send(window_server::Request::RegisterWindow(
+            _ = self.ws_tx.send(window_server::Event::RegisterWindow(
                 wsid,
                 wid,
                 AppThreadHandle { requests_tx },
@@ -1015,11 +1013,11 @@ impl State {
     }
 
     fn send_event(&self, event: Event) {
-        self.ws_tx.send(window_server::Request::ReactorEvent(event));
+        self.ws_tx.send(window_server::Event::ReactorEvent(event));
     }
 
-    fn send_ws_request(&self, request: window_server::Request) {
-        _ = self.ws_tx.send(request);
+    fn send_ws_request(&self, event: window_server::Event) {
+        _ = self.ws_tx.send(event);
     }
 
     fn window(&self, wid: WindowId) -> Result<&WindowState, accessibility::Error> {

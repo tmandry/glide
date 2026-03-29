@@ -262,7 +262,7 @@ impl SpaceManager {
     }
 
     fn request_space_refresh(&self) {
-        self.ws_tx.send(window_server::Request::RequestSpaceRefresh);
+        self.ws_tx.send(window_server::Event::RequestSpaceRefresh);
     }
 
     fn update_hotkey_state(&mut self) {

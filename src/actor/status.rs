@@ -8,7 +8,7 @@ use std::sync::Arc;
 use objc2::MainThreadMarker;
 use tracing::instrument;
 
-use crate::actor::{reactor, wm_controller};
+use crate::actor::wm_controller;
 use crate::config::Config;
 use crate::sys::screen::{SpaceId, get_active_space_number};
 use crate::ui::status_bar::StatusIcon;
@@ -30,7 +30,6 @@ pub struct Status {
     rx: Receiver,
     icon: Option<StatusIcon>,
     mtm: MainThreadMarker,
-    reactor_tx: reactor::Sender,
     wm_tx: wm_controller::Sender,
 }
 
@@ -42,7 +41,6 @@ impl Status {
         config: Arc<Config>,
         rx: Receiver,
         mtm: MainThreadMarker,
-        reactor_tx: reactor::Sender,
         wm_tx: wm_controller::Sender,
     ) -> Self {
         let mut this = Self {
@@ -50,7 +48,6 @@ impl Status {
             config,
             rx,
             mtm,
-            reactor_tx,
             wm_tx,
         };
         this.apply_config();
@@ -65,7 +62,6 @@ impl Status {
                 Some(StatusIcon::new(
                     &self.config.settings.experimental.status_icon,
                     self.mtm,
-                    self.reactor_tx.clone(),
                     self.wm_tx.clone(),
                 ))
             });
