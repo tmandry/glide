@@ -158,6 +158,9 @@ impl WmController {
             AppGloballyActivated(pid) => {
                 // Make sure the mouse cursor stays hidden after app switch.
                 self.mouse_tx.send(mouse::Request::EnforceHidden);
+                if let Some(screen_id) = self.get_focused_screen() {
+                    self.sm_tx.send(space_manager::Event::FocusedScreenChanged(screen_id));
+                }
                 if self.login_window_pid == Some(pid) {
                     self.sm_tx.send(space_manager::Event::LoginWindowActive(true));
                 }

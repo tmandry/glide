@@ -33,6 +33,7 @@ pub enum Event {
     ReactorEvent(reactor::Event),
 
     // From WmController
+    FocusedScreenChanged(ScreenId),
     ToggleSpace(ScreenId),
     ToggleGlobalEnabled,
     LoginWindowActive(bool),
@@ -62,6 +63,7 @@ pub struct SpaceManager {
     cur_screen_id: Vec<ScreenId>,
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
+    focused_screen: Option<ScreenId>,
     login_window_active: bool,
     expose_active: bool,
     is_globally_enabled: bool,
@@ -94,6 +96,7 @@ impl SpaceManager {
             starting_space: None,
             cur_space: Vec::new(),
             cur_screen_id: Vec::new(),
+            focused_screen: None,
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
             login_window_active: false,
@@ -145,6 +148,10 @@ impl SpaceManager {
                 self.send_space_enabled_status();
             }
             Event::ReactorEvent(e) => self.reactor_tx.send(e),
+            Event::FocusedScreenChanged(screen_id) => {
+                self.focused_screen = Some(screen_id);
+                self.send_space_enabled_status();
+            }
             Event::ToggleSpace(screen_id) => {
                 let Some(space) = self.space_for_screen(screen_id) else {
                     return;
@@ -254,10 +261,14 @@ impl SpaceManager {
         spaces
     }
 
-    /// Send a `SpaceEnabledChanged` status update using the first screen's
-    /// space as a best-effort approximation of the focused screen.
+    fn focused_space(&self) -> Option<SpaceId> {
+        self.focused_screen
+            .and_then(|s| self.space_for_screen(s))
+            .or_else(|| self.first_space())
+    }
+
     fn send_space_enabled_status(&self) {
-        let enabled = self.first_space().map(|s| self.is_space_enabled(s)).unwrap_or(false);
+        let enabled = self.focused_space().map(|s| self.is_space_enabled(s)).unwrap_or(false);
         self.status_tx.send(status::Event::SpaceEnabledChanged(enabled));
     }
 
