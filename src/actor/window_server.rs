@@ -59,10 +59,7 @@ pub enum Event {
     ApplicationMainWindowChanged(pid_t, Option<WindowId>, Quiet),
     /// A window was minimized or unminimized.
     WindowVisibilityChanged(WindowId),
-    /// An application finished launching. WindowServer looks up window server
-    /// info for the given WSIDs before forwarding to the reactor.
     ApplicationLaunched {
-        wsids: Vec<WindowServerId>,
         pid: pid_t,
         handle: AppThreadHandle,
         info: AppInfo,
@@ -133,7 +130,6 @@ impl WindowServer {
                 self.send_reactor_event(reactor::Event::WindowBecameVisible(wid));
             }
             Event::ApplicationMainWindowChanged(pid, wid, quiet) => {
-                self.update_visible_window_ids();
                 self.send_reactor_event(reactor::Event::ApplicationMainWindowChanged(
                     pid, wid, quiet,
                 ));
@@ -142,7 +138,6 @@ impl WindowServer {
                 self.send_windows_on_screen_if_changed(Some(window_id.pid));
             }
             Event::ApplicationLaunched {
-                wsids,
                 pid,
                 handle,
                 info,
@@ -150,8 +145,7 @@ impl WindowServer {
                 main_window,
                 visible_windows,
             } => {
-                let ws_info = sys_ws::get_windows(&wsids);
-                let on_screen = WindowsOnScreen::new(ws_info);
+                let on_screen = self.get_windows_on_screen();
                 self.send_reactor_event(reactor::Event::WindowsOnScreenUpdated {
                     pid: Some(pid),
                     on_screen,
@@ -197,17 +191,6 @@ impl WindowServer {
     #[cfg(test)]
     fn get_all_visible_windows(&self) -> Vec<sys_ws::WindowServerInfo> {
         MOCK_VISIBLE_WINDOWS.with(|w| w.borrow().clone())
-    }
-
-    #[cfg(not(test))]
-    fn update_visible_window_ids(&mut self) {
-        self.visible_window_ids = sys_ws::get_visible_window_ids();
-    }
-
-    #[cfg(test)]
-    fn update_visible_window_ids(&mut self) {
-        self.visible_window_ids =
-            MOCK_VISIBLE_WINDOWS.with(|w| w.borrow().iter().map(|w| w.id).collect());
     }
 
     fn send_reactor_event(&self, event: reactor::Event) {
