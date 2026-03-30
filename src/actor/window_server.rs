@@ -145,7 +145,8 @@ impl WindowServer {
     }
 
     fn get_windows_on_screen(&mut self) -> WindowsOnScreen {
-        let windows: Vec<_> = sys_ws::get_visible_windows_with_layer(None)
+        let windows: Vec<_> = self
+            .get_all_visible_windows()
             .into_iter()
             .filter(|w| matches!(w.layer, LAYER_NORMAL | LAYER_FLOATING | LAYER_STATUS))
             .collect();
@@ -153,8 +154,25 @@ impl WindowServer {
         WindowsOnScreen::new(windows)
     }
 
+    #[cfg(not(test))]
+    fn get_all_visible_windows(&self) -> Vec<sys_ws::WindowServerInfo> {
+        sys_ws::get_visible_windows_with_layer(None)
+    }
+
+    #[cfg(test)]
+    fn get_all_visible_windows(&self) -> Vec<sys_ws::WindowServerInfo> {
+        MOCK_VISIBLE_WINDOWS.with(|w| w.borrow().clone())
+    }
+
+    #[cfg(not(test))]
     fn update_visible_window_ids(&mut self) {
         self.visible_window_ids = sys_ws::get_visible_window_ids();
+    }
+
+    #[cfg(test)]
+    fn update_visible_window_ids(&mut self) {
+        self.visible_window_ids =
+            MOCK_VISIBLE_WINDOWS.with(|w| w.borrow().iter().map(|w| w.id).collect());
     }
 
     fn send_reactor_event(&self, event: reactor::Event) {
@@ -260,5 +278,171 @@ impl SkylightWatcherState {
         };
         self.connection.on_window_destroyed(wsid);
         _ = tx.send(app::Request::WindowDestroyed(wid));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOCK_VISIBLE_WINDOWS: RefCell<Vec<sys_ws::WindowServerInfo>> = RefCell::new(vec![]);
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use test_log::test;
+
+    use super::*;
+    use crate::actor::{self, space_manager};
+    use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+
+    fn wsid(id: u32) -> WindowServerId {
+        WindowServerId::new(id)
+    }
+
+    fn make_window(id: u32, layer: i32) -> WindowServerInfo {
+        WindowServerInfo {
+            id: wsid(id),
+            pid: 1,
+            layer,
+            frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0)),
+        }
+    }
+
+    fn set_mock_windows(windows: Vec<WindowServerInfo>) {
+        MOCK_VISIBLE_WINDOWS.with(|w| *w.borrow_mut() = windows);
+    }
+
+    struct TestHarness {
+        ws: WindowServer,
+        sm_rx: space_manager::Receiver,
+        #[expect(dead_code)]
+        skylight_rx: SkylightReceiver,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let (sm_tx, sm_rx) = actor::channel();
+            let (skylight_tx, skylight_rx) = actor::channel();
+            let ws = WindowServer::new(sm_tx, skylight_tx);
+            Self { ws, sm_rx, skylight_rx }
+        }
+
+        fn on_event(&mut self, event: Event) {
+            self.ws.on_event(event);
+        }
+
+        fn drain_sm(&mut self) -> Vec<space_manager::Event> {
+            let mut events = vec![];
+            while let Ok((_, event)) = self.sm_rx.try_recv() {
+                events.push(event);
+            }
+            events
+        }
+    }
+
+    fn find_reactor_events(sm_events: &[space_manager::Event]) -> Vec<&reactor::Event> {
+        sm_events
+            .iter()
+            .filter_map(|e| match e {
+                space_manager::Event::ReactorEvent(re) => Some(re),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn find_windows_on_screen_updated<'a>(
+        reactor_events: &'a [&'a reactor::Event],
+    ) -> Vec<&'a WindowsOnScreen> {
+        reactor_events
+            .iter()
+            .filter_map(|e| match e {
+                reactor::Event::WindowsOnScreenUpdated { on_screen, .. } => Some(on_screen),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filters_irrelevant_layers() {
+        set_mock_windows(vec![
+            make_window(1, LAYER_NORMAL),   // 0 – keep
+            make_window(2, LAYER_FLOATING), // 3 – keep
+            make_window(3, LAYER_STATUS),   // 8 – keep
+            make_window(4, 25),             // screensaver – filter
+            make_window(5, -1),             // desktop – filter
+        ]);
+
+        let mut h = TestHarness::new();
+        h.on_event(Event::WindowVisibilityChanged(WindowId::new(1, 1)));
+        let sm_events = h.drain_sm();
+        let reactor_events = find_reactor_events(&sm_events);
+        let updates = find_windows_on_screen_updated(&reactor_events);
+
+        assert_eq!(updates.len(), 1);
+        let visible_ids: Vec<u32> = updates[0].visible.iter().map(|id| id.as_u32()).collect();
+        assert_eq!(visible_ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn no_event_when_visible_windows_unchanged() {
+        set_mock_windows(vec![make_window(1, LAYER_NORMAL)]);
+
+        let mut h = TestHarness::new();
+        // First call: visible_window_ids goes from [] to [1] – changed.
+        h.on_event(Event::WindowVisibilityChanged(WindowId::new(1, 1)));
+        let sm_events = h.drain_sm();
+        let reactor_events = find_reactor_events(&sm_events);
+        assert_eq!(find_windows_on_screen_updated(&reactor_events).len(), 1);
+
+        // Second call: visible_window_ids is still [1] – no change.
+        h.on_event(Event::WindowVisibilityChanged(WindowId::new(1, 1)));
+        let sm_events = h.drain_sm();
+        let reactor_events = find_reactor_events(&sm_events);
+        assert_eq!(find_windows_on_screen_updated(&reactor_events).len(), 0);
+    }
+
+    #[test]
+    fn event_sent_when_visible_windows_change() {
+        set_mock_windows(vec![make_window(1, LAYER_NORMAL)]);
+
+        let mut h = TestHarness::new();
+        h.on_event(Event::WindowVisibilityChanged(WindowId::new(1, 1)));
+        h.drain_sm();
+
+        // Change the mock.
+        set_mock_windows(vec![make_window(1, LAYER_NORMAL), make_window(2, LAYER_NORMAL)]);
+        h.on_event(Event::WindowVisibilityChanged(WindowId::new(1, 1)));
+        let sm_events = h.drain_sm();
+        let reactor_events = find_reactor_events(&sm_events);
+        let updates = find_windows_on_screen_updated(&reactor_events);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].visible.len(), 2);
+    }
+
+    #[test]
+    fn window_created_sends_windows_on_screen_if_changed() {
+        set_mock_windows(vec![make_window(1, LAYER_NORMAL)]);
+
+        let mut h = TestHarness::new();
+        let wid = WindowId::new(1, 1);
+        let info = WindowInfo {
+            is_standard: true,
+            title: String::new().into(),
+            frame: CGRect::ZERO,
+            sys_id: None,
+            is_resizable: true,
+        };
+        h.on_event(Event::WindowCreated(wid, info, MouseState::Up));
+        let sm_events = h.drain_sm();
+        let reactor_events = find_reactor_events(&sm_events);
+
+        // Should have WindowCreated, WindowsOnScreenUpdated, WindowBecameVisible.
+        assert!(reactor_events.iter().any(|e| matches!(e, reactor::Event::WindowCreated(..))));
+        assert_eq!(find_windows_on_screen_updated(&reactor_events).len(), 1);
+        assert!(
+            reactor_events
+                .iter()
+                .any(|e| matches!(e, reactor::Event::WindowBecameVisible(_)))
+        );
     }
 }
