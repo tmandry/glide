@@ -728,6 +728,23 @@ impl Reactor {
     }
 
     fn update_complete_window_server_info(&mut self, on_screen: WindowsOnScreen) {
+        for info in on_screen.info.iter().filter(|i| i.layer == 0) {
+            let Some(wid) = self.window_ids.get(&info.id) else {
+                continue;
+            };
+            let Some(window) = self.windows.get_mut(wid) else {
+                continue;
+            };
+            // Assume this update comes from after the last write. Typically the
+            // window is on a different space than the one we're coming from
+            // (unless it's on all spaces).
+            //
+            // TODO: It is still possible to have a race if we issued resizes on
+            // this window that haven't completed yet (e.g. from an earlier
+            // animation and a slow app). Consider having the app actor give us
+            // updated locations on GetVisibleWindows instead.
+            window.frame_monotonic = info.frame;
+        }
         self.update_partial_window_server_info(on_screen);
     }
 
@@ -737,18 +754,6 @@ impl Reactor {
         // extend to avoid accumulating stale entries.
         self.visible_windows.clear();
         self.visible_windows.extend(on_screen.visible);
-        for info in on_screen.info.iter().filter(|i| i.layer == 0) {
-            let Some(wid) = self.window_ids.get(&info.id) else {
-                continue;
-            };
-            let Some(window) = self.windows.get_mut(wid) else {
-                continue;
-            };
-            // Assume this update comes from after the last write. The window
-            // is on a different space (unless it's on all spaces) and
-            // there's no way to order it with respect to our writes anyway.
-            window.frame_monotonic = info.frame;
-        }
         self.window_server_info
             .extend(on_screen.info.into_iter().map(|info| (info.id, info)));
     }
