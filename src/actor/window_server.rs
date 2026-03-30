@@ -9,7 +9,7 @@ use objc2::MainThreadMarker;
 use tracing::{debug, instrument, warn};
 
 pub use crate::actor::app::pid_t;
-use crate::actor::app::{self, AppThreadHandle, Quiet, WindowId, WindowInfo};
+use crate::actor::app::{self, AppInfo, AppThreadHandle, Quiet, WindowId, WindowInfo};
 use crate::actor::{self, reactor, space_manager};
 use crate::collections::HashMap;
 use crate::sys::event::MouseState;
@@ -59,6 +59,17 @@ pub enum Event {
     ApplicationMainWindowChanged(pid_t, Option<WindowId>, Quiet),
     /// A window was minimized or unminimized.
     WindowVisibilityChanged(WindowId),
+    /// An application finished launching. WindowServer looks up window server
+    /// info for the given WSIDs before forwarding to the reactor.
+    ApplicationLaunched {
+        wsids: Vec<WindowServerId>,
+        pid: pid_t,
+        handle: AppThreadHandle,
+        info: AppInfo,
+        is_frontmost: bool,
+        main_window: Option<WindowId>,
+        visible_windows: Vec<(WindowId, WindowInfo)>,
+    },
     /// Reactor event passthrough.
     ///
     /// All reactor events go through us so they reach the reactor in the
@@ -129,6 +140,30 @@ impl WindowServer {
             }
             Event::WindowVisibilityChanged(window_id) => {
                 self.send_windows_on_screen_if_changed(Some(window_id.pid));
+            }
+            Event::ApplicationLaunched {
+                wsids,
+                pid,
+                handle,
+                info,
+                is_frontmost,
+                main_window,
+                visible_windows,
+            } => {
+                let ws_info = sys_ws::get_windows(&wsids);
+                let on_screen = WindowsOnScreen::new(ws_info);
+                self.send_reactor_event(reactor::Event::WindowsOnScreenUpdated {
+                    pid: Some(pid),
+                    on_screen,
+                });
+                self.send_reactor_event(reactor::Event::ApplicationLaunched {
+                    pid,
+                    handle,
+                    info,
+                    is_frontmost,
+                    main_window,
+                    visible_windows,
+                });
             }
             Event::ReactorEvent(event) => self.send_reactor_event(event),
         }
