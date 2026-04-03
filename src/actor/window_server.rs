@@ -241,7 +241,8 @@ impl SkylightWatcher {
     }
 
     pub async fn run(self, mut commands_rx: SkylightReceiver) {
-        while let Some((_span, command)) = commands_rx.recv().await {
+        while let Some((span, command)) = commands_rx.recv().await {
+            let _span = span.entered();
             let mut state = self.0.borrow_mut();
             state.on_command(command);
         }
