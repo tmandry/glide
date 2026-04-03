@@ -77,6 +77,20 @@ pub struct WindowServerInfo {
     pub frame: CGRect,
 }
 
+/// A snapshot of windows currently visible on screen from the window server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowsOnScreen {
+    pub visible: Vec<WindowServerId>,
+    pub info: Vec<WindowServerInfo>,
+}
+
+impl WindowsOnScreen {
+    pub fn new(info: Vec<WindowServerInfo>) -> Self {
+        let visible = info.iter().map(|w| w.id).collect();
+        Self { visible, info }
+    }
+}
+
 /// Returns a list of windows visible on the screen, in order starting with the
 /// frontmost. Excludes desktop elements.
 pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInfo> {
@@ -84,6 +98,19 @@ pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInf
         .iter()
         .filter_map(|win| make_info(win, layer))
         .collect::<Vec<_>>()
+}
+
+/// Returns only the window server IDs of windows visible on the screen.
+/// This is cheaper than `get_visible_windows_with_layer` when you don't need
+/// the full `WindowServerInfo`.
+pub fn get_visible_window_ids() -> Vec<WindowServerId> {
+    get_visible_windows_raw()
+        .iter()
+        .filter_map(|win| {
+            let id: u32 = get_num(&win, unsafe { kCGWindowNumber })?.try_into().ok()?;
+            Some(WindowServerId(id))
+        })
+        .collect()
 }
 
 /// Returns a list of windows visible on the screen, in order starting with the
@@ -240,7 +267,7 @@ pub struct SkylightConnection {
 assert_not_impl_any!(SkylightConnection: Send, Sync);
 
 impl SkylightConnection {
-    pub fn default_for_thread() -> Self {
+    pub fn new(_mtm: MainThreadMarker) -> Self {
         Self {
             cid: SLSDefaultConnectionForThread(),
             window_list: SortedVec::new(),

@@ -82,11 +82,11 @@ impl NotificationCenterInner {
 
     fn send_screen_parameters(&self) {
         let ns_screens = screen::get_ns_screens(MainThreadMarker::new().unwrap());
-        self.send_ws_request(window_server::Request::ScreenParametersChanged(ns_screens));
+        self.send_ws_request(window_server::Event::ScreenParametersChanged(ns_screens));
     }
 
     fn send_space_changed(&self) {
-        self.send_ws_request(window_server::Request::SpaceChanged);
+        self.send_ws_request(window_server::Event::SpaceChanged);
     }
 
     fn handle_app_event(&self, notif: &NSNotification) {
@@ -118,7 +118,7 @@ impl NotificationCenterInner {
         _ = self.ivars().wm_tx.send((Span::current().clone(), event));
     }
 
-    fn send_ws_request(&self, request: window_server::Request) {
+    fn send_ws_request(&self, request: window_server::Event) {
         self.ivars().ws_tx.send(request);
     }
 

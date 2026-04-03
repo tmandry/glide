@@ -17,7 +17,7 @@ use crate::actor::reactor;
 use crate::config::Config;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::{WindowServerId, WindowServerInfo, WindowsOnScreen};
 
 impl Reactor {
     pub fn new_for_test(layout: LayoutManager) -> Reactor {
@@ -99,10 +99,30 @@ impl Apps {
 
     pub fn make_app(&mut self, pid: pid_t, windows: Vec<WindowInfo>) -> Vec<Event> {
         let frontmost = windows.first().map(|_| WindowId::new(pid, 1));
-        self.make_app_with_opts(pid, windows, frontmost, false, true)
+        self.make_app_with_opts(pid, windows, frontmost, false)
     }
 
     pub fn make_app_with_opts(
+        &mut self,
+        pid: pid_t,
+        windows: Vec<WindowInfo>,
+        main_window: Option<WindowId>,
+        is_frontmost: bool,
+    ) -> Vec<Event> {
+        self.make_app_impl(pid, windows, main_window, is_frontmost, true)
+    }
+
+    pub fn make_app_without_ws_info(
+        &mut self,
+        pid: pid_t,
+        windows: Vec<WindowInfo>,
+        main_window: Option<WindowId>,
+        is_frontmost: bool,
+    ) -> Vec<Event> {
+        self.make_app_impl(pid, windows, main_window, is_frontmost, false)
+    }
+
+    fn make_app_impl(
         &mut self,
         pid: pid_t,
         windows: Vec<WindowInfo>,
@@ -120,7 +140,25 @@ impl Apps {
             );
         }
         let handle = AppThreadHandle::new_for_test(self.tx.clone());
-        vec![Event::ApplicationLaunched {
+        let mut events = vec![];
+        if with_ws_info {
+            let ws_info: Vec<WindowServerInfo> = windows
+                .iter()
+                .filter_map(|info| {
+                    Some(WindowServerInfo {
+                        pid,
+                        id: info.sys_id?,
+                        layer: 0,
+                        frame: info.frame,
+                    })
+                })
+                .collect();
+            events.push(Event::WindowsOnScreenUpdated {
+                pid: Some(pid),
+                on_screen: WindowsOnScreen::new(ws_info),
+            });
+        }
+        events.push(Event::ApplicationLaunched {
             pid,
             info: AppInfo {
                 bundle_id: Some(format!("com.testapp{pid}")),
@@ -129,21 +167,9 @@ impl Apps {
             handle,
             is_frontmost,
             main_window,
-            window_server_info: if with_ws_info {
-                windows
-                    .iter()
-                    .map(|info| WindowServerInfo {
-                        pid,
-                        id: info.sys_id.unwrap(),
-                        layer: 0,
-                        frame: info.frame,
-                    })
-                    .collect()
-            } else {
-                Default::default()
-            },
             visible_windows: (1..).map(|idx| WindowId::new(pid, idx)).zip(windows).collect(),
-        }]
+        });
+        events
     }
 
     pub fn requests(&mut self) -> Vec<Request> {

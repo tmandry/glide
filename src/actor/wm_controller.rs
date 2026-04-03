@@ -1,9 +1,8 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The WM Controller handles major events like enabling and disabling the
-//! window manager on certain spaces and launching app threads. It also
-//! controls hotkey registration.
+//! The WM Controller handles hotkey registration, app launching, and command
+//! dispatch. Space/screen enablement state lives in SpaceManager.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -11,12 +10,11 @@ use std::sync::Arc;
 
 use accessibility_sys::pid_t;
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
 use tokio::join;
 use tokio::sync::mpsc;
-use tracing::{Span, debug, error, info, info_span, instrument, trace, warn};
+use tracing::{Span, debug, error, info_span, instrument, warn};
 
 pub type Sender = mpsc::UnboundedSender<(Span, WmEvent)>;
 type WeakSender = mpsc::WeakUnboundedSender<(Span, WmEvent)>;
@@ -26,12 +24,10 @@ pub type StartupToken = mpsc::UnboundedSender<()>;
 type StartupReceiver = mpsc::UnboundedReceiver<()>;
 
 use crate::actor::app::AppInfo;
-use crate::actor::{self, group_bars, mouse, reactor, status, window_server};
-use crate::collections::HashSet;
+use crate::actor::{self, mouse, reactor, space_manager, status, window_server};
 use crate::sys;
 use crate::sys::event::HotkeyManager;
-use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
-use crate::sys::window_server::WindowServerInfo;
+use crate::sys::screen::NSScreenExt;
 
 #[derive(Debug)]
 pub enum WmEvent {
@@ -41,19 +37,10 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
-    SpaceChanged(Vec<Option<SpaceId>>, Vec<WindowServerInfo>),
-    ScreenParametersChanged {
-        screens: Vec<ScreenId>,
-        frames: Vec<CGRect>,
-        spaces: Vec<Option<SpaceId>>,
-        scale_factors: Vec<f64>,
-        converter: CoordinateConverter,
-        windows: Vec<WindowServerInfo>,
-    },
-    ExposeEntered,
-    ExposeExited,
     Command(WmCommand),
     ConfigUpdated(Arc<crate::config::Config>),
+    /// Sent by SpaceManager to register or unregister hotkeys.
+    HotkeysActive(bool),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,23 +76,14 @@ pub struct Config {
 
 pub struct WmController {
     config: Config,
-    events_tx: reactor::Sender,
+    sm_tx: space_manager::Sender,
     mouse_tx: mouse::Sender,
     status_tx: status::Sender,
     ws_tx: window_server::Sender,
-    group_indicators_tx: group_bars::Sender,
     receiver: self::Receiver,
     sender: self::WeakSender,
     startup_channel_tx: Option<self::StartupToken>,
-    starting_space: Option<SpaceId>,
-    cur_space: Vec<Option<SpaceId>>,
-    cur_screen_id: Vec<ScreenId>,
-    disabled_spaces: HashSet<SpaceId>,
-    enabled_spaces: HashSet<SpaceId>,
     login_window_pid: Option<pid_t>,
-    login_window_active: bool,
-    expose_active: bool,
-    is_globally_enabled: bool,
     hotkeys: Option<HotkeyManager>,
     mtm: MainThreadMarker,
 }
@@ -113,45 +91,33 @@ pub struct WmController {
 impl WmController {
     pub fn new(
         config: Config,
-        events_tx: reactor::Sender,
+        sm_tx: space_manager::Sender,
         mouse_tx: mouse::Sender,
         status_tx: status::Sender,
         ws_tx: window_server::Sender,
-        group_indicators_tx: group_bars::Sender,
     ) -> (Self, Sender) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let is_globally_enabled = true;
         let this = Self {
             config,
-            events_tx,
+            sm_tx,
             mouse_tx,
-            status_tx: status_tx.clone(),
+            status_tx,
             ws_tx,
-            group_indicators_tx,
             receiver,
             sender: sender.downgrade(),
             startup_channel_tx: None,
-            starting_space: None,
-            cur_space: Vec::new(),
-            cur_screen_id: Vec::new(),
-            disabled_spaces: HashSet::default(),
-            enabled_spaces: HashSet::default(),
             login_window_pid: None,
-            login_window_active: false,
-            expose_active: false,
-            is_globally_enabled,
             hotkeys: None,
             mtm: MainThreadMarker::new().unwrap(),
         };
-        status_tx.send(status::Event::GlobalEnabledChanged(is_globally_enabled));
         (this, sender)
     }
 
     pub async fn run(mut self) {
         let (startup_channel_tx, startup_channel_rx) = mpsc::unbounded_channel();
         self.startup_channel_tx.replace(startup_channel_tx);
-        let events_tx = self.events_tx.clone();
-        join!(self.watch_events(), Self::startup(startup_channel_rx, events_tx));
+        let sm_tx = self.sm_tx.clone();
+        join!(self.watch_events(), Self::startup(startup_channel_rx, sm_tx));
     }
 
     async fn watch_events(&mut self) {
@@ -161,18 +127,18 @@ impl WmController {
         }
     }
 
-    async fn startup(mut receiver: StartupReceiver, events_tx: reactor::Sender) {
+    async fn startup(mut receiver: StartupReceiver, sm_tx: space_manager::Sender) {
         let _span = info_span!("Startup");
         while let Some(()) = receiver.recv().await {}
         debug!("Startup channel closed; sending startup event");
-        events_tx.send(reactor::Event::StartupComplete);
+        sm_tx.send(space_manager::Event::ReactorEvent(
+            reactor::Event::StartupComplete,
+        ));
     }
 
     #[instrument(skip(self))]
     pub fn handle_event(&mut self, event: WmEvent) {
         debug!("handle_event");
-        use reactor::Event;
-
         use self::WmCmd::*;
         use self::WmCommand::*;
         use self::WmEvent::*;
@@ -192,122 +158,55 @@ impl WmController {
             AppGloballyActivated(pid) => {
                 // Make sure the mouse cursor stays hidden after app switch.
                 self.mouse_tx.send(mouse::Request::EnforceHidden);
-                if self.login_window_pid == Some(pid) {
-                    // While the login screen is active AX APIs do not work.
-                    // Disable all spaces to prevent errors.
-                    info!("Login window activated");
-                    self.login_window_active = true;
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                if let Some(screen_id) = self.get_focused_screen() {
+                    self.sm_tx.send(space_manager::Event::FocusedScreenChanged(screen_id));
                 }
-                self.send_event(Event::ApplicationGloballyActivated(pid));
+                if self.login_window_pid == Some(pid) {
+                    self.sm_tx.send(space_manager::Event::LoginWindowActive(true));
+                }
+                self.send_reactor_event(reactor::Event::ApplicationGloballyActivated(pid));
             }
             AppGloballyDeactivated(pid) => {
                 if self.login_window_pid == Some(pid) {
-                    // Re-enable spaces; this also causes the reactor to update
-                    // the set of visible windows on screen and their positions.
-                    info!("Login window deactivated");
-                    self.login_window_active = false;
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                    self.sm_tx.send(space_manager::Event::LoginWindowActive(false));
                 }
-                self.send_event(Event::ApplicationGloballyDeactivated(pid));
+                self.send_reactor_event(reactor::Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
-                self.send_event(Event::ApplicationTerminated(pid));
-            }
-            ScreenParametersChanged {
-                screens: ids,
-                frames,
-                scale_factors,
-                spaces,
-                converter,
-                windows,
-            } => {
-                self.cur_screen_id = ids;
-                self.handle_space_changed(spaces.clone());
-                self.send_event(Event::ScreenParametersChanged {
-                    frames: frames.clone(),
-                    spaces: self.active_spaces(),
-                    windows,
-                    converter,
-                    scale_factors,
-                });
-                self.status_tx.send(status::Event::SpaceChanged(spaces));
-                self.status_tx.send(status::Event::SpaceEnabledChanged(
-                    self.is_current_space_enabled(),
-                ));
-                self.mouse_tx.send(mouse::Request::ScreenParametersChanged(frames, converter));
-            }
-            SpaceChanged(spaces, windows) => {
-                self.handle_space_changed(spaces.clone());
-                if !self.expose_active {
-                    // During expose windows from all spaces are returned to
-                    // self.get_windows(), so we may send a faulty list to the
-                    // reactor. This will be corrected when we get the
-                    // ExposeExited event or switch back to the space again, but
-                    // it adds visual noise so we try to avoid it.
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), windows));
-                }
-                self.status_tx.send(status::Event::SpaceChanged(spaces));
-                self.status_tx.send(status::Event::SpaceEnabledChanged(
-                    self.is_current_space_enabled(),
-                ));
-            }
-            ExposeEntered => {
-                self.expose_active = true;
-            }
-            ExposeExited => {
-                self.expose_active = false;
-                // We just need the reactor to update the list of visible
-                // windows for the current space. Everything else is handled by
-                // the SpaceChanged event.
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.send_reactor_event(reactor::Event::ApplicationTerminated(pid));
             }
             Command(Wm(ToggleSpaceActivated)) => {
-                let Some(space) = self.get_focused_space() else { return };
-                let toggle_set = if self.config.config.settings.default_disable {
-                    &mut self.enabled_spaces
-                } else {
-                    &mut self.disabled_spaces
+                let Some(screen_id) = self.get_focused_screen() else {
+                    return;
                 };
-                if !toggle_set.remove(&space) {
-                    toggle_set.insert(space);
-                }
-                if !self.is_space_enabled(space) {
-                    self.group_indicators_tx.send(group_bars::Event::SpaceDisabled(space));
-                }
-                self.status_tx
-                    .send(status::Event::SpaceEnabledChanged(self.is_space_enabled(space)));
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.sm_tx.send(space_manager::Event::ToggleSpace(screen_id));
             }
             Command(Wm(ToggleGlobalEnabled)) => {
-                self.is_globally_enabled = !self.is_globally_enabled;
-                if !self.is_globally_enabled {
-                    self.group_indicators_tx.send(group_bars::Event::GlobalDisabled);
-                }
-                self.status_tx
-                    .send(status::Event::GlobalEnabledChanged(self.is_globally_enabled));
-                self.status_tx.send(status::Event::SpaceEnabledChanged(
-                    self.is_current_space_enabled(),
-                ));
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.sm_tx.send(space_manager::Event::ToggleGlobalEnabled);
             }
             Command(Wm(Exec(cmd))) => {
                 self.exec_cmd(cmd);
             }
             Command(ReactorCommand(cmd)) => {
-                self.send_event(Event::Command(cmd));
+                self.sm_tx.send(space_manager::Event::ReactorCommand(cmd));
             }
             ConfigUpdated(config) => {
-                self.group_indicators_tx.send(group_bars::Event::ConfigChanged(config.clone()));
                 self.mouse_tx.send(mouse::Request::ConfigUpdated(config.clone()));
                 self.status_tx.send(status::Event::ConfigUpdated(config.clone()));
-                self.status_tx.send(status::Event::SpaceEnabledChanged(
-                    self.is_current_space_enabled(),
-                ));
-                self.send_event(reactor::Event::ConfigChanged(config.clone()));
+                self.sm_tx.send(space_manager::Event::ConfigUpdated(config.clone()));
                 self.config.config = config;
                 self.unregister_hotkeys();
-                self.ensure_hotkey_registration();
+                // Hotkeys will be re-registered when SpaceManager sends
+                // HotkeysActive after processing the ConfigUpdated.
+            }
+            HotkeysActive(active) => {
+                if active {
+                    if self.hotkeys.is_none() {
+                        self.register_hotkeys();
+                    }
+                } else {
+                    self.unregister_hotkeys();
+                }
             }
         }
     }
@@ -319,85 +218,16 @@ impl WmController {
             }
             self.login_window_pid = Some(pid);
         }
-        actor::app::spawn_app_thread(
-            pid,
-            info,
-            self.events_tx.clone(),
-            self.ws_tx.clone(),
-            startup.clone(),
-        );
+        actor::app::spawn_app_thread(pid, info, self.ws_tx.clone(), startup.clone());
     }
 
-    fn get_focused_space(&self) -> Option<SpaceId> {
-        // The currently focused screen is what NSScreen calls the "main" screen.
+    fn get_focused_screen(&self) -> Option<crate::sys::screen::ScreenId> {
         let screen = NSScreen::mainScreen(self.mtm)?;
-        let number = screen.get_number().ok()?;
-        *self.cur_screen_id.iter().zip(&self.cur_space).find(|(id, _)| **id == number)?.1
+        screen.get_number().ok()
     }
 
-    fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
-        self.cur_space = spaces;
-        if self.starting_space.is_none() {
-            self.starting_space = self.first_space();
-        }
-        self.ensure_hotkey_registration();
-    }
-
-    fn first_space(&self) -> Option<SpaceId> {
-        self.cur_space.first().copied().flatten()
-    }
-
-    fn is_current_space_enabled(&self) -> bool {
-        let Some(space) = self.get_focused_space() else {
-            return false;
-        };
-        self.is_space_enabled(space)
-    }
-
-    fn is_space_enabled(&self, space: SpaceId) -> bool {
-        match space {
-            sp if self.config.config.settings.default_disable => self.enabled_spaces.contains(&sp),
-            sp => !self.disabled_spaces.contains(&sp),
-        }
-    }
-
-    fn active_spaces(&self) -> Vec<Option<SpaceId>> {
-        if !self.is_globally_enabled {
-            return vec![None; self.cur_space.len()];
-        }
-        let mut spaces = self.cur_space.clone();
-        for space in &mut spaces {
-            let enabled = match space {
-                _ if self.login_window_active => false,
-                Some(_) if self.config.one_space && *space != self.starting_space => false,
-                Some(sp) if self.disabled_spaces.contains(sp) => false,
-                Some(sp) if self.enabled_spaces.contains(sp) => true,
-                _ if self.config.config.settings.default_disable => false,
-                _ => true,
-            };
-            if !enabled {
-                *space = None;
-            }
-        }
-        spaces
-    }
-
-    fn send_event(&mut self, event: reactor::Event) {
-        trace!(?event, "Sending event");
-        self.events_tx.send(event);
-    }
-
-    fn ensure_hotkey_registration(&mut self) {
-        let all_spaces = !self.config.one_space;
-        let active = self.starting_space.is_some()
-            && (all_spaces || self.starting_space == self.first_space());
-        if active {
-            if self.hotkeys.is_none() {
-                self.register_hotkeys();
-            }
-        } else {
-            self.unregister_hotkeys();
-        }
+    fn send_reactor_event(&self, event: reactor::Event) {
+        self.sm_tx.send(space_manager::Event::ReactorEvent(event));
     }
 
     fn register_hotkeys(&mut self) {
@@ -419,13 +249,6 @@ impl WmController {
     fn unregister_hotkeys(&mut self) {
         debug!("unregister_hotkeys");
         self.hotkeys = None;
-    }
-
-    fn get_windows(&self) -> Vec<WindowServerInfo> {
-        #[cfg(not(test))]
-        return sys::window_server::get_visible_windows_with_layer(None);
-        #[cfg(test)]
-        vec![]
     }
 
     fn exec_cmd(&self, #[allow(unused)] cmd_args: ExecCmd) {

@@ -30,7 +30,6 @@ use glide_wm::sys::{self};
 use livesplit_hotkey::{ConsumePreference, Modifiers};
 use objc2_app_kit::{NSRunningApplication, NSScreen, NSWindow, NSWindowNumberListOptions};
 use objc2_foundation::{MainThreadMarker, NSString};
-use tokio::select;
 use tokio::sync::mpsc::{self, UnboundedReceiver, unbounded_channel};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -298,20 +297,11 @@ async fn run_app_actor(pid_or_bundle: String) -> anyhow::Result<()> {
     let info = AppInfo::from(
         &*NSRunningApplication::with_process_id(pid).expect("Could not get running application"),
     );
-    let (events_tx, mut events_rx) = actor::channel();
     let (ws_tx, mut ws_rx) = actor::channel();
-    actor::app::spawn_app_thread(pid, info, events_tx, ws_tx, None);
-    while !events_rx.is_closed() {
-        select! {
-            Some((span, event)) = events_rx.recv() => {
-                let _sp = span.enter();
-                info!("{event:?}");
-            }
-            Some((span, event)) = ws_rx.recv() => {
-                let _sp = span.enter();
-                info!("{event:?}");
-            }
-        }
+    actor::app::spawn_app_thread(pid, info, ws_tx, None);
+    while let Some((span, event)) = ws_rx.recv().await {
+        let _sp = span.enter();
+        info!("{event:?}");
     }
     Ok(())
 }

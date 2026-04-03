@@ -80,6 +80,7 @@ impl MainWindowTracker {
             | Event::StartupComplete
             | Event::WindowsDiscovered { .. }
             | Event::WindowCreated(..)
+            | Event::WindowBecameVisible(..)
             | Event::WindowDestroyed(..)
             | Event::WindowFrameChanged(..)
             | Event::ScreenParametersChanged { .. }
@@ -92,7 +93,8 @@ impl MainWindowTracker {
             | Event::LeftMouseDown(_)
             | Event::LeftMouseDragged(_)
             | Event::Command(..)
-            | Event::ConfigChanged(_) => return None,
+            | Event::ConfigChanged(_)
+            | Event::WindowsOnScreenUpdated { .. } => return None,
         };
         if Some(event_pid) == self.global_frontmost && quiet_edge == Quiet::No {
             if let Some(wid) = self.main_window() {
@@ -140,6 +142,7 @@ mod tests {
     use super::super::testing::{Apps, make_windows};
     use super::super::{Event, LayoutManager, Quiet, Reactor, SpaceId, WindowId};
     use crate::sys::screen::CoordinateConverter;
+    use crate::sys::window_server::WindowsOnScreen;
 
     #[test]
     fn it_tracks_frontmost_app_and_main_window_correctly() {
@@ -150,7 +153,7 @@ mod tests {
         reactor.handle_event(ScreenParametersChanged {
             frames: vec![CGRect::ZERO],
             spaces: vec![Some(space)],
-            windows: vec![],
+
             converter: CoordinateConverter::default(),
             scale_factors: vec![2.0],
         });
@@ -162,9 +165,8 @@ mod tests {
             make_windows(2),
             Some(WindowId::new(1, 1)),
             true,
-            true,
         ));
-        reactor.handle_events(apps.make_app_with_opts(2, make_windows(2), None, false, true));
+        reactor.handle_events(apps.make_app_with_opts(2, make_windows(2), None, false));
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 1)));
 
@@ -199,7 +201,6 @@ mod tests {
             make_windows(2),
             Some(WindowId::new(3, 1)),
             true,
-            true,
         ));
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(3, 1)));
@@ -214,7 +215,7 @@ mod tests {
         reactor.handle_event(ScreenParametersChanged {
             frames: vec![CGRect::ZERO],
             spaces: vec![Some(space)],
-            windows: vec![],
+
             converter: CoordinateConverter::default(),
             scale_factors: vec![2.0],
         });
@@ -225,9 +226,8 @@ mod tests {
             make_windows(2),
             Some(WindowId::new(1, 1)),
             true,
-            true,
         ));
-        reactor.handle_events(apps.make_app_with_opts(2, make_windows(2), None, false, true));
+        reactor.handle_events(apps.make_app_with_opts(2, make_windows(2), None, false));
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 1)));
 
@@ -280,7 +280,7 @@ mod tests {
         reactor.handle_event(ScreenParametersChanged {
             frames: vec![CGRect::ZERO],
             spaces: vec![Some(space)],
-            windows: vec![],
+
             converter: CoordinateConverter::default(),
             scale_factors: vec![2.0],
         });
@@ -290,10 +290,9 @@ mod tests {
             windows,
             Some(WindowId::new(3, 1)),
             false,
-            true,
         ));
 
-        reactor.handle_event(SpaceChanged(vec![None], vec![]));
+        reactor.handle_event(SpaceChanged(vec![None], WindowsOnScreen::new(vec![])));
         reactor.handle_event(ApplicationActivated(3, Quiet::No));
         reactor.handle_event(ApplicationGloballyActivated(3));
         reactor.handle_event(WindowsDiscovered {
@@ -303,7 +302,7 @@ mod tests {
         });
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
 
-        reactor.handle_event(SpaceChanged(vec![Some(space)], vec![]));
+        reactor.handle_event(SpaceChanged(vec![Some(space)], WindowsOnScreen::new(vec![])));
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(3, 1)));
     }
 }

@@ -32,8 +32,9 @@ use tracing::{Span, debug, error, info, instrument, trace, warn};
 use super::mouse;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::layout::{self, LayoutCommand, LayoutEvent, LayoutManager, LayoutWindowInfo};
-use crate::actor::raise::{self, RaiseRequest};
-use crate::actor::{group_bars, status};
+use crate::actor::raise::{self, RaiseManager, RaiseRequest};
+use crate::actor::space_manager::SpaceManager;
+use crate::actor::{group_bars, space_manager, status, window_server, wm_controller};
 use crate::collections::{HashMap, HashSet};
 use crate::config::Config;
 use crate::log::{self, MetricsCommand};
@@ -42,10 +43,14 @@ use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs, round_to_physical};
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::timer::Timer;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::{WindowServerId, WindowServerInfo, WindowsOnScreen};
 
 pub type Sender = crate::actor::Sender<Event>;
-type Receiver = crate::actor::Receiver<Event>;
+pub type Receiver = crate::actor::Receiver<Event>;
+
+pub fn channel() -> (Sender, Receiver) {
+    crate::actor::channel()
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,7 +68,6 @@ pub enum Event {
         spaces: Vec<Option<SpaceId>>,
         scale_factors: Vec<f64>,
         converter: CoordinateConverter,
-        windows: Vec<WindowServerInfo>,
     },
 
     /// The current space changed.
@@ -72,11 +76,16 @@ pub enum Event {
     /// event. `None` in the SpaceId vec disables managing windows on that
     /// screen until the next space change.
     ///
-    /// A snapshot of visible windows from the window server is also taken and
-    /// sent with this message. This allows us to determine more precisely which
-    /// windows are visible on a given space, since app actor events like
-    /// WindowsDiscovered are not ordered with respect to space events.
-    SpaceChanged(Vec<Option<SpaceId>>, Vec<WindowServerInfo>),
+    /// WindowsOnScreen is included to avoid doing two updates in rapid
+    /// succession. If there are windows we know were destroyed in the new
+    /// space we'll start rearranging things, only to do so again if we
+    /// discover newly added windows.
+    ///
+    /// TODO: In the future WindowsOnScreenUpdated should include a mapping
+    /// of SpaceId to window list, and Reactor would maintain a list per
+    /// space. Then we can update the windows on screen for the space before
+    /// sending SpaceChanged.
+    SpaceChanged(Vec<Option<SpaceId>>, WindowsOnScreen),
 
     /// All running apps at launch have been registered.
     StartupComplete,
@@ -97,7 +106,6 @@ pub enum Event {
         is_frontmost: bool,
         main_window: Option<WindowId>,
         visible_windows: Vec<(WindowId, WindowInfo)>,
-        window_server_info: Vec<WindowServerInfo>,
     },
     ApplicationTerminated(pid_t),
     ApplicationThreadTerminated(pid_t),
@@ -112,7 +120,19 @@ pub enum Event {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     },
-    WindowCreated(WindowId, WindowInfo, Option<WindowServerInfo>, MouseState),
+    WindowCreated(WindowId, WindowInfo, MouseState),
+
+    /// Updated list of windows visible on screen from the window server.
+    ///
+    /// Sent after space changes, app launches, and window creation. When
+    /// `pid` is set, only that app's windows changed.
+    WindowsOnScreenUpdated {
+        pid: Option<pid_t>,
+        on_screen: WindowsOnScreen,
+    },
+
+    // TODO: Consider replacing with WindowsOnScreenUpdated.
+    WindowBecameVisible(WindowId),
     WindowDestroyed(WindowId),
     WindowFrameChanged(
         WindowId,
@@ -183,8 +203,6 @@ pub enum ReactorCommand {
     Serialize,
     SaveAndExit,
 }
-
-use crate::actor::raise::RaiseManager;
 
 pub struct Reactor {
     config: Arc<Config>,
@@ -261,26 +279,53 @@ impl From<WindowInfo> for WindowState {
 }
 
 impl Reactor {
+    /// Spawn the reactor on a dedicated thread, co-running a `WindowServer` in
+    /// the same executor. Use [`channel()`] to create reactor_tx.
+    #[expect(clippy::too_many_arguments)]
     pub fn spawn(
         config: Arc<Config>,
+        one_space: bool,
         layout: LayoutManager,
         record: Record,
         mouse_tx: mouse::Sender,
         status_tx: status::Sender,
         group_indicators_tx: group_bars::Sender,
-    ) -> Sender {
-        let (events_tx, events) = crate::actor::channel();
-        let events_tx_clone = events_tx.clone();
+        reactor_tx: Sender,
+        events: Receiver,
+        wm_tx: wm_controller::Sender,
+        ws_tx: window_server::Sender,
+        ws_rx: window_server::Receiver,
+        sm_tx: space_manager::Sender,
+        sm_rx: space_manager::Receiver,
+        skylight_tx: window_server::SkylightSender,
+    ) {
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
-                let mut reactor = Reactor::new(config, layout, record, group_indicators_tx);
-                reactor.mouse_tx.replace(mouse_tx);
-                reactor.status_tx.replace(status_tx);
-                Executor::run(reactor.run(events, events_tx_clone));
+                let mut reactor =
+                    Reactor::new(config.clone(), layout, record, group_indicators_tx.clone());
+                reactor.mouse_tx.replace(mouse_tx.clone());
+                reactor.status_tx.replace(status_tx.clone());
+                let space_manager = SpaceManager::new(
+                    one_space,
+                    config,
+                    reactor_tx.clone(),
+                    ws_tx,
+                    wm_tx,
+                    status_tx,
+                    group_indicators_tx,
+                    mouse_tx,
+                );
+                let window_server = window_server::WindowServer::new(sm_tx, skylight_tx);
+                Executor::run(async move {
+                    tokio::join!(
+                        reactor.run(events, reactor_tx),
+                        space_manager.run(sm_rx),
+                        window_server.run(ws_rx),
+                    );
+                });
             })
             .unwrap();
-        events_tx
     }
 
     pub fn new(
@@ -343,7 +388,7 @@ impl Reactor {
                 }
                 _ = tick_timer.next(), if animating => {
                     self.layout.tick_viewports();
-                    self.update_layout(None, true);
+                    self.update_layout(&[], true);
                     if self.layout.has_active_scroll_animation() {
                         tick_timer.set_next_fire(tick_interval);
                     }
@@ -366,7 +411,7 @@ impl Reactor {
     fn handle_event(&mut self, event: Event) {
         self.record.on_event(&event);
         self.log_event(&event);
-        let mut animation_focus_wid = None;
+        let mut animation_focus_wids: Vec<WindowId> = Vec::new();
         let mut is_resize = false;
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {
@@ -375,12 +420,10 @@ impl Reactor {
                 info,
                 handle,
                 visible_windows,
-                window_server_info,
                 is_frontmost: _,
                 main_window: _,
             } => {
                 self.apps.insert(pid, AppState { info, handle });
-                self.update_partial_window_server_info(window_server_info);
                 self.on_windows_discovered(pid, visible_windows, vec![]);
             }
             Event::StartupComplete => {
@@ -407,7 +450,7 @@ impl Reactor {
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 self.on_windows_discovered(pid, new, known_visible);
             }
-            Event::WindowCreated(wid, window, ws_info, mouse_state) => {
+            Event::WindowCreated(wid, window, mouse_state) => {
                 // TODO: It's possible for a window to be on multiple spaces
                 // or move spaces. (Add a test)
                 // FIXME: We assume all windows are on the main screen.
@@ -415,27 +458,33 @@ impl Reactor {
                     self.window_ids.insert(wsid, wid);
                 }
                 self.windows.insert(wid, window.clone().into());
-                if let Some(info) = ws_info.clone() {
-                    self.window_server_info.insert(info.id, info);
-                }
-                if self.window_is_tracked(wid)
-                    && let Some(space) = self.best_space_for_window(&window.frame)
-                    && let Some(app) = self.apps.get(&wid.pid)
-                {
-                    animation_focus_wid = Some(wid);
-                    let info = LayoutWindowInfo {
-                        bundle_id: app.info.bundle_id.clone(),
-                        title: window.title.clone().into(),
-                        layer: ws_info.map(|i| i.layer),
-                        is_standard: window.is_standard,
-                        is_resizable: window.is_resizable,
-                    };
-                    self.send_layout_event(LayoutEvent::WindowAdded(space, wid, info));
-                }
                 if mouse_state == MouseState::Down {
                     self.in_drag = true;
                     // Suppress updates while left button is pressed in case
                     // a drag is in progress.
+                }
+            }
+            Event::WindowsOnScreenUpdated { pid, on_screen } => match pid {
+                Some(_) => self.update_partial_window_server_info(on_screen),
+                None => self.update_complete_window_server_info(on_screen),
+            },
+            Event::WindowBecameVisible(wid) => {
+                if self.window_is_tracked(wid)
+                    && let Some(window) = self.windows.get(&wid)
+                    && let ws_info =
+                        window.window_server_id.and_then(|id| self.window_server_info.get(&id))
+                    && let Some(space) = self.best_space_for_window(&window.frame_monotonic)
+                    && let Some(app) = self.apps.get(&wid.pid)
+                {
+                    animation_focus_wids.push(wid);
+                    let info = LayoutWindowInfo {
+                        bundle_id: app.info.bundle_id.clone(),
+                        title: window.title.clone().into(),
+                        layer: ws_info.map(|i| i.layer),
+                        is_standard: window.is_ax_standard,
+                        is_resizable: window.is_resizable,
+                    };
+                    self.send_layout_event(LayoutEvent::WindowAdded(space, wid, info));
                 }
             }
             Event::WindowDestroyed(wid) => {
@@ -487,7 +536,6 @@ impl Reactor {
             Event::ScreenParametersChanged {
                 frames,
                 spaces,
-                windows,
                 converter,
                 scale_factors,
             } => {
@@ -503,7 +551,6 @@ impl Reactor {
                     let Some(space) = screen.space else { continue };
                     self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
                 }
-                self.update_complete_window_server_info(windows);
                 self.update_active_screen();
                 // FIXME: Update visible windows if space changed.
                 // Forward the event to group_indicators. We serialize these
@@ -513,7 +560,8 @@ impl Reactor {
                 self.group_indicators_tx
                     .send(group_bars::Event::ScreenParametersChanged(spaces, converter));
             }
-            Event::SpaceChanged(spaces, ws_info) => {
+            Event::SpaceChanged(spaces, on_screen) => {
+                self.update_complete_window_server_info(on_screen);
                 if spaces.len() != self.screens.len() {
                     warn!(
                         "Ignoring space change event: we have {} spaces, but {} screens",
@@ -539,7 +587,6 @@ impl Reactor {
                     let spaces = spaces.iter().copied().flatten().collect();
                     self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
                 }
-                self.update_complete_window_server_info(ws_info);
                 self.update_active_screen();
                 self.update_visible_windows();
             }
@@ -564,13 +611,13 @@ impl Reactor {
                 if let Some(&screen) = self.active_screen() {
                     if screen.space.is_some() {
                         if self.layout.update_interactive_resize(point, screen.frame) {
-                            self.update_layout(None, true);
+                            self.update_layout(&[], true);
                         } else if self.layout.update_interactive_move(
                             point,
                             screen.frame,
                             &self.config,
                         ) {
-                            self.update_layout(None, false);
+                            self.update_layout(&[], false);
                         }
                     }
                 }
@@ -676,30 +723,39 @@ impl Reactor {
             self.update_active_screen();
         }
         if !self.in_drag {
-            self.update_layout(animation_focus_wid, is_resize);
+            self.update_layout(&animation_focus_wids, is_resize);
         }
     }
 
-    fn update_complete_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
-        self.visible_windows.clear();
-        self.update_partial_window_server_info(ws_info);
-    }
-
-    fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
-        self.visible_windows.extend(ws_info.iter().map(|info| info.id));
-        for info in ws_info.iter().filter(|i| i.layer == 0) {
+    fn update_complete_window_server_info(&mut self, on_screen: WindowsOnScreen) {
+        for info in on_screen.info.iter().filter(|i| i.layer == 0) {
             let Some(wid) = self.window_ids.get(&info.id) else {
                 continue;
             };
             let Some(window) = self.windows.get_mut(wid) else {
                 continue;
             };
-            // Assume this update comes from after the last write. The window
-            // is on a different space (unless it's on all spaces) and
-            // there's no way to order it with respect to our writes anyway.
+            // Assume this update comes from after the last write. Typically the
+            // window is on a different space than the one we're coming from
+            // (unless it's on all spaces).
+            //
+            // TODO: It is still possible to have a race if we issued resizes on
+            // this window that haven't completed yet (e.g. from an earlier
+            // animation and a slow app). Consider having the app actor give us
+            // updated locations on GetVisibleWindows instead.
             window.frame_monotonic = info.frame;
         }
-        self.window_server_info.extend(ws_info.into_iter().map(|info| (info.id, info)));
+        self.update_partial_window_server_info(on_screen);
+    }
+
+    fn update_partial_window_server_info(&mut self, on_screen: WindowsOnScreen) {
+        // The on_screen snapshot always contains the complete list of visible
+        // windows, even for partial (per-app) updates. Replace rather than
+        // extend to avoid accumulating stale entries.
+        self.visible_windows.clear();
+        self.visible_windows.extend(on_screen.visible);
+        self.window_server_info
+            .extend(on_screen.info.into_iter().map(|info| (info.id, info)));
     }
 
     fn update_visible_windows(&mut self) {
@@ -889,7 +945,7 @@ impl Reactor {
     }
 
     #[instrument(skip(self), fields())]
-    pub fn update_layout(&mut self, new_wid: Option<WindowId>, skip_anim: bool) {
+    pub fn update_layout(&mut self, new_wids: &[WindowId], skip_anim: bool) {
         let main_window = self.main_window();
         trace!(?main_window);
         let mut anim = Animation::new();
@@ -919,7 +975,7 @@ impl Reactor {
                 };
                 let txid = window.next_txid();
                 trace!(?wid, ?current_frame, ?target_frame);
-                let is_new = Some(wid) == new_wid;
+                let is_new = new_wids.contains(&wid);
                 anim.add_window(&app.handle, wid, current_frame, target_frame, is_new, txid);
                 window.frame_monotonic = target_frame;
             }
@@ -956,7 +1012,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -987,7 +1042,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -1026,7 +1080,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -1069,7 +1122,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(3)));
@@ -1119,7 +1171,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(1)));
@@ -1150,7 +1201,10 @@ pub mod tests {
             spaces: vec![None],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: ws_info.clone(),
+        });
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: None,
+            on_screen: WindowsOnScreen::new(ws_info.clone()),
         });
 
         reactor.handle_events(apps.make_app_with_opts(
@@ -1158,13 +1212,15 @@ pub mod tests {
             make_windows(2),
             Some(WindowId::new(1, 1)),
             true,
-            true,
         ));
         reactor.handle_event(Event::StartupComplete);
         reactor.handle_event(Event::ApplicationGloballyActivated(1));
         reactor.handle_events(apps.simulate_events());
 
-        reactor.handle_event(Event::SpaceChanged(vec![Some(SpaceId::new(1))], ws_info));
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(SpaceId::new(1))],
+            WindowsOnScreen::new(ws_info),
+        ));
         reactor.handle_events(apps.simulate_events());
         assert_eq!(
             reactor.layout.selected_window(SpaceId::new(1)),
@@ -1182,7 +1238,6 @@ pub mod tests {
             spaces: vec![None],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(1)));
@@ -1196,7 +1251,6 @@ pub mod tests {
         reactor.handle_event(Event::WindowCreated(
             WindowId::new(1, 2),
             make_window(2),
-            None,
             MouseState::Up,
         ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
@@ -1213,7 +1267,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
             scale_factors: vec![2.0, 2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         let mut windows = make_windows(2);
@@ -1241,15 +1294,18 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![WindowServerInfo {
+        });
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: None,
+            on_screen: WindowsOnScreen::new(vec![WindowServerInfo {
                 id: WindowServerId::new(1),
                 pid: 1,
                 layer: 10,
                 frame: CGRect::ZERO,
-            }],
+            }]),
         });
 
-        reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), None, true, false));
+        reactor.handle_events(apps.make_app_without_ws_info(1, make_windows(1), None, true));
 
         let state_before = apps.windows.clone();
         let _events = apps.simulate_events();
@@ -1260,7 +1316,6 @@ pub mod tests {
         reactor.handle_event(Event::WindowCreated(
             WindowId::new(1, 2),
             make_window(2),
-            None,
             MouseState::Up,
         ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
@@ -1280,7 +1335,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
             scale_factors: vec![2.0, 2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -1361,14 +1415,12 @@ pub mod tests {
             spaces: vec![Some(space)],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app_with_opts(
             1,
             make_windows(3),
             Some(WindowId::new(1, 1)),
-            true,
             true,
         ));
         reactor.handle_event(Event::StartupComplete);
@@ -1389,21 +1441,25 @@ pub mod tests {
             spaces: vec![None],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
         reactor.handle_event(Event::ScreenParametersChanged {
             frames: vec![full_screen],
             spaces: vec![Some(space)],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: (1..=3)
-                .map(|n| WindowServerInfo {
-                    pid: 1,
-                    id: WindowServerId::new(n),
-                    layer: 0,
-                    frame: CGRect::ZERO,
-                })
-                .collect(),
+        });
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: None,
+            on_screen: WindowsOnScreen::new(
+                (1..=3)
+                    .map(|n| WindowServerInfo {
+                        pid: 1,
+                        id: WindowServerId::new(n),
+                        layer: 0,
+                        frame: CGRect::ZERO,
+                    })
+                    .collect(),
+            ),
         });
         let requests = apps.requests();
         for request in requests {
@@ -1444,7 +1500,6 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1))],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         reactor.handle_events(apps.make_app(1, make_windows(1)));
@@ -1466,12 +1521,15 @@ pub mod tests {
             spaces: vec![Some(SpaceId::new(1)), None],
             scale_factors: vec![2.0, 2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![WindowServerInfo {
+        });
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: None,
+            on_screen: WindowsOnScreen::new(vec![WindowServerInfo {
                 id: WindowServerId::new(1),
                 pid: 1,
                 layer: 0,
                 frame: CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 500.)),
-            }],
+            }]),
         });
 
         let _events = apps.simulate_events();
@@ -1497,7 +1555,6 @@ pub mod tests {
             spaces: vec![Some(space)],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
         assert_eq!(None, reactor.main_window());
 
@@ -1506,7 +1563,6 @@ pub mod tests {
             1,
             make_windows(2),
             Some(WindowId::new(1, 1)),
-            true,
             true,
         ));
 
@@ -1529,7 +1585,6 @@ pub mod tests {
             spaces: vec![Some(space)],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
         reactor1.handle_events(apps.make_app(1, make_windows(2)));
         reactor1.handle_events(apps.make_app(2, make_windows(2)));
@@ -1553,7 +1608,6 @@ pub mod tests {
             spaces: vec![Some(space)],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
         // Only apps 1 and 3 launch during restore (app 2 was terminated between save and restore)
         reactor2.handle_events(apps2.make_app(1, make_windows(2)));
@@ -1598,7 +1652,6 @@ pub mod tests {
             spaces: vec![Some(space)],
             scale_factors: vec![2.0],
             converter: CoordinateConverter::default(),
-            windows: vec![],
         });
 
         let mut apps = Apps::new();
