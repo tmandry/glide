@@ -415,6 +415,40 @@ impl LayoutTree {
         .last()
     }
 
+    pub fn focus_next(&self, layout: LayoutId, current: NodeId) -> Option<NodeId> {
+        let windows = self.windows_in_order(layout);
+        if windows.is_empty() {
+            return None;
+        }
+        let pos = windows.iter().position(|&n| n == current);
+        let next_pos = match pos {
+            Some(p) => (p + 1) % windows.len(),
+            None => 0,
+        };
+        Some(windows[next_pos])
+    }
+
+    pub fn focus_prev(&self, layout: LayoutId, current: NodeId) -> Option<NodeId> {
+        let windows = self.windows_in_order(layout);
+        if windows.is_empty() {
+            return None;
+        }
+        let pos = windows.iter().position(|&n| n == current);
+        let prev_pos = match pos {
+            Some(p) if p == 0 => windows.len() - 1,
+            Some(p) => p - 1,
+            None => windows.len() - 1,
+        };
+        Some(windows[prev_pos])
+    }
+
+    fn windows_in_order(&self, layout: LayoutId) -> Vec<NodeId> {
+        self.root(layout)
+            .traverse_preorder(self.map())
+            .filter(|&node| self.window_at(node).is_some())
+            .collect()
+    }
+
     pub fn traverse_scroll_wrapping(
         &self,
         layout: LayoutId,
@@ -981,6 +1015,50 @@ mod tests {
         assert_eq!(None, tree.window_at(b3));
         assert_eq!(None, tree.window_at(a3));
         assert_eq!(2, root.children(tree.map()).count());
+    }
+
+    #[test]
+    fn focus_next_prev_with_wraparound() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let n1 = tree.add_window_under(layout, root, WindowId::new(1, 1));
+        let n2 = tree.add_window_under(layout, root, WindowId::new(1, 2));
+        let n3 = tree.add_window_under(layout, root, WindowId::new(1, 3));
+
+        // Test next
+        assert_eq!(tree.focus_next(layout, n1), Some(n2));
+        assert_eq!(tree.focus_next(layout, n2), Some(n3));
+        assert_eq!(tree.focus_next(layout, n3), Some(n1)); // wraparound
+
+        // Test prev
+        assert_eq!(tree.focus_prev(layout, n3), Some(n2));
+        assert_eq!(tree.focus_prev(layout, n2), Some(n1));
+        assert_eq!(tree.focus_prev(layout, n1), Some(n3)); // wraparound
+
+        // Test with container selection
+        assert_eq!(tree.focus_next(layout, root), Some(n1));
+        assert_eq!(tree.focus_prev(layout, root), Some(n3));
+    }
+
+    #[test]
+    fn focus_next_prev_nested() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let n1 = tree.add_window_under(layout, root, WindowId::new(1, 1));
+        let c1 = tree.add_container(root, ContainerKind::Vertical);
+        let n2 = tree.add_window_under(layout, c1, WindowId::new(1, 2));
+        let n3 = tree.add_window_under(layout, c1, WindowId::new(1, 3));
+
+        // Order should be n1, n2, n3 (pre-order)
+        assert_eq!(tree.focus_next(layout, n1), Some(n2));
+        assert_eq!(tree.focus_next(layout, n2), Some(n3));
+        assert_eq!(tree.focus_next(layout, n3), Some(n1));
+
+        assert_eq!(tree.focus_prev(layout, n1), Some(n3));
+        assert_eq!(tree.focus_prev(layout, n3), Some(n2));
+        assert_eq!(tree.focus_prev(layout, n2), Some(n1));
     }
 
     #[test]
