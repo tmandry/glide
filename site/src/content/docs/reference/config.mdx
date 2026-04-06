@@ -3,6 +3,13 @@ title: Configuration
 description: Config keys for Glide
 ---
 
+## Location
+
+Glide looks for configuration in the following locations (in order of preference):
+
+1. `~/.config/glide/glide.toml`
+2. `~/.glide.toml`
+
 ## Default configuration
 
 The following is the default configuration file that ships with Glide:
@@ -11,13 +18,6 @@ import { Code } from '@astrojs/starlight/components';
 import defaults from '../../../../../glide.default.toml?raw';
 
 <Code code={defaults} lang="toml" />
-
-## Location
-
-Glide looks for configuration in the following locations (in order of preference):
-
-1. `~/.config/glide/glide.toml`
-2. `~/.glide.toml`
 
 ## Key naming conventions
 
