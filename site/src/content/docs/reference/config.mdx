@@ -3,18 +3,21 @@ title: Configuration
 description: Config keys for Glide
 ---
 
-## Configuration file location
+## Default configuration
+
+The following is the default configuration file that ships with Glide:
+
+import { Code } from '@astrojs/starlight/components';
+import defaults from '../../../../../glide.default.toml?raw';
+
+<Code code={defaults} lang="toml" />
+
+## Location
 
 Glide looks for configuration in the following locations (in order of preference):
 
-1. `~/.config/glide/glide.toml` (preferred, added in v0.2.9)
-2. `~/.glide.toml` (legacy location, still supported)
-
-You can also specify a custom config path using the `--config` flag when launching Glide.
-
-:::note[Mac keyboard note]
-Throughout this documentation, "Alt" refers to the Option (⌥) key on Mac keyboards.
-:::
+1. `~/.config/glide/glide.toml`
+2. `~/.glide.toml`
 
 ## Key naming conventions
 
@@ -26,6 +29,12 @@ When defining key bindings in your config file, you must use specific key names 
 - **Letter keys**: Just use the letter capitalized (e.g., `A`, `H`, `J`, `K`, `L`)
 - **Number keys**: Use the number (e.g., `1`, `2`, `3`)
 - **Modifiers**: `Alt`, `Ctrl`, `Shift`, `Cmd` (all must be capitalized)
+
+:::note[Mac keyboard note]
+Throughout this documentation, "Alt" refers to the Option (⌥) key on Mac keyboards.
+
+For a comprehensive list of all supported key names, see the [livesplit-hotkey documentation](https://docs.rs/livesplit-hotkey/0.8.0/livesplit_hotkey/enum.KeyCode.html).
+:::
 
 ### Examples
 
@@ -49,15 +58,11 @@ When defining key bindings in your config file, you must use specific key names 
 Key names correspond to **physical key positions** on a standard QWERTY keyboard, regardless of your active keyboard layout. If you use an alternative layout (e.g., Dvorak or Colemak), the key name `H` refers to the physical key in the QWERTY `H` position — even if that key produces a different character in your layout.
 :::
 
-:::tip[Complete key name reference]
-For a comprehensive list of all supported key names, see the [livesplit-hotkey documentation](https://docs.rs/livesplit-hotkey/0.8.0/livesplit_hotkey/enum.KeyCode.html).
-:::
-
 ## Working with default key bindings
 
 As of v0.2.9, you can choose to extend the default key bindings instead of replacing them entirely.
 
-### Extending defaults (new in v0.2.9)
+### Extending defaults
 
 Set `default_keys = true` in the `[settings]` section to include all default key bindings. You can then add your own or override specific ones:
 
@@ -76,7 +81,7 @@ default_keys = true
 "Alt + Equal" = "disable"
 ```
 
-### Replacing defaults (traditional behavior)
+### Replacing defaults
 
 If you want complete control, either:
 - Don't set `default_keys` (defaults to `false`), or
@@ -87,12 +92,3 @@ Then define all your key bindings in the `[keys]` section.
 :::tip
 If you add an empty `[keys]` section without `default_keys = true`, all default key bindings will be disabled.
 :::
-
-## Default configuration
-
-The following is the default configuration file that ships with Glide:
-
-import { Code } from '@astrojs/starlight/components';
-import defaults from '../../../../../glide.default.toml?raw';
-
-<Code code={defaults} lang="toml" />
