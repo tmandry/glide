@@ -111,7 +111,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSValue",
 ] }
 objc2-service-management = "0.3.2"
-rand = "0.8.5"
+rand = "0.9.3"
 redact = { version = "0.1.11", features = ["serde"] }
 ron = "0.12.0"
 rustc-hash = "2.0.0"
