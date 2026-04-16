@@ -49,6 +49,8 @@ pub enum LayoutCommand {
     CycleColumnWidth,
     ChangeLayoutKind,
     ToggleColumnTabbed,
+    FocusNext,
+    FocusPrev,
 }
 
 fn default_resize_percent() -> f64 {
@@ -111,9 +113,8 @@ impl LayoutCommand {
             | ToggleColumnTabbed => true,
 
             NextLayout | PrevLayout | MoveFocus(_) | Ascend | Descend | Split(_)
-            | ToggleFocusFloating | ToggleWindowFloating | ToggleFullscreen | ChangeLayoutKind => {
-                false
-            }
+            | ToggleFocusFloating | ToggleWindowFloating | ToggleFullscreen | ChangeLayoutKind
+            | FocusNext | FocusPrev => false,
         }
     }
 }
@@ -751,6 +752,22 @@ impl LayoutManager {
                 if new_focus.is_some() && is_scroll {
                     self.clear_user_scrolling(space);
                 }
+                let focus_window = new_focus.and_then(|new| self.tree.window_at(new));
+                let raise_windows = new_focus
+                    .map(|new| self.tree.select_returning_surfaced_windows(new))
+                    .unwrap_or_default();
+                EventResponse { focus_window, raise_windows }
+            }
+            LayoutCommand::FocusNext => {
+                let new_focus = self.tree.focus_next(layout, self.tree.selection(layout));
+                let focus_window = new_focus.and_then(|new| self.tree.window_at(new));
+                let raise_windows = new_focus
+                    .map(|new| self.tree.select_returning_surfaced_windows(new))
+                    .unwrap_or_default();
+                EventResponse { focus_window, raise_windows }
+            }
+            LayoutCommand::FocusPrev => {
+                let new_focus = self.tree.focus_prev(layout, self.tree.selection(layout));
                 let focus_window = new_focus.and_then(|new| self.tree.window_at(new));
                 let raise_windows = new_focus
                     .map(|new| self.tree.select_returning_surfaced_windows(new))
@@ -2079,6 +2096,53 @@ mod tests {
                 .focus_window,
             Some(WindowId::new(pid, 4))
         );
+    }
+
+    #[test]
+    fn focus_next_prev() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new();
+        let space = SpaceId::new(1);
+        let pid = 1;
+
+        let screen = rect(0, 0, 1000, 1000);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![
+                (WindowId::new(pid, 1), win_info()),
+                (WindowId::new(pid, 2), win_info()),
+                (WindowId::new(pid, 3), win_info()),
+            ],
+        ));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        // Test FocusNext
+        assert_eq!(
+            mgr.handle_command(Some(space), &[space], FocusNext).focus_window,
+            Some(WindowId::new(pid, 2))
+        );
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 2)));
+
+        assert_eq!(
+            mgr.handle_command(Some(space), &[space], FocusNext).focus_window,
+            Some(WindowId::new(pid, 3))
+        );
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 3)));
+
+        assert_eq!(
+            mgr.handle_command(Some(space), &[space], FocusNext).focus_window,
+            Some(WindowId::new(pid, 1))
+        ); // wraparound
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        // Test FocusPrev
+        assert_eq!(
+            mgr.handle_command(Some(space), &[space], FocusPrev).focus_window,
+            Some(WindowId::new(pid, 3))
+        ); // wraparound
     }
 
     #[test]
