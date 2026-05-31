@@ -30,13 +30,12 @@ release.codegen-units = 1
 
 [features]
 
-# WARNING: exec_cmd causes Glide to run any arbitrary command with full access
-# to accessibility APIs, which can read anything on your screen and monitor
-# input. Paired with the glide CLI it allows anyone who can modify your config
-# and run the CLI command, or who can run code as the current user to escalate
-# to these privileges.
+# Deprecated compatibility flag. exec_cmd is enabled by default and launches
+# through LaunchServices. This feature is kept for compatibility with existing
+# scripts that still pass `--features exec_cmd`, but will be removed at some
+# point.
 #
-# Make sure you understand these risks before enabling the feature.
+# Privileged execution now requires `unsafe_privileged = true` in config.
 exec_cmd = []
 
 [dependencies]
@@ -134,6 +133,7 @@ notify-debouncer-mini = "0.7.0"
 annotate-snippets = "0.12.10"
 thiserror = "2.0.17"
 itertools = "0.14.0"
+tempfile = { version = "3.17.1", default-features = false }
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
@@ -141,7 +141,6 @@ tokio = { version = "1.35.1", features = ["rt", "sync", "macros"] }
 test-log = { version = "0.2.16", default-features = false, features = [
     "trace",
 ] }
-tempfile = { version = "3.17.1", default-features = false }
 
 [package.metadata.packager]
 productName = "Glide"

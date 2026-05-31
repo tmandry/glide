@@ -4,7 +4,6 @@
 //! The WM Controller handles hotkey registration, app launching, and command
 //! dispatch. Space/screen enablement state lives in SpaceManager.
 
-use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,6 +25,7 @@ type StartupReceiver = mpsc::UnboundedReceiver<()>;
 use crate::actor::app::AppInfo;
 use crate::actor::{self, mouse, reactor, space_manager, status, window_server};
 use crate::sys;
+use crate::sys::bundle::CommandOutput;
 use crate::sys::event::HotkeyManager;
 use crate::sys::screen::NSScreenExt;
 
@@ -58,11 +58,32 @@ pub enum WmCmd {
     Exec(ExecCmd),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ExecCmd {
     String(String),
     Array(Vec<String>),
+    Options(ExecCmdOptions),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecCmdOptions {
+    pub cmd: ExecCmdArgs,
+    #[serde(default)]
+    pub unsafe_privileged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ExecCmdArgs {
+    String(String),
+    Array(Vec<String>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct NormalizedExecCmd {
+    pub(crate) cmd_args: Vec<String>,
+    pub(crate) unsafe_privileged: bool,
 }
 
 pub struct Config {
@@ -251,48 +272,70 @@ impl WmController {
         self.hotkeys = None;
     }
 
-    fn exec_cmd(&self, #[allow(unused)] cmd_args: ExecCmd) {
-        #[cfg(not(feature = "exec_cmd"))]
-        {
-            error!(
-                "exec_cmd is disabled in Glide due to security concerns. Enable it by rebuilding with the exec_cmd feature."
-            );
-            return;
-        }
-
+    fn exec_cmd(&self, cmd_args: ExecCmd) {
         // Spawn so we don't block the main thread.
-        #[allow(unreachable_code)]
         std::thread::spawn(move || {
-            let cmd_args = cmd_args.as_array();
-            let [cmd, args @ ..] = &*cmd_args else {
+            let cmd = cmd_args.normalize();
+            let [program, args @ ..] = &*cmd.cmd_args else {
                 error!("Empty argument list passed to exec");
                 return;
             };
-            let output = std::process::Command::new(cmd).args(args).output();
-            let output = match output {
-                Ok(o) => o,
-                Err(e) => {
-                    error!("Failed to execute command {cmd:?}: {e:?}");
-                    return;
-                }
+
+            let (mode, run_result) = if cmd.unsafe_privileged {
+                ("directly", run_unsafe_privileged_exec(&cmd.cmd_args))
+            } else {
+                (
+                    "via LaunchServices",
+                    sys::bundle::launch_cli_with_open(&cmd.cmd_args),
+                )
             };
-            if !output.status.success() {
-                error!(
-                    "Exec command exited with status {}: {cmd:?} {args:?}",
-                    output.status
-                );
-                error!("stdout: {}", String::from_utf8_lossy(&*output.stdout));
-                error!("stderr: {}", String::from_utf8_lossy(&*output.stderr));
+
+            match run_result {
+                Ok(output) if output.status == 0 => {}
+                Ok(CommandOutput { status, output }) => {
+                    error!("Exec command exited with status {status}: {program:?} {args:?}");
+                    error!("output:\n{output}");
+                }
+                Err(e) => {
+                    error!("Failed to execute command {mode} {program:?} {args:?}: {e:?}");
+                }
             }
         });
     }
 }
 
+fn run_unsafe_privileged_exec(args: &[String]) -> anyhow::Result<sys::bundle::CommandOutput> {
+    sys::bundle::launch_cli_privileged(args)
+}
+
 impl ExecCmd {
-    fn as_array(&self) -> Cow<'_, [String]> {
+    pub(crate) fn normalize(self) -> NormalizedExecCmd {
         match self {
-            ExecCmd::Array(vec) => Cow::Borrowed(&*vec),
-            ExecCmd::String(s) => s.split(' ').map(|s| s.to_owned()).collect::<Vec<_>>().into(),
+            ExecCmd::Array(vec) => NormalizedExecCmd {
+                cmd_args: vec,
+                unsafe_privileged: false,
+            },
+            ExecCmd::String(s) => NormalizedExecCmd {
+                cmd_args: split_cmd_string(&s),
+                unsafe_privileged: false,
+            },
+            ExecCmd::Options(opts) => NormalizedExecCmd {
+                cmd_args: opts.cmd.into_array(),
+                unsafe_privileged: opts.unsafe_privileged,
+            },
         }
     }
+}
+
+impl ExecCmdArgs {
+    fn into_array(self) -> Vec<String> {
+        match self {
+            ExecCmdArgs::Array(vec) => vec,
+            ExecCmdArgs::String(s) => split_cmd_string(&s),
+        }
+    }
+}
+
+fn split_cmd_string(s: &str) -> Vec<String> {
+    s.split_whitespace().map(ToOwned::to_owned).collect()
 }

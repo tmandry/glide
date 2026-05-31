@@ -377,6 +377,7 @@ mod tests {
     use super::*;
     use crate::actor::layout::LayoutCommand;
     use crate::actor::reactor::Command as ReactorCommand;
+    use crate::actor::wm_controller::WmCmd;
 
     #[test]
     fn default_config_is_valid() {
@@ -492,6 +493,55 @@ mod tests {
         assert!(!config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + KeyH"));
         // But other default keys should still be present
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + KeyJ"));
+    }
+
+    #[test]
+    fn exec_cmd_options_parse() {
+        let config = Config::parse(
+            r#"
+            [settings]
+            default_keys = false
+
+            [keys]
+            "Alt + Q" = { exec = ["bash", "-c", "echo hi"] }
+            "Alt + W" = { exec = { cmd = ["bash", "-c", "echo hi"], unsafe_privileged = true } }
+            "#,
+        )
+        .unwrap();
+
+        let cmd_q = &config
+            .keys
+            .iter()
+            .find(|(hk, _)| hk.to_string() == "Alt + KeyQ")
+            .expect("Alt + KeyQ should be present")
+            .1;
+        let WmCommand::Wm(WmCmd::Exec(exec_cmd)) = cmd_q else {
+            panic!("Expected exec command; got {cmd_q:?}");
+        };
+        assert_eq!(
+            exec_cmd.clone().normalize(),
+            crate::actor::wm_controller::NormalizedExecCmd {
+                cmd_args: vec!["bash".to_owned(), "-c".to_owned(), "echo hi".to_owned()],
+                unsafe_privileged: false,
+            }
+        );
+
+        let cmd_w = &config
+            .keys
+            .iter()
+            .find(|(hk, _)| hk.to_string() == "Alt + KeyW")
+            .expect("Alt + KeyW should be present")
+            .1;
+        let WmCommand::Wm(WmCmd::Exec(exec_cmd)) = cmd_w else {
+            panic!("Expected exec command; got {cmd_w:?}");
+        };
+        assert_eq!(
+            exec_cmd.clone().normalize(),
+            crate::actor::wm_controller::NormalizedExecCmd {
+                cmd_args: vec!["bash".to_owned(), "-c".to_owned(), "echo hi".to_owned()],
+                unsafe_privileged: true,
+            }
+        );
     }
 
     #[test]

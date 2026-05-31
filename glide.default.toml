@@ -137,9 +137,15 @@ default_keys = false
 # Utilities
 #
 
-# Execute an arbitrary command. Accepts an array or space-delimited string as args.
-# DISABLED by default; see exec_cmd in Cargo.toml.
+# Execute an arbitrary command. Accepts an array or space-delimited string as args:
+#
 # "<key>" = { "exec" = ["bash", "-c", "echo 'hello world' >/tmp/test.txt"] }
+#
+# Add `unsafe_privileged = true` to execute directly from Glide and inherit its
+# full permissions, like accessibility, which can read anything on your screen.
+#
+# CAUTION: Make sure you understand the risks before using this:
+# "<key>" = { "exec" = { "cmd" = ["bash", "-c", "echo hi"], unsafe_privileged = true } }
 
 #
 # Developer commands
@@ -151,6 +157,7 @@ default_keys = false
 # Scroll layout commands are experimental and intentionally not bound by
 # default. If you enable settings.experimental.scroll.enable, add explicit
 # keybindings in your personal config under [keys], for example:
+#
 # "Alt + Shift + S" = "change_layout_kind"
 # "Alt + Shift + T" = "toggle_column_tabbed"
 # "Alt + Shift + W" = "cycle_column_width"
