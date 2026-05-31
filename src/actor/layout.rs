@@ -101,6 +101,23 @@ pub struct EventResponse {
     pub focus_window: Option<WindowId>,
 }
 
+impl EventResponse {
+    pub fn coalesce(mut self, other: Self) -> Self {
+        self.raise_windows.extend(other.raise_windows);
+        match (self.focus_window, other.focus_window) {
+            (Some(focus_window), Some(other_focus)) => {
+                self.focus_window = Some(focus_window);
+                self.raise_windows.push(other_focus);
+            }
+            (None, Some(other_focus)) => {
+                self.focus_window = Some(other_focus);
+            }
+            _ => {}
+        }
+        self
+    }
+}
+
 impl LayoutCommand {
     fn modifies_layout(&self) -> bool {
         use LayoutCommand::*;
@@ -436,6 +453,10 @@ impl LayoutManager {
                     mapping.activate_size(size, &mut self.tree);
                 }
                 self.ensure_layout_kind_allowed_for_space(space);
+                return EventResponse {
+                    raise_windows: self.top_layer_windows(space),
+                    focus_window: None,
+                };
             }
             LayoutEvent::WindowsOnScreenUpdated(space, pid, windows) => {
                 self.debug_tree(space);
@@ -1344,6 +1365,13 @@ impl LayoutManager {
 
     fn layout(&self, space: SpaceId) -> LayoutId {
         self.try_layout(space).unwrap()
+    }
+
+    fn top_layer_windows(&self, space: SpaceId) -> Vec<WindowId> {
+        let Some(layout) = self.try_layout(space) else {
+            return Vec::new();
+        };
+        self.tree.visible_windows_under(self.tree.root(layout))
     }
 
     pub fn load(path: PathBuf) -> anyhow::Result<Self> {
@@ -2326,5 +2354,27 @@ mod tests {
         _ = mgr.handle_command(Some(space), &[space], ToggleColumnTabbed);
         assert_eq!(mgr.active_layout_kind(space), LayoutKind::Tree);
         assert_eq!(mgr.layout_sorted(space, screen), before);
+    }
+
+    #[test]
+    fn event_response_coalesce_downgrades_extra_focus_to_raise() {
+        let response = EventResponse {
+            raise_windows: vec![WindowId::new(1, 1)],
+            focus_window: Some(WindowId::new(1, 2)),
+        }
+        .coalesce(EventResponse {
+            raise_windows: vec![WindowId::new(1, 3)],
+            focus_window: Some(WindowId::new(1, 4)),
+        });
+
+        assert_eq!(
+            response.raise_windows,
+            vec![
+                WindowId::new(1, 1),
+                WindowId::new(1, 3),
+                WindowId::new(1, 4)
+            ]
+        );
+        assert_eq!(response.focus_window, Some(WindowId::new(1, 2)));
     }
 }
