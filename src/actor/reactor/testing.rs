@@ -10,7 +10,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{Span, debug, info};
 
-use super::{Event, Reactor, Record, Requested, TransactionId};
+use super::{Event, Reactor, Record, Requested, TransactionId, animation};
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::actor::layout::LayoutManager;
 use crate::actor::reactor;
@@ -27,6 +27,21 @@ impl Reactor {
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (group_indicators_tx, _) = crate::actor::channel();
         Reactor::new(Arc::new(config), layout, record, group_indicators_tx)
+    }
+
+    pub fn new_for_test_with_animation(
+        layout: LayoutManager,
+        animate: bool,
+    ) -> (Reactor, tokio::sync::mpsc::UnboundedReceiver<animation::Message>) {
+        let mut config = Config::default();
+        config.settings.default_disable = false;
+        config.settings.animate = animate;
+        let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
+        let (group_indicators_tx, _) = crate::actor::channel();
+        let mut reactor = Reactor::new(Arc::new(config), layout, record, group_indicators_tx);
+        let (tx, rx) = unbounded_channel();
+        reactor.animation_tx = Some(tx);
+        (reactor, rx)
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {

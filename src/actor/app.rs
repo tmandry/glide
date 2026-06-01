@@ -185,14 +185,15 @@ struct State {
     last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
     is_frontmost: bool,
     raises_tx: Sender<(Span, RaiseRequest)>,
-    is_animating: bool,
-    enable_enhanced_ui_after_animating: bool,
+    active_window_animations: u32,
+    restore_enhanced_ui_on_last_end: bool,
 }
 
 struct WindowState {
     elem: AXUIElement,
     is_standard: bool,
     last_seen_txid: TransactionId,
+    is_animating: bool,
     /// The last frame requested via [`Request::SetWindowFrame`] during an animation.
     /// Used to apply a deferred full-frame fixup in [`Request::EndWindowAnimation`].
     last_animation_frame: Option<CGRect>,
@@ -469,11 +470,11 @@ impl State {
                 });
             }
             &mut Request::SetWindowPos(wid, pos, txid) => {
-                let is_animating = self.is_animating;
+                let app_is_animating = self.active_window_animations > 0;
                 let app_elem = &self.app.clone();
                 let window = self.window_mut(wid)?;
                 window.last_seen_txid = txid;
-                without_enhanced(is_animating, app_elem, || {
+                without_enhanced(app_is_animating, app_elem, || {
                     trace("set_position", &window.elem, || {
                         window.elem.set_position(pos.to_cgtype())
                     })
@@ -490,15 +491,15 @@ impl State {
                 ));
             }
             &mut Request::SetWindowFrame(wid, frame, txid) => {
-                let is_animating = self.is_animating;
+                let app_is_animating = self.active_window_animations > 0;
                 let app_elem = &self.app.clone();
                 let window = self.window_mut(wid)?;
                 window.last_seen_txid = txid;
-                if is_animating {
+                if window.is_animating {
                     window.last_animation_frame = Some(frame);
                 }
-                without_enhanced(is_animating, app_elem, || {
-                    if is_animating {
+                without_enhanced(app_is_animating, app_elem, || {
+                    if window.is_animating {
                         set_window_frame_once(&window.elem, frame)?;
                     } else {
                         set_window_frame_with_retries(&window.elem, frame)?;
@@ -515,41 +516,60 @@ impl State {
                 ));
             }
             &mut Request::BeginWindowAnimation(wid) => {
-                self.enable_enhanced_ui_after_animating =
-                    match trace("enhanced_user_interface", &self.app, || {
-                        self.app.enhanced_user_interface()
-                    }) {
-                        Ok(enabled) => enabled,
-                        Err(_) => false,
-                    };
-                if self.enable_enhanced_ui_after_animating {
-                    _ = trace("set_enhanced_user_interface", &self.app, || {
-                        self.app.set_enhanced_user_interface(false)
-                    });
+                self.active_window_animations += 1;
+                if self.active_window_animations == 1 {
+                    self.restore_enhanced_ui_on_last_end =
+                        match trace("enhanced_user_interface", &self.app, || {
+                            self.app.enhanced_user_interface()
+                        }) {
+                            Ok(enabled) => enabled,
+                            Err(_) => false,
+                        };
+                    if self.restore_enhanced_ui_on_last_end {
+                        _ = trace("set_enhanced_user_interface", &self.app, || {
+                            self.app.set_enhanced_user_interface(false)
+                        });
+                    }
                 }
                 let window = self.window_mut(wid)?;
+                window.is_animating = true;
                 window.last_animation_frame = None;
                 let elem = window.elem.clone();
                 self.stop_notifications_for_animation(&elem);
-                self.is_animating = true;
             }
             &mut Request::EndWindowAnimation(wid) => {
-                let window = self.window_mut(wid)?;
+                let remaining_animations = if self.active_window_animations == 0 {
+                    warn!(?wid, "Got EndWindowAnimation without a matching begin");
+                    0
+                } else {
+                    self.active_window_animations -= 1;
+                    self.active_window_animations
+                };
+                let Ok(window) = self.window_mut(wid) else {
+                    if remaining_animations == 0 && self.restore_enhanced_ui_on_last_end {
+                        _ = trace("set_enhanced_user_interface", &self.app, || {
+                            self.app.set_enhanced_user_interface(true)
+                        });
+                        self.restore_enhanced_ui_on_last_end = false;
+                    }
+                    return Ok(false);
+                };
+                window.is_animating = false;
                 let last_animation_frame = window.last_animation_frame.take();
                 let elem = window.elem.clone();
                 let last_seen_txid = window.last_seen_txid;
                 // Apply the deferred full-frame fixup while enhanced UI is still
-                // disabled and before restarting notifications, so retries don't
-                // fire spurious AX move/resize notifications.
+                // disabled and before restarting notifications.
                 if let Some(frame) = last_animation_frame {
                     if let Err(e) = set_window_frame_with_retries(&elem, frame) {
                         warn!("Failed to apply frame fixup after animation: {e}");
                     }
                 }
-                if self.enable_enhanced_ui_after_animating {
+                if remaining_animations == 0 && self.restore_enhanced_ui_on_last_end {
                     _ = trace("set_enhanced_user_interface", &self.app, || {
                         self.app.set_enhanced_user_interface(true)
                     });
+                    self.restore_enhanced_ui_on_last_end = false;
                 }
                 self.restart_notifications_after_animation(&elem);
                 let frame = trace("frame", &elem, || elem.frame())?;
@@ -560,7 +580,6 @@ impl State {
                     Requested(true),
                     None,
                 ));
-                self.is_animating = false;
             }
             &mut Request::Raise(ref wids, ref token, sequence_id, quiet) => {
                 self.raises_tx
@@ -984,6 +1003,7 @@ impl State {
                 elem,
                 last_seen_txid: TransactionId::default(),
                 is_standard: info.is_standard,
+                is_animating: false,
                 last_animation_frame: None,
             },
         );
@@ -1122,8 +1142,8 @@ fn app_thread_main(
         last_activated: None,
         is_frontmost: false,
         raises_tx,
-        is_animating: false,
-        enable_enhanced_ui_after_animating: false,
+        active_window_animations: 0,
+        restore_enhanced_ui_on_last_end: false,
     };
 
     Executor::run(state.run(

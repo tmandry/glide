@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{mem, thread};
 
-use animation::Animation;
+use animation::{Animation, AnimationManager, Message as AnimationMessage};
 use main_window::MainWindowTracker;
 use objc2_core_foundation::CGRect;
 use redact::Secret;
@@ -218,6 +218,7 @@ pub struct Reactor {
     in_drag: bool,
     record: Record,
     raise_manager_tx: raise::Sender,
+    animation_tx: Option<animation::Sender>,
     mouse_tx: Option<mouse::Sender>,
     status_tx: Option<status::Sender>,
     group_indicators_tx: group_bars::Sender,
@@ -352,6 +353,7 @@ impl Reactor {
             in_drag: false,
             record,
             raise_manager_tx,
+            animation_tx: None,
             mouse_tx: None,
             status_tx: None,
             group_indicators_tx: group_indicators_tx,
@@ -361,12 +363,15 @@ impl Reactor {
     pub async fn run(mut self, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = mpsc::unbounded_channel();
         self.raise_manager_tx = raise_manager_tx.clone();
+        let (animation_tx, animation_rx) = mpsc::unbounded_channel();
+        self.animation_tx = Some(animation_tx);
 
         let mouse_tx = self.mouse_tx.clone();
         let reactor_task = self.run_reactor_loop(events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, mouse_tx);
+        let animation_task = AnimationManager::run(animation_rx);
 
-        let _ = tokio::join!(reactor_task, raise_manager_task);
+        let _ = tokio::join!(reactor_task, raise_manager_task, animation_task);
     }
 
     async fn run_reactor_loop(mut self, mut events: Receiver) {
@@ -1089,10 +1094,25 @@ impl Reactor {
         }
         // If the user is doing something with the mouse we don't want to
         // animate on top of that.
-        if skip_anim || !self.config.settings.animate || self.layout.has_active_scroll_animation() {
-            anim.skip_to_end();
+        let skip_anim =
+            skip_anim || !self.config.settings.animate || self.layout.has_active_scroll_animation();
+        if let Some(tx) = &self.animation_tx
+            && !anim.is_empty()
+        {
+            let message = if skip_anim {
+                AnimationMessage::SkipToEnd(anim)
+            } else {
+                AnimationMessage::Replace(anim)
+            };
+            if let Err(err) = tx.send(message) {
+                error!("Animation manager exited unexpectedly");
+                match err.0 {
+                    AnimationMessage::Replace(animation) => animation.skip_to_end(),
+                    AnimationMessage::SkipToEnd(animation) => animation.skip_to_end(),
+                }
+            }
         } else {
-            anim.run();
+            anim.skip_to_end();
         }
     }
 }
@@ -1138,6 +1158,31 @@ pub mod tests {
             requests.is_empty(),
             "got requests when there should have been none: {requests:?}"
         );
+    }
+
+    #[test]
+    fn it_sends_layout_animation_to_manager() {
+        let mut apps = Apps::new();
+        let (mut reactor, mut animation_rx) =
+            Reactor::new_for_test_with_animation(LayoutManager::new(), true);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(SpaceId::new(1))],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+        });
+
+        reactor.handle_events(apps.make_app(1, make_windows(2)));
+        reactor.handle_event(Event::StartupComplete);
+
+        assert!(
+            apps.requests().is_empty(),
+            "layout should be handed to the animation manager, not sent directly to app actors"
+        );
+        assert!(matches!(
+            animation_rx.try_recv(),
+            Ok(animation::Message::Replace(_))
+        ));
     }
 
     #[test]
