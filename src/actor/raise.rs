@@ -174,7 +174,18 @@ impl RaiseManager {
                             sequence_id, sequence.pending_raises
                         );
                         sequence.pending_raises.clear();
+                        // Cancel the raises that hung, then install a fresh
+                        // token. The focus raise is sent next (in
+                        // process_active_sequence) and must use a live token, or
+                        // the app rejects it as cancelled and never reports
+                        // completion, blocking the manager permanently.
                         sequence.raise_token.cancel();
+                        sequence.raise_token = CancellationToken::new();
+                        // Restart the timeout window so the focus phase gets its
+                        // own timeout. Otherwise a hung focus raise could never
+                        // time out again and would block all future raises.
+                        sequence.started_at = Instant::now();
+                        sequence.timed_out = false;
                     }
                 }
             }
@@ -573,6 +584,53 @@ mod tests {
             });
 
             // Verify that the sequence was completed and removed
+            assert!(raise_manager.active_sequence.is_none());
+        });
+    }
+
+    #[test]
+    fn test_timeout_focus_raise_uses_live_token() {
+        Executor::run(async {
+            let mut raise_manager = RaiseManager::new();
+            let (app_handles, mut app_rx) = create_test_app_handles();
+
+            let layout_msg = create_layout_response(
+                vec![WindowId::new(1, 1)],
+                Some((WindowId::new(1, 2), None)),
+                app_handles,
+            );
+            raise_manager.handle_message(layout_msg);
+
+            // Time out the regular raise. This cancels the sequence's token, but
+            // the focus raise sent afterward must use a live token; otherwise the
+            // app rejects it as cancelled and never reports completion, blocking
+            // the manager forever.
+            raise_manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
+
+            let requests = collect_requests(&mut app_rx);
+            let focus_token = requests
+                .iter()
+                .find_map(|r| match r {
+                    Request::Raise(wids, token, _, Quiet::No)
+                        if *wids == vec![WindowId::new(1, 2)] =>
+                    {
+                        Some(token.clone())
+                    }
+                    _ => None,
+                })
+                .expect("focus raise should have been sent after timeout");
+            assert!(
+                !focus_token.is_cancelled(),
+                "focus raise must use a live token after a timeout"
+            );
+
+            // The sequence should still be waiting on the focus raise so it can
+            // complete normally.
+            assert!(raise_manager.active_sequence.is_some());
+            raise_manager.handle_message(Event::RaiseCompleted {
+                window_id: WindowId::new(1, 2),
+                sequence_id: 1,
+            });
             assert!(raise_manager.active_sequence.is_none());
         });
     }
