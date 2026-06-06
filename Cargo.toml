@@ -1,6 +1,6 @@
 [package]
 name = "glide-wm"
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 
 license = "Apache-2.0 OR MIT"

@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.2.13](https://github.com/tmandry/glide/compare/v0.2.12...v0.2.13) (2026-06-06)
+
+
+### Features
+
+* Add focus_next' and 'focus_prev' commands with wraparound ([#183](https://github.com/tmandry/glide/issues/183)) ([479f270](https://github.com/tmandry/glide/commit/479f270cc37d13376cad176ec179f8298566b2c9))
+* exec_cmd keybind for running arbitrary commands ([af7878c](https://github.com/tmandry/glide/commit/af7878c4828e63d643fc7aafea279984ad8ee0da))
+
+
+### Bug Fixes
+
+* Fix a bug where windows moved between screens sometimes had the wrong size ([644e473](https://github.com/tmandry/glide/commit/644e473be16038487a2f78b3ebff5af8181acc60))
+* stop freeze after a raise times out ([63ec7ea](https://github.com/tmandry/glide/commit/63ec7eafa4e1242eeeb14a0881f78510ca4d6722))
+
+
+### Performance Improvements
+
+* skip stale animation frames when an app is slow to respond ([94fba24](https://github.com/tmandry/glide/commit/94fba2440a91aaa72e342b74a640de58a3586465))
+
+
+### Improvements
+
+* run layout animations asynchronously ([2f5ebae](https://github.com/tmandry/glide/commit/2f5ebaebbfdb1c999619a9b0dea7a83b9ff1ced8))
+* Surface reordered top-layer windows on space change ([3b8cb41](https://github.com/tmandry/glide/commit/3b8cb419a5bc8cb746094495b378b3f0d7015e94))
+
 ## [0.2.12](https://github.com/glide-wm/glide/compare/v0.2.11...v0.2.12) (2026-03-23)
 
 
