@@ -50,7 +50,7 @@ core-graphics = "0.25.0"
 core-graphics-types = "0.2.0"
 dirs = "5.0.1"
 indexmap = { version = "2.10.0", features = ["serde"] }
-livesplit-hotkey = "0.8.0"
+livesplit-hotkey = "0.8.1"
 macro_rules_attribute = "0.2.2"
 objc2 = "0.6.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -98,7 +98,9 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFString",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
-    "CGDirectDisplay", "CGRemoteOperation", "CGError"
+    "CGDirectDisplay",
+    "CGRemoteOperation",
+    "CGError",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSArray",
@@ -146,10 +148,7 @@ test-log = { version = "0.2.16", default-features = false, features = [
 productName = "Glide"
 identifier = "org.glidewm.glide"
 icons = ["assets/app_icon-128x128@2x.png"]
-binaries = [
-    {path = "glide"},
-    {path = "glide_server", main = true},
-]
+binaries = [{ path = "glide" }, { path = "glide_server", main = true }]
 macos.signingIdentity = "Developer ID Application: Tyler Mandry (77455J9D7M)"
 
 # We want the application to activate on first run so the permission flow isn't
