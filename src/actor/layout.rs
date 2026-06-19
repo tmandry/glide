@@ -1367,6 +1367,12 @@ impl LayoutManager {
         self.try_layout(space).unwrap()
     }
 
+    /// Whether the layout tracks this window as floating (i.e. excluded from
+    /// the tiling order and kept above the tiled windows).
+    pub fn is_floating_window(&self, wid: WindowId) -> bool {
+        self.floating_windows.contains(&wid)
+    }
+
     fn top_layer_windows(&self, space: SpaceId) -> Vec<WindowId> {
         let Some(layout) = self.try_layout(space) else {
             return Vec::new();

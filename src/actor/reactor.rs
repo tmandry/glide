@@ -1042,7 +1042,39 @@ impl Reactor {
         if current_top_wsids == desired_visible_wsids {
             response.focus_window.take();
             response.raise_windows.clear();
+            return response;
         }
+
+        // If the frontmost on-screen window is one of our own floating windows
+        // rather than a tiled window we're about to raise, the user has a
+        // floating window on top — typically one they just selected from
+        // Mission Control. Raising the tiled windows would bury it (and yank
+        // focus away), so skip the reorder for this space change and leave the
+        // current stacking untouched. (Raising the tiled windows and then
+        // re-raising the floating one on top causes a jarring flicker, and the
+        // tiled order is corrected anyway the next time a tiled window is
+        // focused or the space is shown without a floating window on top.)
+        //
+        // We only skip for windows the layout tracks as floating; a foreign
+        // window on top (e.g. another app's panel) should still let the managed
+        // windows surface.
+        //
+        // We rely on the window-server order from the space-change snapshot
+        // rather than the layout's focused window because the focus-change
+        // event may not have been processed by the time the space change
+        // arrives.
+        if response.focus_window.is_none()
+            && let Some(front_wsid) = visible_window_order
+                .iter()
+                .copied()
+                .find(|wsid| self.should_compare_visible_window(*wsid))
+            && !desired_visible_wsids.contains(&front_wsid)
+            && let Some(&front_wid) = self.window_ids.get(&front_wsid)
+            && self.layout.is_floating_window(front_wid)
+        {
+            response.raise_windows.clear();
+        }
+
         response
     }
 
@@ -1572,6 +1604,70 @@ pub mod tests {
 
         assert!(response.raise_windows.is_empty());
         assert!(response.focus_window.is_none());
+    }
+
+    #[test]
+    fn it_keeps_floating_window_on_top_after_space_change() {
+        // Regression test for #195: selecting a floating window from Mission
+        // Control leaves it frontmost and then fires a space change. The
+        // SpaceExposed reorder must not raise the tiled windows over the
+        // floating one (which would bury it and steal focus).
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new());
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        reactor.raise_manager_tx = raise_manager_tx;
+        let space = SpaceId::new(1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+        });
+        reactor.handle_events(apps.make_app_with_opts(
+            1,
+            make_windows(2),
+            Some(WindowId::new(1, 1)),
+            true,
+        ));
+        reactor.handle_event(Event::StartupComplete);
+        reactor.handle_event(Event::ApplicationGloballyActivated(1));
+        apps.simulate_until_quiet(&mut reactor);
+
+        // Float the focused window (1, 1), leaving (1, 2) tiled.
+        let floating = WindowId::new(1, 1);
+        reactor.handle_event(Event::Command(Command::Layout(
+            LayoutCommand::ToggleWindowFloating,
+        )));
+        apps.simulate_until_quiet(&mut reactor);
+        while raise_manager_rx.try_recv().is_ok() {}
+        assert!(reactor.layout.is_floating_window(floating));
+
+        // The space change reports the floating window frontmost, above the
+        // tiled windows it would otherwise reorder.
+        let desired = reactor
+            .layout
+            .handle_event(LayoutEvent::SpaceExposed(space, CGSize::new(1000., 1000.)))
+            .raise_windows;
+        assert!(!desired.contains(&floating));
+        let mut on_screen = vec![WindowServerInfo {
+            id: reactor.windows[&floating].window_server_id.unwrap(),
+            pid: floating.pid,
+            layer: 0,
+            frame: reactor.windows[&floating].frame_monotonic,
+        }];
+        on_screen.extend(desired.iter().map(|wid| WindowServerInfo {
+            id: reactor.windows[wid].window_server_id.unwrap(),
+            pid: wid.pid,
+            layer: 0,
+            frame: reactor.windows[wid].frame_monotonic,
+        }));
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::new(on_screen),
+        ));
+
+        // No raise: the floating window is left on top, undisturbed.
+        assert!(raise_manager_rx.try_recv().is_err());
     }
 
     #[test]
