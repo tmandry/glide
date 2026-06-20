@@ -12,7 +12,7 @@
   "dependencies": {
     "@astrojs/starlight": "^0.38.3",
     "@catppuccin/starlight": "^2.0.1",
-    "astro": "^6.3.1",
+    "astro": "^6.4.8",
     "mdast-util-directive": "^3.1.0",
     "mdast-util-from-markdown": "^2.0.2",
     "micromark-extension-directive": "^4.0.0",
