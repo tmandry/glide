@@ -337,6 +337,17 @@ fn classify_window(rules: &[WindowRule], info: &LayoutWindowInfo) -> WindowClass
         Info { is_standard: false, .. } => WindowClass::FloatByDefault,
         Info { is_resizable: false, .. } => WindowClass::FloatByDefault,
 
+        // Screenshot overlays must stay outside the tiling layout or region
+        // selection can stop working.
+        Info { bundle_id: Some(bundle_id), .. }
+            if matches!(
+                bundle_id.as_str(),
+                "com.apple.screenshot.launcher" | "com.apple.screencaptureui"
+            ) =>
+        {
+            WindowClass::FloatByDefault
+        }
+
         // Float system preferences windows, since they don't resize horiztonally.
         Info { bundle_id: Some(bundle_id), .. } if bundle_id == "com.apple.systempreferences" => {
             WindowClass::FloatByDefault
@@ -1701,6 +1712,15 @@ mod tests {
         assert_eq!(classify_window(&[], &info), WindowClass::Regular);
         info.is_standard = false;
         assert_eq!(classify_window(&[], &info), WindowClass::FloatByDefault);
+    }
+
+    #[test]
+    fn screenshot_overlays_float_by_default() {
+        for bundle_id in ["com.apple.screenshot.launcher", "com.apple.screencaptureui"] {
+            let mut info = win_info();
+            info.bundle_id = Some(bundle_id.into());
+            assert_eq!(classify_window(&[], &info), WindowClass::FloatByDefault);
+        }
     }
 
     #[test]
