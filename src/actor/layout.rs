@@ -42,8 +42,10 @@ pub enum LayoutCommand {
     ToggleWindowFloating,
     ToggleFullscreen,
     Resize {
-        #[serde(rename = "direction")]
-        direction: Direction,
+        /// The edge to move. Omit to resize along whichever axis the
+        /// container lays its children out on.
+        #[serde(rename = "direction", default)]
+        direction: Option<Direction>,
         #[serde(default = "default_resize_percent")]
         percent: f64,
     },
@@ -1036,7 +1038,10 @@ impl LayoutManager {
             LayoutCommand::Resize { direction, percent } => {
                 let percent = percent.clamp(-100.0, 100.0);
                 let node = self.tree.selection(layout);
-                self.tree.resize(node, percent / 100.0, direction);
+                match direction {
+                    Some(direction) => self.tree.resize(node, percent / 100.0, direction),
+                    None => self.tree.resize_smart(node, percent / 100.0),
+                };
                 EventResponse::default()
             }
             LayoutCommand::CycleColumnWidth => {
@@ -2788,6 +2793,122 @@ mod tests {
     }
 
     #[test]
+    fn resize_without_a_direction_grows_and_shrinks_either_window() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let windows = make_windows(pid, 2);
+
+        let screen = rect(0, 0, 100, 100);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        let grow = Resize { direction: None, percent: 10.0 };
+        let shrink = Resize {
+            direction: None,
+            percent: -10.0,
+        };
+
+        _ = mgr.handle_command(Some(space), &[space], grow.clone());
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 60, 100)),
+                (WindowId::new(pid, 2), rect(60, 0, 40, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+
+        _ = mgr.handle_command(Some(space), &[space], shrink.clone());
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
+                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+
+        // The last window has no neighbour on its far side. Growing it has to
+        // take from the window before it rather than doing nothing.
+        _ = mgr.handle_command(Some(space), &[space], MoveFocus(Direction::Right));
+        _ = mgr.handle_command(Some(space), &[space], grow);
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 40, 100)),
+                (WindowId::new(pid, 2), rect(40, 0, 60, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+
+        _ = mgr.handle_command(Some(space), &[space], shrink);
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
+                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+    }
+
+    #[test]
+    fn resize_without_a_direction_takes_from_the_next_window() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let windows = make_windows(pid, 3);
+
+        let screen = rect(0, 0, 900, 100);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 2)));
+
+        // The middle window has a neighbour on both sides. It takes from the
+        // one after it, leaving the window before it where it is.
+        _ = mgr.handle_command(Some(space), &[space], Resize { direction: None, percent: 10.0 });
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 300, 100)),
+                (WindowId::new(pid, 2), rect(300, 0, 390, 100)),
+                (WindowId::new(pid, 3), rect(690, 0, 210, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+    }
+
+    #[test]
+    fn resize_without_a_direction_follows_the_container_axis() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let windows = make_windows(pid, 1);
+
+        let screen = rect(0, 0, 100, 100);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        // Stack the windows vertically, so growing means taller, not wider.
+        _ = mgr.handle_command(Some(space), &[space], Split(Orientation::Vertical));
+        _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 2), win_info()));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        _ = mgr.handle_command(Some(space), &[space], Resize { direction: None, percent: 10.0 });
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 100, 60)),
+                (WindowId::new(pid, 2), rect(0, 60, 100, 40)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+    }
+
+    #[test]
     fn it_resizes_windows_with_resize_command() {
         use LayoutCommand::*;
         use LayoutEvent::*;
@@ -2813,7 +2934,7 @@ mod tests {
             Some(space),
             &[space],
             Resize {
-                direction: Direction::Right,
+                direction: Some(Direction::Right),
                 percent: 10.0,
             },
         );
@@ -2830,7 +2951,7 @@ mod tests {
             Some(space),
             &[space],
             Resize {
-                direction: Direction::Left,
+                direction: Some(Direction::Left),
                 percent: 10.0,
             },
         );

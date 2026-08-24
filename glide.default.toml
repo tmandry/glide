@@ -92,6 +92,15 @@ default_keys = false
 "Alt + Ctrl + K" = { resize = { direction = "up", percent = 5 } }
 "Alt + Ctrl + L" = { resize = { direction = "right", percent = 5 } }
 
+# Omit the direction to grow or shrink along whichever axis the container
+# lays its children out on, so one key pair works in both a row and a
+# column. A negative percent shrinks.
+#
+# The space comes from the next window, or the previous one when there is
+# no next. A window in the middle of a row always moves its right edge.
+"Alt + Minus" = { resize = { percent = -5 } }
+"Alt + Shift + Equal" = { resize = { percent = 5 } }
+
 # Move up or down the tree hierarchy, selecting a parent or child node
 # respectively. These commands change which node is selected (similar to
 # move_focus) rather than moving windows. The selected node affects subsequent
