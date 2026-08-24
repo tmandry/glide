@@ -688,6 +688,18 @@ impl LayoutTree {
         self.tree.data.size.last_ungrouped_kind(node)
     }
 
+    /// Gives every node under `node` the same size as its siblings, so each
+    /// container divides its space evenly.
+    pub fn balance(&mut self, node: NodeId) {
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            for child in node.children(&self.tree.map) {
+                self.tree.data.size.set_weight(child, 1.0, &self.tree.map);
+                stack.push(child);
+            }
+        }
+    }
+
     pub fn set_container_kind(&mut self, node: NodeId, kind: ContainerKind) {
         self.tree.data.size.set_kind(node, kind);
     }
@@ -1519,6 +1531,47 @@ mod tests {
         let a3 = tree.add_window_under(layout, old_root, WindowId::new(1, 3));
         tree.assert_children_are([a1, a2, a3], old_root);
         assert_eq!(b2, tree.selection(layout));
+    }
+
+    #[test]
+    fn balance() {
+        // ┌─────┬─────┐
+        // │     │ b1  │
+        // │ a1  +─────+
+        // │     │ b2  │
+        // └─────┴─────┘
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let a1 = tree.add_window_under(layout, root, WindowId::new(1, 1));
+        let a2 = tree.add_container(root, ContainerKind::Vertical);
+        let b1 = tree.add_window_under(layout, a2, WindowId::new(2, 1));
+        let _b2 = tree.add_window_under(layout, a2, WindowId::new(2, 2));
+        let screen = rect(0, 0, 1000, 1000);
+        let config = &Config::default();
+
+        // Skew both levels of the tree.
+        tree.resize(a1, 0.2, Direction::Right);
+        tree.resize(b1, 0.2, Direction::Down);
+        assert_frames_are(
+            tree.calculate_layout(layout, screen, config),
+            [
+                (WindowId::new(1, 1), rect(0, 0, 700, 1000)),
+                (WindowId::new(2, 1), rect(700, 0, 300, 700)),
+                (WindowId::new(2, 2), rect(700, 700, 300, 300)),
+            ],
+        );
+
+        // Balancing the root evens out the nested container too.
+        tree.balance(root);
+        assert_frames_are(
+            tree.calculate_layout(layout, screen, config),
+            [
+                (WindowId::new(1, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(2, 1), rect(500, 0, 500, 500)),
+                (WindowId::new(2, 2), rect(500, 500, 500, 500)),
+            ],
+        );
     }
 
     #[test]

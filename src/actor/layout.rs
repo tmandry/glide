@@ -38,6 +38,7 @@ pub enum LayoutCommand {
     Split(Orientation),
     Group(Orientation),
     Ungroup,
+    Balance,
     ToggleFocusFloating,
     ToggleWindowFloating,
     ToggleFullscreen,
@@ -147,6 +148,7 @@ impl LayoutCommand {
             MoveNode(_)
             | Group(_)
             | Ungroup
+            | Balance
             | Resize { .. }
             | CycleColumnWidth
             | ToggleColumnTabbed => true,
@@ -1011,6 +1013,11 @@ impl LayoutManager {
                         )
                     }
                 }
+                EventResponse::default()
+            }
+            LayoutCommand::Balance => {
+                let root = self.tree.root(layout);
+                self.tree.balance(root);
                 EventResponse::default()
             }
             LayoutCommand::ToggleFullscreen => {
@@ -2834,6 +2841,46 @@ mod tests {
                 percent: 10.0,
             },
         );
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
+                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+    }
+
+    #[test]
+    fn it_evens_out_window_sizes_with_balance() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let windows = make_windows(pid, 2);
+
+        let screen = rect(0, 0, 100, 100);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        _ = mgr.handle_command(
+            Some(space),
+            &[space],
+            Resize {
+                direction: Direction::Right,
+                percent: 20.0,
+            },
+        );
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 70, 100)),
+                (WindowId::new(pid, 2), rect(70, 0, 30, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+
+        _ = mgr.handle_command(Some(space), &[space], Balance);
         assert_eq!(
             vec![
                 (WindowId::new(pid, 1), rect(0, 0, 50, 100)),

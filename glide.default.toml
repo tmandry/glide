@@ -121,6 +121,10 @@ default_keys = false
 "Alt + S" = { group = "vertical" }
 "Alt + E" = "ungroup"
 
+# Reset every container on the space to divide its space evenly, undoing any
+# resizing.
+"Alt + Shift + Digit0" = "balance"
+
 # Float the current node. Floating windows are allowed to overlap and keep
 # whatever size and position you give them. Note that they do not actually
 # float on top of other windows, as that would require disabling security
