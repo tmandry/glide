@@ -111,6 +111,10 @@ default_keys = false
 "Alt + Backslash" = { split = "horizontal" }
 "Alt + Equal" = { split = "vertical" }
 
+# Flip the parent container between horizontal and vertical, rearranging the
+# windows already inside it. A group stays a group: tabbed becomes stacked.
+"Alt + Slash" = "toggle_orientation"
+
 # Change the parent node to a horizontal or vertical group, also known as
 # "tabbed" and "stacked" respectively. Groups show one window at a time,
 # allocating their entire frame to that window.

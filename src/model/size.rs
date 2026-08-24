@@ -69,6 +69,18 @@ impl ContainerKind {
             _ => false,
         }
     }
+
+    /// Returns the kind with the opposite orientation, staying within the
+    /// group or non-group pair so a tabbed container does not become a split.
+    pub fn flip(self) -> Self {
+        use ContainerKind::*;
+        match self {
+            Horizontal => Vertical,
+            Vertical => Horizontal,
+            Tabbed => Stacked,
+            Stacked => Tabbed,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

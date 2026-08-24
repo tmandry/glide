@@ -36,6 +36,7 @@ pub enum LayoutCommand {
     Descend,
     MoveNode(Direction),
     Split(Orientation),
+    ToggleOrientation,
     Group(Orientation),
     Ungroup,
     ToggleFocusFloating,
@@ -145,6 +146,7 @@ impl LayoutCommand {
         use LayoutCommand::*;
         match self {
             MoveNode(_)
+            | ToggleOrientation
             | Group(_)
             | Ungroup
             | Resize { .. }
@@ -994,6 +996,13 @@ impl LayoutManager {
                 // usually have a visible effect.
                 let selection = self.tree.selection(layout);
                 self.tree.nest_in_container(layout, selection, ContainerKind::from(orientation));
+                EventResponse::default()
+            }
+            LayoutCommand::ToggleOrientation => {
+                if let Some(parent) = self.tree.selection(layout).parent(self.tree.map()) {
+                    let kind = self.tree.container_kind(parent);
+                    self.tree.set_container_kind(parent, kind.flip());
+                }
                 EventResponse::default()
             }
             LayoutCommand::Group(orientation) => {
@@ -2841,6 +2850,71 @@ mod tests {
             ],
             mgr.layout_sorted(space, screen),
         );
+    }
+
+    #[test]
+    fn it_flips_the_container_with_toggle_orientation() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let windows = make_windows(pid, 2);
+
+        let screen = rect(0, 0, 100, 100);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
+                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+
+        // Side by side becomes stacked top to bottom.
+        _ = mgr.handle_command(Some(space), &[space], ToggleOrientation);
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 100, 50)),
+                (WindowId::new(pid, 2), rect(0, 50, 100, 50)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+
+        // Toggling again returns to the original layout.
+        _ = mgr.handle_command(Some(space), &[space], ToggleOrientation);
+        assert_eq!(
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
+                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
+            ],
+            mgr.layout_sorted(space, screen),
+        );
+    }
+
+    #[test]
+    fn toggle_orientation_keeps_a_group_a_group() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let windows = make_windows(pid, 2);
+
+        let screen = rect(0, 0, 100, 100);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+
+        _ = mgr.handle_command(Some(space), &[space], Group(Orientation::Horizontal));
+        _ = mgr.handle_command(Some(space), &[space], ToggleOrientation);
+
+        let layout = mgr.layout(space);
+        let parent = mgr.tree.selection(layout).parent(mgr.tree.map()).unwrap();
+        assert_eq!(ContainerKind::Stacked, mgr.tree.container_kind(parent));
     }
 
     #[test]
