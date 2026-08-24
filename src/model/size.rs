@@ -53,6 +53,31 @@ pub enum Orientation {
     Vertical,
 }
 
+/// The orientation a new layout's root container starts out with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
+    /// Split the screen's longer axis, so a portrait screen stacks windows
+    /// and a landscape one puts them side by side.
+    Auto,
+}
+
+impl RootOrientation {
+    pub fn resolve(self, screen: CGSize) -> Orientation {
+        match self {
+            RootOrientation::Horizontal => Orientation::Horizontal,
+            RootOrientation::Vertical => Orientation::Vertical,
+            // A square screen has no longer axis; treat it as landscape,
+            // which is what every other orientation defaults to.
+            RootOrientation::Auto if screen.height > screen.width => Orientation::Vertical,
+            RootOrientation::Auto => Orientation::Horizontal,
+        }
+    }
+}
+
 impl ContainerKind {
     pub fn orientation(self) -> Orientation {
         use ContainerKind::*;
@@ -987,6 +1012,28 @@ mod tests {
             window1_fullscreen_frame,
             rect(10, 10, 980, 980),
             "window1 fullscreen with outer_gap"
+        );
+    }
+
+    #[test]
+    fn root_orientation_auto_splits_the_longer_axis() {
+        let portrait = CGSize { width: 100.0, height: 300.0 };
+        let landscape = CGSize { width: 300.0, height: 100.0 };
+        let square = CGSize { width: 100.0, height: 100.0 };
+
+        assert_eq!(Orientation::Vertical, RootOrientation::Auto.resolve(portrait));
+        assert_eq!(Orientation::Horizontal, RootOrientation::Auto.resolve(landscape));
+        // A square screen has no longer axis; it falls back to landscape.
+        assert_eq!(Orientation::Horizontal, RootOrientation::Auto.resolve(square));
+
+        // The explicit settings ignore the screen entirely.
+        assert_eq!(
+            Orientation::Horizontal,
+            RootOrientation::Horizontal.resolve(portrait)
+        );
+        assert_eq!(
+            Orientation::Vertical,
+            RootOrientation::Vertical.resolve(landscape)
         );
     }
 }

@@ -23,7 +23,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::actor::wm_controller::WmCommand;
-use crate::model::LayoutKind;
+use crate::model::{LayoutKind, RootOrientation};
 
 pub fn data_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".glide")
@@ -98,6 +98,7 @@ pub struct Settings {
     pub inner_gap: f64,
     pub default_keys: bool,
     pub default_layout_kind: LayoutKind,
+    pub default_root_orientation: RootOrientation,
     #[derive_args(GroupBarsPartial)]
     pub group_bars: GroupBars,
     #[derive_args(StatusIconPartial)]

@@ -30,6 +30,17 @@ inner_gap = 0
 # Note: "scroll" requires settings.experimental.scroll.enable = true.
 default_layout_kind = "tree"
 
+# Which way a new layout's root container splits: "horizontal", "vertical",
+# or "auto".
+#
+# "auto" splits the screen's longer axis, so windows stack on a portrait
+# screen and sit side by side on a landscape one. Without it two windows on
+# a portrait screen become tall narrow strips.
+#
+# This applies when a layout is first created. A layout that moves to a
+# differently shaped screen keeps the orientation it already has.
+default_root_orientation = "horizontal"
+
 # Visual bars for window groups (tabbed/stacked containers).
 group_bars.enable = true
 group_bars.thickness = 6
