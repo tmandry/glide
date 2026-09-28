@@ -122,7 +122,9 @@ fn create_content_view(mtm: MainThreadMarker) -> (Retained<NSView>, IndicatorDem
         let mut group_data_with_frame = group_data.clone();
         group_data_with_frame.frame = indicator_frame;
 
-        let mut indicator_view = GroupIndicatorNSView::new(indicator_rect, mtm);
+        let config = glide_wm::config::Config::default();
+        let mut indicator_view =
+            GroupIndicatorNSView::new(indicator_rect, &config.settings.group_bars, mtm);
         indicator_view.update(group_data_with_frame);
 
         let indicator_rc = Rc::new(RefCell::new(indicator_view));
