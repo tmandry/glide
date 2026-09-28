@@ -138,6 +138,7 @@ pub trait CGRectExt {
     fn contains(&self, point: ic::CGPoint) -> bool;
     fn area(&self) -> f64;
     fn inset(&self, amount: f64) -> Self;
+    fn scaled_about_center(&self, scale: f64) -> Self;
 }
 
 impl CGRectExt for ic::CGRect {
@@ -172,6 +173,15 @@ impl CGRectExt for ic::CGRect {
                 height: self.size.height - amount * 2.0,
             },
         }
+    }
+
+    fn scaled_about_center(&self, scale: f64) -> Self {
+        let size = ic::CGSize::new(self.size.width * scale, self.size.height * scale);
+        let mid = self.mid();
+        ic::CGRect::new(
+            ic::CGPoint::new(mid.x - size.width / 2.0, mid.y - size.height / 2.0),
+            size,
+        )
     }
 }
 
