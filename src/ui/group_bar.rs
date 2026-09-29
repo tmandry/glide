@@ -19,83 +19,17 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::CALayer;
 
-use crate::config::{HorizontalPlacement, VerticalPlacement};
+use crate::config::{Color, GroupBars};
 use crate::sys::geometry::CGRectExt;
 
-/// RGBA color representation
-#[derive(Debug, Clone, Copy)]
-pub struct Color {
-    pub r: f64,
-    pub g: f64,
-    pub b: f64,
-    pub a: f64,
+pub trait ColorExt {
+    fn to_nscolor(&self) -> Retained<NSColor>;
 }
 
-impl Color {
-    pub fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
-        Self { r, g, b, a }
-    }
-
-    pub fn blue() -> Self {
-        Self::new(0.0, 0.5, 1.0, 1.0)
-    }
-
-    pub fn dark_blue() -> Self {
-        Self::new(0.0, 0.3, 0.6, 1.0)
-    }
-
-    pub fn light_gray() -> Self {
-        Self::new(0.8, 0.8, 0.8, 1.0)
-    }
-
-    pub fn gray() -> Self {
-        Self::new(0.7, 0.7, 0.7, 1.0)
-    }
-
-    pub fn dark_gray() -> Self {
-        Self::new(0.3, 0.3, 0.3, 1.0)
-    }
-
-    /// Convert to NSColor for use with CALayer
-    pub fn to_nscolor(&self) -> Retained<objc2_app_kit::NSColor> {
-        objc2_app_kit::NSColor::colorWithRed_green_blue_alpha(self.r, self.g, self.b, self.a)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct IndicatorConfig {
-    pub selected_color: Color,
-    pub unselected_color: Color,
-    pub locally_selected_color: Color,
-    pub fully_unselected_color: Color,
-    pub border_color: Color,
-    pub border_width: f64,
-    pub horizontal_placement: HorizontalPlacement,
-    pub vertical_placement: VerticalPlacement,
-}
-
-impl Default for IndicatorConfig {
-    fn default() -> Self {
-        Self {
-            selected_color: Color::blue(),
-            unselected_color: Color::light_gray(),
-            locally_selected_color: Color::dark_blue(),
-            fully_unselected_color: Color::gray(),
-            border_color: Color::dark_gray(),
-            border_width: 0.5,
-            horizontal_placement: HorizontalPlacement::Top,
-            vertical_placement: VerticalPlacement::Right,
-        }
-    }
-}
-
-impl From<&crate::config::GroupBars> for IndicatorConfig {
-    fn from(config: &crate::config::GroupBars) -> Self {
-        Self {
-            horizontal_placement: config.horizontal_placement,
-            vertical_placement: config.vertical_placement,
-            ..Default::default()
-        }
+impl ColorExt for Color {
+    fn to_nscolor(&self) -> Retained<NSColor> {
+        let c = |v: u8| f64::from(v) / 255.0;
+        NSColor::colorWithRed_green_blue_alpha(c(self.r), c(self.g), c(self.b), c(self.a))
     }
 }
 
@@ -119,9 +53,8 @@ pub struct GroupDisplayData {
 pub type SegmentClickCallback = Rc<dyn Fn(usize)>;
 
 /// Inner state for the indicator view
-#[derive(Default)]
 pub struct IndicatorState {
-    config: IndicatorConfig,
+    config: GroupBars,
     group_data: Option<GroupDisplayData>,
     background_layer: Option<Retained<CALayer>>,
     separator_layers: Vec<Retained<CALayer>>,
@@ -191,9 +124,16 @@ impl ClickableIndicatorView {
 }
 
 impl GroupIndicatorNSView {
-    pub fn new(frame: CGRect, mtm: MainThreadMarker) -> Self {
-        let view =
-            ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(IndicatorState::default()));
+    pub fn new(frame: CGRect, config: &GroupBars, mtm: MainThreadMarker) -> Self {
+        let state = IndicatorState {
+            config: config.clone(),
+            group_data: None,
+            background_layer: None,
+            separator_layers: Vec::new(),
+            selected_layer: None,
+            click_callback: None,
+        };
+        let view = ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(state));
         let view: Retained<_> = unsafe { msg_send![super(view), initWithFrame: frame] };
 
         view.setWantsLayer(true);
@@ -225,6 +165,11 @@ impl GroupIndicatorNSView {
                 self.animate_selection_change(old_index, group_data.selected_index);
             }
         }
+    }
+
+    pub fn set_config(&mut self, config: &GroupBars) {
+        self.view.ivars().borrow_mut().config = config.clone();
+        self.update_layers();
     }
 
     pub fn clear(&mut self) {
@@ -377,9 +322,9 @@ impl GroupIndicatorNSView {
 
         // Update appearance
         let bg_color = if group_data.is_selected {
-            state.config.unselected_color
+            state.config.background_color
         } else {
-            state.config.fully_unselected_color
+            state.config.inactive_background_color
         };
         let border_color = state.config.border_color.to_nscolor();
         background_layer.setBackgroundColor(Some(&bg_color.to_nscolor().CGColor()));
@@ -412,6 +357,7 @@ impl GroupIndicatorNSView {
         };
 
         let state = self.view.ivars().borrow();
+        let separator_color = state.config.border_color.to_nscolor().CGColor();
         for (index, layer) in state.separator_layers.iter().enumerate() {
             // Calculate separator position (between segments)
             let separator_pos = (index + 1) as f64 * segment_length;
@@ -432,9 +378,7 @@ impl GroupIndicatorNSView {
                 CGSize::new(sep_width, sep_height),
             ));
 
-            // Set separator color
-            let separator_color = state.config.border_color.to_nscolor();
-            layer.setBackgroundColor(Some(&separator_color.CGColor()));
+            layer.setBackgroundColor(Some(&separator_color));
 
             // Ensure layer is added to parent
             if layer.superlayer().is_none() {
@@ -476,7 +420,7 @@ impl GroupIndicatorNSView {
             if group_data.is_selected {
                 state.config.selected_color.to_nscolor()
             } else {
-                state.config.locally_selected_color.to_nscolor()
+                state.config.inactive_selected_color.to_nscolor()
             }
         };
         selected_layer.setBackgroundColor(Some(&selected_color.CGColor()));
@@ -539,7 +483,8 @@ mod tests {
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 100.0));
         let mtm =
             MainThreadMarker::new().unwrap_or_else(|| unsafe { MainThreadMarker::new_unchecked() });
-        let view = GroupIndicatorNSView::new(bounds, mtm);
+        let config = crate::config::Config::default();
+        let view = GroupIndicatorNSView::new(bounds, &config.settings.group_bars, mtm);
 
         let horizontal_group = GroupDisplayData {
             group_kind: GroupKind::Horizontal,

@@ -155,6 +155,15 @@ fn make_info(
     })
 }
 
+pub fn get_all_windows_with_layer(layer: i32) -> Vec<WindowServerInfo> {
+    let array = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, kCGNullWindowID)
+        .expect("CGWindowListCopyWindowInfo returned NULL");
+    // SAFETY: CGWindowListCopyWindowInfo returns an array of window info dicts.
+    let array: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
+        unsafe { CFRetained::cast_unchecked(array) };
+    array.iter().filter_map(|win| make_info(win, Some(layer))).collect()
+}
+
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     if ids.is_empty() {
         return Vec::new();
@@ -544,6 +553,14 @@ pub const kCGSWindowIsTerminated: u32 = 804;
 /// notifications were requested for it.
 #[expect(non_upper_case_globals)]
 pub const kCGSWindowCreated: u32 = 811;
+
+/// Sent when a window whose notifications were requested is ordered in.
+#[expect(non_upper_case_globals)]
+pub const kCGSWindowIsVisible: u32 = 815;
+
+/// Sent when a window whose notifications were requested is ordered out.
+#[expect(non_upper_case_globals)]
+pub const kCGSWindowIsInvisible: u32 = 816;
 
 /// This must be called to allow hiding the mouse from a background application.
 ///
