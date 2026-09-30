@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
+use crate::config::{AnimationConfig, AnimationCurve};
 use crate::sys::timer::Timer;
 
 pub type Sender = mpsc::UnboundedSender<Message>;
@@ -34,6 +35,7 @@ struct ActiveAnimation {
 pub struct Animation {
     interval: Duration,
     frames: u32,
+    curve: AnimationCurve,
     windows: Vec<AnimatedWindow>,
 }
 
@@ -48,7 +50,7 @@ struct AnimatedWindow {
 }
 
 impl AnimatedWindow {
-    fn frame_after(&self, frame: u32, total_frames: u32) -> CGRect {
+    fn frame_after(&self, frame: u32, total_frames: u32, curve: AnimationCurve) -> CGRect {
         if frame == 0 {
             return if self.is_focus {
                 CGRect {
@@ -61,7 +63,7 @@ impl AnimatedWindow {
         }
 
         let t = f64::from(frame) / f64::from(total_frames);
-        let mut rect = get_frame(self.start, self.finish, t);
+        let mut rect = get_frame(self.start, self.finish, t, curve);
         if self.is_focus || frame * 2 >= total_frames {
             rect.size = self.finish.size;
         } else {
@@ -167,19 +169,37 @@ impl ActiveAnimation {
         self.animation
             .windows
             .iter()
-            .map(|window| (window.wid, window.frame_after(frame, self.animation.frames)))
+            .map(|window| {
+                (
+                    window.wid,
+                    window.frame_after(frame, self.animation.frames, self.animation.curve),
+                )
+            })
             .collect()
     }
 }
 
+impl Default for Animation {
+    fn default() -> Self {
+        Self::from_config(&AnimationConfig::default())
+    }
+}
+
 impl Animation {
-    pub fn new() -> Self {
-        const FPS: f64 = 100.0;
-        const DURATION: f64 = 0.30;
-        let interval = Duration::from_secs_f64(1.0 / FPS);
+    pub fn new(config: &AnimationConfig) -> Self {
+        Self::from_config(config)
+    }
+
+    pub fn from_config(config: &AnimationConfig) -> Self {
+        let config = config.validated();
+        let fps = config.fps.max(1.0);
+        let duration = config.duration_ms as f64 / 1000.0;
+        let interval = Duration::from_secs_f64(1.0 / fps);
+        let frames = (duration * fps).round() as u32;
         Animation {
             interval,
-            frames: (DURATION * FPS).round() as u32,
+            frames: frames.max(1),
+            curve: config.curve,
             windows: vec![],
         }
     }
@@ -255,7 +275,7 @@ impl Animation {
     fn send_frame(&self, frame: u32) {
         let t = f64::from(frame) / f64::from(self.frames);
         for window in &self.windows {
-            let mut rect = get_frame(window.start, window.finish, t);
+            let mut rect = get_frame(window.start, window.finish, t, self.curve);
             // Don't animate size, too slow. Resize halfway through and again at
             // the end, in case it got clipped during the animation.
             let set_size = frame * 2 == self.frames || frame == self.frames;
@@ -313,8 +333,8 @@ impl Animation {
     }
 }
 
-fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
-    let s = ease(t);
+fn get_frame(a: CGRect, b: CGRect, t: f64, curve: AnimationCurve) -> CGRect {
+    let s = curve.ease(t);
     CGRect {
         origin: CGPoint {
             x: blend(a.origin.x, b.origin.x, s),
@@ -324,14 +344,6 @@ fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
             width: blend(a.size.width, b.size.width, s),
             height: blend(a.size.height, b.size.height, s),
         },
-    }
-}
-
-fn ease(t: f64) -> f64 {
-    if t < 0.5 {
-        (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
-    } else {
-        (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
     }
 }
 
@@ -351,7 +363,7 @@ mod tests {
     }
 
     fn animation(handle: &AppThreadHandle, wid: WindowId, from: CGRect, to: CGRect) -> Animation {
-        let mut animation = Animation::new();
+        let mut animation = Animation::default();
         animation.add_window(handle, wid, from, to, false, TransactionId::default());
         animation
     }
@@ -447,7 +459,12 @@ mod tests {
         assert_eq!(resumed_start, continuing_frame);
 
         manager.tick();
-        let expected_next = get_frame(resumed_start, rect(80.0, 90.0, 10.0, 10.0), 1.0 / 30.0);
+        let expected_next = get_frame(
+            resumed_start,
+            rect(80.0, 90.0, 10.0, 10.0),
+            1.0 / 30.0,
+            AnimationCurve::default(),
+        );
         assert_animation_pos(&collect_requests(&mut rx)[0], wid, expected_next.origin);
     }
 
@@ -465,7 +482,7 @@ mod tests {
         let wid1 = WindowId::new(1, 1);
         let wid2 = WindowId::new(1, 2);
         let wid3 = WindowId::new(1, 3);
-        let mut first = Animation::new();
+        let mut first = Animation::default();
         first.add_window(
             &handle,
             wid1,
@@ -482,7 +499,7 @@ mod tests {
             false,
             TransactionId::default(),
         );
-        let mut second = Animation::new();
+        let mut second = Animation::default();
         second.add_window(
             &handle,
             wid1,
@@ -553,5 +570,18 @@ mod tests {
         assert_animation_frame(&requests[1], wid, rect(50.0, 60.0, 10.0, 10.0));
         assert!(matches!(requests[2], Request::EndWindowAnimation(req_wid) if req_wid == wid));
         assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn custom_animation_config_applies_fps_and_duration() {
+        let cfg = AnimationConfig {
+            duration_ms: 200,
+            curve: AnimationCurve::EaseOut,
+            fps: 50.0,
+        };
+        let anim = Animation::new(&cfg);
+        assert_eq!(anim.frames, 10);
+        assert_eq!(anim.interval, Duration::from_millis(20));
+        assert_eq!(anim.curve, AnimationCurve::EaseOut);
     }
 }

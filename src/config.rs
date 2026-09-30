@@ -95,6 +95,8 @@ enum Disabled {
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub animate: bool,
+    #[derive_args(AnimationConfigPartial)]
+    pub animation: AnimationConfig,
     pub default_disable: bool,
     pub auto_restore: bool,
     pub mouse_follows_focus: bool,
@@ -336,6 +338,85 @@ impl GroupBars {
     /// Get the indicator thickness for layout space reservation
     pub fn indicator_thickness(&self) -> f64 {
         if self.enable { self.thickness } else { 0.0 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnimationCurve {
+    #[default]
+    EaseInOutCirc,
+    EaseInOut,
+    EaseOut,
+    EaseIn,
+    Linear,
+    #[serde(alias = "back")]
+    EaseOutBack,
+    #[serde(alias = "elastic")]
+    EaseOutElastic,
+}
+
+impl AnimationCurve {
+    pub fn ease(self, t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::EaseInOutCirc => {
+                if t < 0.5 {
+                    (1.0 - (1.0 - (2.0 * t).powi(2)).max(0.0).sqrt()) / 2.0
+                } else {
+                    ((1.0 - (-2.0 * t + 2.0).powi(2)).max(0.0).sqrt() + 1.0) / 2.0
+                }
+            }
+            Self::EaseInOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                }
+            }
+            Self::EaseOut => 1.0 - (1.0 - t).powi(3),
+            Self::EaseIn => t.powi(3),
+            Self::Linear => t,
+            Self::EaseOutBack => {
+                let c1 = 1.70158;
+                let c3 = c1 + 1.0;
+                1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+            }
+            Self::EaseOutElastic => {
+                if t <= 0.0 {
+                    0.0
+                } else if t >= 1.0 {
+                    1.0
+                } else {
+                    const C4: f64 = (2.0 * std::f64::consts::PI) / 3.0;
+                    2.0_f64.powf(-10.0 * t) * ((t * 10.0 - 0.75) * C4).sin() + 1.0
+                }
+            }
+        }
+    }
+}
+
+#[derive(PartialConfig!)]
+#[derive_args(AnimationConfigPartial)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct AnimationConfig {
+    pub duration_ms: u32,
+    pub curve: AnimationCurve,
+    pub fps: f64,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        Config::default().settings.animation
+    }
+}
+
+impl AnimationConfig {
+    pub fn validated(mut self) -> Self {
+        self.duration_ms = self.duration_ms.clamp(0, 5000);
+        self.fps = self.fps.clamp(10.0, 240.0);
+        self
     }
 }
 
@@ -771,5 +852,75 @@ mod tests {
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + ArrowDown"));
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + ArrowUp"));
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + ArrowRight"));
+    }
+
+    #[test]
+    fn animation_config_defaults() {
+        let config = Config::default();
+        assert_eq!(config.settings.animation.duration_ms, 300);
+        assert_eq!(config.settings.animation.curve, AnimationCurve::EaseInOutCirc);
+        assert_eq!(config.settings.animation.fps, 100.0);
+    }
+
+    #[test]
+    fn animation_config_custom_override() {
+        let config = Config::parse(
+            r#"
+            [settings.animation]
+            duration_ms = 150
+            curve = "ease_out"
+            fps = 120.0
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.settings.animation.duration_ms, 150);
+        assert_eq!(config.settings.animation.curve, AnimationCurve::EaseOut);
+        assert_eq!(config.settings.animation.fps, 120.0);
+        // Default settings like animate should still be preserved
+        assert!(config.settings.animate);
+    }
+
+    #[test]
+    fn animation_curve_evaluation() {
+        for curve in [
+            AnimationCurve::EaseInOutCirc,
+            AnimationCurve::EaseInOut,
+            AnimationCurve::EaseOut,
+            AnimationCurve::EaseIn,
+            AnimationCurve::Linear,
+            AnimationCurve::EaseOutBack,
+            AnimationCurve::EaseOutElastic,
+        ] {
+            assert!((curve.ease(0.0) - 0.0).abs() < 1e-6);
+            assert!((curve.ease(1.0) - 1.0).abs() < 1e-6);
+        }
+
+        // EaseOutElastic overshoots > 1.0 around t = 0.15
+        assert!(AnimationCurve::EaseOutElastic.ease(0.15) > 1.2);
+    }
+
+    #[test]
+    fn animation_curve_aliases() {
+        let config_elastic = Config::parse(
+            r#"
+            [settings.animation]
+            curve = "elastic"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config_elastic.settings.animation.curve,
+            AnimationCurve::EaseOutElastic
+        );
+
+        let config_back = Config::parse(
+            r#"
+            [settings.animation]
+            curve = "back"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config_back.settings.animation.curve, AnimationCurve::EaseOutBack);
     }
 }
