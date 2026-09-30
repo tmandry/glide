@@ -30,6 +30,11 @@ outer_gap = 0
 # Gap between adjacent windows (in pixels).
 inner_gap = 0
 
+# When toggling a window to floating, center it on the screen at this fraction
+# of the screen's width and height (e.g. 0.5). Set to 0 to restore the
+# window's last floating frame instead.
+float_centered_size = 0
+
 # The default layout kind for new spaces: "tree" or "scroll".
 # Note: "scroll" requires settings.experimental.scroll.enable = true.
 default_layout_kind = "tree"

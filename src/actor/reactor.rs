@@ -845,10 +845,13 @@ impl Reactor {
                 // macOS can temporarily have no main window (for example after
                 // clicking the desktop). Keep keyboard layout commands usable
                 // by targeting the last active screen in that case.
-                let command_space = self
-                    .main_window_space()
-                    .or_else(|| self.active_screen().and_then(|screen| screen.space));
-                let response = self.layout.handle_command(command_space, &visible_spaces, cmd);
+                let main_screen = self.main_window_screen();
+                let command_space = main_screen
+                    .map(|screen| screen.space)
+                    .unwrap_or_else(|| self.active_screen().and_then(|screen| screen.space));
+                let screen = main_screen.map(|screen| screen.frame);
+                let response =
+                    self.layout.handle_command(command_space, screen, &visible_spaces, cmd);
                 self.handle_layout_response(response);
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
@@ -1186,8 +1189,13 @@ impl Reactor {
     }
 
     fn main_window_space(&self) -> Option<SpaceId> {
+        self.main_window_screen()?.space
+    }
+
+    fn main_window_screen(&self) -> Option<Screen> {
         // TODO: Optimize this with a cache or something.
-        self.best_space_for_window(&self.windows.get(&self.main_window()?)?.frame_monotonic)
+        let frame = self.windows.get(&self.main_window()?)?.frame_monotonic;
+        Some(self.screens[self.best_screen_idx_for_window(&frame)?])
     }
 
     #[instrument(skip(self), fields())]

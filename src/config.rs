@@ -102,6 +102,7 @@ pub struct Settings {
     pub focus_follows_mouse: bool,
     pub outer_gap: f64,
     pub inner_gap: f64,
+    pub float_centered_size: f64,
     pub default_keys: bool,
     pub default_layout_kind: LayoutKind,
     #[derive_args(GroupBarsPartial)]
