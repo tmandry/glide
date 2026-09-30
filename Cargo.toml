@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "glide-wm"
-version = "0.2.16"
+version = "0.2.17"
 edition = "2024"
 
 license = "Apache-2.0 OR MIT"
