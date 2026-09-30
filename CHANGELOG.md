@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.17](https://github.com/tmandry/glide/compare/v0.2.16...v0.2.17) (2026-09-30)
+
+
+### Bug Fixes
+
+* Stop Glide from reacting to its own windows when group bars are disabled ([2837add](https://github.com/tmandry/glide/commit/2837add2ce3911743e869ed43da59014714b7e59))
+
 ## [0.2.16](https://github.com/tmandry/glide/compare/v0.2.15...v0.2.16) (2026-09-28)
 
 This release makes it easier to restart and update Glide without losing your
