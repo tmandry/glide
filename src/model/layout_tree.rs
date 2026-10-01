@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::selection::Selection;
-use super::size::{ContainerKind, Direction, Size};
+use super::size::{ContainerKind, Direction, Orientation, Size};
 use super::tree::{self, Tree};
 use super::window::Window;
 use crate::actor::app::{WindowId, pid_t};
@@ -49,23 +49,25 @@ impl LayoutTree {
     }
 
     pub fn create_layout(&mut self) -> LayoutId {
-        self.create_layout_with_kind(LayoutKind::Tree)
+        self.create_layout_with_orientation(Orientation::Horizontal)
+    }
+
+    /// Creates a tree layout whose root splits along `orientation`.
+    pub fn create_layout_with_orientation(&mut self, orientation: Orientation) -> LayoutId {
+        self.create_layout_with_kind(LayoutKind::Tree, ContainerKind::from(orientation))
     }
 
     pub fn create_scroll_layout(&mut self) -> LayoutId {
-        self.create_layout_with_kind(LayoutKind::Scroll)
+        // A scroll layout is a row of columns, so its root is always
+        // horizontal regardless of the screen's shape.
+        self.create_layout_with_kind(LayoutKind::Scroll, ContainerKind::Horizontal)
     }
 
-    fn create_layout_with_kind(&mut self, kind: LayoutKind) -> LayoutId {
+    fn create_layout_with_kind(&mut self, kind: LayoutKind, root_kind: ContainerKind) -> LayoutId {
         let root = OwnedNode::new_root_in(&mut self.tree, "layout_root");
         let id = self.layout_roots.insert(root);
         self.layout_kinds.insert(id, kind);
-        if kind == LayoutKind::Scroll {
-            self.tree
-                .data
-                .size
-                .set_kind(self.layout_roots[id].id(), ContainerKind::Horizontal);
-        }
+        self.tree.data.size.set_kind(self.layout_roots[id].id(), root_kind);
         id
     }
 
