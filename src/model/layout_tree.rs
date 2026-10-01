@@ -207,6 +207,69 @@ impl LayoutTree {
         node
     }
 
+    pub fn node_rect(
+        &self,
+        layout: LayoutId,
+        node: NodeId,
+        screen: CGRect,
+        config: &Config,
+    ) -> Option<CGRect> {
+        self.tree.data.size.get_node_rect(
+            &self.tree.map,
+            &self.tree.data.window,
+            &self.tree.data.selection,
+            config,
+            self.root(layout),
+            screen,
+            self.is_scroll_layout(layout),
+            node,
+        )
+    }
+
+    /// Adds a window in BSP mode, splitting `target` along its longest edge.
+    pub fn add_window_bsp(
+        &mut self,
+        layout: LayoutId,
+        mut target: NodeId,
+        wid: WindowId,
+        screen: CGRect,
+        config: &Config,
+    ) -> NodeId {
+        let root = self.root(layout);
+        if target.ancestors(self.map()).last() != Some(root) {
+            target = root;
+        }
+
+        // If target is not a window (e.g. root or container), find a window to split.
+        if self.window_at(target).is_none() {
+            if let Some(w) =
+                target.traverse_postorder(self.map()).find(|n| self.window_at(*n).is_some())
+            {
+                target = w;
+            } else if target != root {
+                if let Some(w) =
+                    root.traverse_postorder(self.map()).find(|n| self.window_at(*n).is_some())
+                {
+                    target = w;
+                }
+            }
+        }
+
+        if target == root || self.window_at(target).is_none() {
+            return self.add_window_under(layout, root, wid);
+        }
+
+        let rect = self.node_rect(layout, target, screen, config);
+        let orientation = match rect {
+            Some(r) if r.size.width >= r.size.height => ContainerKind::Horizontal,
+            Some(_) => ContainerKind::Vertical,
+            None => ContainerKind::Horizontal,
+        };
+
+        self.nest_in_container(layout, target, orientation);
+        self.add_window_after(layout, target, wid)
+    }
+
     /// Moves `moving_node` to be a sibling after `sibling`.
     ///
     /// `sibling` may be in a different layout, in which case `moving_node` and
@@ -2037,5 +2100,67 @@ mod tests {
         assert!(!tree.is_visible(tab1));
         assert!(!tree.is_visible(tab2));
         assert!(tree.is_visible(outer_tab));
+    }
+
+    #[test]
+    fn add_window_bsp_quadrants() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let screen = rect(0, 0, 1000, 1000);
+        let config = Config::default();
+
+        // 1 window takes full screen
+        let root = tree.root(layout);
+        let w1 = tree.add_window_bsp(layout, root, w(1, 1), screen, &config);
+        let sizes = tree.calculate_layout(layout, screen, &config);
+        assert_eq!(sizes, vec![(w(1, 1), rect(0, 0, 1000, 1000))]);
+
+        // 2nd window splits w1 horizontally (width 1000 >= height 1000)
+        let w2 = tree.add_window_bsp(layout, w1, w(1, 2), screen, &config);
+        let sizes = tree.calculate_layout(layout, screen, &config);
+        assert_eq!(
+            sizes,
+            vec![
+                (w(1, 1), rect(0, 0, 500, 1000)),
+                (w(1, 2), rect(500, 0, 500, 1000)),
+            ]
+        );
+
+        // 3rd window splits w2 vertically (height 1000 > width 500)
+        let _w3 = tree.add_window_bsp(layout, w2, w(1, 3), screen, &config);
+        let sizes = tree.calculate_layout(layout, screen, &config);
+        assert_eq!(
+            sizes,
+            vec![
+                (w(1, 1), rect(0, 0, 500, 1000)),
+                (w(1, 2), rect(500, 0, 500, 500)),
+                (w(1, 3), rect(500, 500, 500, 500)),
+            ]
+        );
+
+        // 4th window splits w1 vertically (height 1000 > width 500)
+        let _w4 = tree.add_window_bsp(layout, w1, w(1, 4), screen, &config);
+        let sizes = tree.calculate_layout(layout, screen, &config);
+        assert_eq!(
+            sizes,
+            vec![
+                (w(1, 1), rect(0, 0, 500, 500)),
+                (w(1, 4), rect(0, 500, 500, 500)),
+                (w(1, 2), rect(500, 0, 500, 500)),
+                (w(1, 3), rect(500, 500, 500, 500)),
+            ]
+        );
+
+        // Removing w4 restores w1 to full height (500x1000)
+        tree.remove_window(w(1, 4));
+        let sizes = tree.calculate_layout(layout, screen, &config);
+        assert_eq!(
+            sizes,
+            vec![
+                (w(1, 1), rect(0, 0, 500, 1000)),
+                (w(1, 2), rect(500, 0, 500, 500)),
+                (w(1, 3), rect(500, 500, 500, 500)),
+            ]
+        );
     }
 }

@@ -104,6 +104,13 @@ impl SpaceLayoutMapping {
         self.active_layout
     }
 
+    pub fn active_size(&self) -> CGSize {
+        CGSize::new(
+            f64::from(self.active_size.width),
+            f64::from(self.active_size.height),
+        )
+    }
+
     pub fn active_layout_index(&self) -> usize {
         self.layouts.get_index_of(&self.active_layout).unwrap()
     }

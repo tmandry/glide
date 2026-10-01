@@ -12,11 +12,13 @@ use std::time::Instant;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use redact::Secret;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::collections::{BTreeExt, BTreeSet, HashMap, HashSet};
-use crate::config::{Config, NewWindowPlacement, ScrollConfig, WindowRule, WindowRuleConditions};
+use crate::config::{
+    Config, NewWindowPlacement, ScrollConfig, SplitMode, WindowRule, WindowRuleConditions,
+};
 use crate::model::scroll_viewport::ViewportState;
 use crate::model::{
     ContainerKind, Direction, LayoutId, LayoutKind, LayoutTree, NodeId, Orientation,
@@ -51,6 +53,7 @@ pub enum LayoutCommand {
     CycleColumnWidth,
     ChangeLayoutKind,
     ToggleColumnTabbed,
+    ToggleSplitMode,
     FocusNext,
     FocusPrev,
 }
@@ -155,7 +158,7 @@ impl LayoutCommand {
 
             NextLayout | PrevLayout | MoveFocus(_) | Ascend | Descend | Split(_)
             | ToggleFocusFloating | ToggleWindowFloating | ToggleFullscreen | ChangeLayoutKind
-            | FocusNext | FocusPrev => false,
+            | ToggleSplitMode | FocusNext | FocusPrev => false,
         }
     }
 }
@@ -247,6 +250,8 @@ pub struct LayoutManager {
     scroll_cfg: ScrollConfig,
     #[serde(skip)]
     scroll_enabled: bool,
+    #[serde(skip)]
+    split_mode: SplitMode,
     #[serde(skip)]
     window_rules: Vec<WindowRule>,
     #[serde(skip)]
@@ -370,6 +375,7 @@ impl LayoutManager {
             default_layout_kind: LayoutKind::default(),
             scroll_cfg: Config::default().settings.experimental.scroll.validated(),
             scroll_enabled: false,
+            split_mode: config.settings.split_mode,
             window_rules: Vec::new(),
             interactive_resize: None,
             interactive_move: None,
@@ -380,6 +386,7 @@ impl LayoutManager {
     pub fn set_config(&mut self, config: &Arc<Config>) {
         // TODO: read these through self.config instead of cloning them out
         self.config = config.clone();
+        self.split_mode = config.settings.split_mode;
         self.scroll_cfg = config.settings.experimental.scroll.clone().validated();
         self.scroll_enabled = self.scroll_cfg.enable;
         self.window_rules = config.window_rules.clone();
@@ -563,6 +570,7 @@ impl LayoutManager {
                 let floating_active = self.active_floating_windows.reset_app(space, pid);
                 let mut add_floating = Vec::new();
                 let mut new_windows = Vec::new();
+                let mut new_bsp_windows = Vec::new();
                 let tree_windows = windows
                     .iter()
                     .map(|(wid, _info)| *wid)
@@ -585,6 +593,9 @@ impl LayoutManager {
                                 if self.tree.is_scroll_layout(layout) {
                                     new_windows.push(*wid);
                                     false
+                                } else if self.split_mode == SplitMode::Bsp {
+                                    new_bsp_windows.push(*wid);
+                                    false
                                 } else {
                                     true
                                 }
@@ -595,6 +606,10 @@ impl LayoutManager {
                 self.tree.set_windows_for_app(self.layout(space), pid, tree_windows);
                 for wid in new_windows {
                     self.add_scroll_window(layout, wid);
+                }
+                for wid in new_bsp_windows {
+                    let node = self.add_tree_window(space, layout, wid);
+                    self.tree.select(node);
                 }
                 for wid in add_floating {
                     self.add_floating_window(wid, Some(space));
@@ -621,7 +636,8 @@ impl LayoutManager {
                         if self.tree.is_scroll_layout(layout) {
                             self.add_scroll_window(layout, wid);
                         } else {
-                            self.tree.add_window_after(layout, self.tree.selection(layout), wid);
+                            let node = self.add_tree_window(space, layout, wid);
+                            self.tree.select(node);
                         }
                     }
                     WindowClass::Untracked => (),
@@ -667,11 +683,7 @@ impl LayoutManager {
                                 if self.tree.is_scroll_layout(layout) {
                                     self.add_scroll_window(layout, wid);
                                 } else {
-                                    self.tree.add_window_after(
-                                        layout,
-                                        self.tree.selection(layout),
-                                        wid,
-                                    );
+                                    self.add_tree_window(added, layout, wid);
                                 }
                             }
                         }
@@ -1104,6 +1116,14 @@ impl LayoutManager {
                 self.viewports.remove(&layout);
                 EventResponse::default()
             }
+            LayoutCommand::ToggleSplitMode => {
+                self.split_mode = match self.split_mode {
+                    SplitMode::Manual => SplitMode::Bsp,
+                    SplitMode::Bsp => SplitMode::Manual,
+                };
+                info!("Toggled split mode to {:?}", self.split_mode);
+                EventResponse::default()
+            }
         }
     }
 }
@@ -1127,8 +1147,7 @@ impl LayoutManager {
     fn remove_floating_window(&mut self, wid: WindowId, space: Option<SpaceId>) {
         if let Some(space) = space {
             let layout = self.layout(space);
-            let selection = self.tree.selection(layout);
-            let node = self.tree.add_window_after(layout, selection, wid);
+            let node = self.add_tree_window(space, layout, wid);
             self.tree.select(node);
             self.active_floating_windows.remove(space, wid);
         }
@@ -1229,6 +1248,24 @@ impl LayoutManager {
             new_column,
             self.scroll_config().visible_columns,
         );
+    }
+
+    fn add_tree_window(&mut self, space: SpaceId, layout: LayoutId, wid: WindowId) -> NodeId {
+        let target = self
+            .focused_window
+            .and_then(|f| self.tree.window_node(layout, f))
+            .unwrap_or_else(|| self.tree.selection(layout));
+        if self.split_mode == SplitMode::Bsp {
+            let screen_size = self
+                .layout_mapping
+                .get(&space)
+                .map(|m| m.active_size())
+                .unwrap_or_else(|| CGSize::new(1920.0, 1080.0));
+            let screen = CGRect::new(CGPoint::ZERO, screen_size);
+            self.tree.add_window_bsp(layout, target, wid, screen, &self.config)
+        } else {
+            self.tree.add_window_after(layout, target, wid)
+        }
     }
 
     pub fn viewport(&self, layout: LayoutId) -> Option<&ViewportState> {
@@ -3071,5 +3108,119 @@ mod tests {
             ]
         );
         assert_eq!(response.focus_window, Some(WindowId::new(1, 2)));
+    }
+
+    #[test]
+    fn bsp_mode_splits_automatically() {
+        use LayoutCommand::*;
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        mgr.split_mode = SplitMode::Bsp;
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let screen = rect(0, 0, 1000, 1000);
+
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+
+        // Add 1st window: fills screen
+        _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 1), win_info()));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![(WindowId::new(pid, 1), rect(0, 0, 1000, 1000))]
+        );
+
+        // Add 2nd window: splits horizontally into two 500x1000 columns
+        _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 2), win_info()));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 1000)),
+            ]
+        );
+
+        // Focus 2nd window and add 3rd window: splits w2 vertically into 500x500
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 2)));
+        _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 3), win_info()));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 500)),
+                (WindowId::new(pid, 3), rect(500, 500, 500, 500)),
+            ]
+        );
+
+        // Focus 1st window and add 4th window: splits w1 vertically into 500x500
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+        _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 4), win_info()));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 500)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 500)),
+                (WindowId::new(pid, 3), rect(500, 500, 500, 500)),
+                (WindowId::new(pid, 4), rect(0, 500, 500, 500)),
+            ]
+        );
+
+        // Test toggle split mode
+        _ = mgr.handle_command(Some(space), &[space], ToggleSplitMode);
+        assert_eq!(mgr.split_mode, SplitMode::Manual);
+        _ = mgr.handle_command(Some(space), &[space], ToggleSplitMode);
+        assert_eq!(mgr.split_mode, SplitMode::Bsp);
+    }
+
+    #[test]
+    fn bsp_mode_windows_on_screen_updated() {
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        mgr.split_mode = SplitMode::Bsp;
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let screen = rect(0, 0, 1000, 1000);
+
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+
+        // 1st window appears
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 1)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![(WindowId::new(pid, 1), rect(0, 0, 1000, 1000))]
+        );
+
+        // 2nd window appears
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 2)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 1000)),
+            ]
+        );
+
+        // 3rd window appears
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 3)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 500)),
+                (WindowId::new(pid, 3), rect(500, 500, 500, 500)),
+            ]
+        );
+
+        // Focus 1st window and 4th window appears
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 4)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 500)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 500)),
+                (WindowId::new(pid, 3), rect(500, 500, 500, 500)),
+                (WindowId::new(pid, 4), rect(0, 500, 500, 500)),
+            ]
+        );
     }
 }
