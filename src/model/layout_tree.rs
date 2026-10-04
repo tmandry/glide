@@ -990,6 +990,37 @@ impl Components {
         self.size.handle_event(map, event);
         self.window.handle_event(map, event);
     }
+
+    fn flatten_root(tree: &mut Tree<Self>, root: NodeId) {
+        let Some(child) = root.first_child(&tree.map) else {
+            return;
+        };
+        if root.last_child(&tree.map) != Some(child) || child.is_empty(&tree.map) {
+            return;
+        }
+        tree.data.size.copy_kind(root, child);
+        let first = child.first_child(&tree.map).unwrap();
+        if child.last_child(&tree.map) == Some(first) {
+            // Culling `child` flattens `first` in turn if needed.
+            first.detach(tree).insert_before(child).finish();
+            return;
+        }
+        let selected = tree.data.selection.last_selection(&tree.map, child);
+        let grandchildren: Vec<_> = child
+            .children(&tree.map)
+            .map(|node| (node, tree.data.size.weight(node)))
+            .collect();
+        // Culling `child` moves the last one.
+        for &(node, _) in &grandchildren[..grandchildren.len() - 1] {
+            node.detach(tree).insert_before(child).finish();
+        }
+        for &(node, weight) in &grandchildren {
+            tree.data.size.set_weight(node, weight, &tree.map);
+        }
+        if let Some(selected) = selected {
+            tree.data.selection.select_locally(&tree.map, selected);
+        }
+    }
 }
 
 impl tree::Observer for Components {
@@ -1009,6 +1040,7 @@ impl tree::Observer for Components {
         // Decide whether to cull the parent node (which must be a container).
         if parent.parent(&tree.map).is_none() {
             // Don't cull the root node, which would require extra bookkeeping.
+            Self::flatten_root(tree, parent);
             return;
         }
         if parent.is_empty(&tree.map) {
@@ -1446,6 +1478,42 @@ mod tests {
 
         tree.remove_window(WindowId::new(2, 1));
         tree.assert_children_are([a1, a3], root);
+    }
+
+    #[test]
+    fn remove_window_flattens_root_with_single_container() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        tree.set_container_kind(root, ContainerKind::Tabbed);
+        let group = tree.add_container(root, ContainerKind::Stacked);
+        let a = tree.add_window_under(layout, group, WindowId::new(1, 1));
+        let b = tree.add_window_under(layout, group, WindowId::new(1, 2));
+        tree.add_window_under(layout, root, WindowId::new(2, 1));
+        tree.tree.data.size.set_weight(b, 3.0, &tree.tree.map);
+        tree.select(a);
+
+        tree.remove_window(WindowId::new(2, 1));
+        tree.assert_children_are([a, b], root);
+        assert_eq!(tree.container_kind(root), ContainerKind::Stacked);
+        assert_eq!(tree.proportion(a), Some(0.25));
+        assert_eq!(tree.proportion(b), Some(0.75));
+        assert_eq!(tree.selection(layout), a);
+    }
+
+    #[test]
+    fn remove_window_flattens_root_with_nested_single_containers() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let outer = tree.add_container(root, ContainerKind::Tabbed);
+        let inner = tree.add_container(outer, ContainerKind::Stacked);
+        let a = tree.add_window_under(layout, inner, WindowId::new(1, 1));
+        tree.add_window_under(layout, root, WindowId::new(2, 1));
+
+        tree.remove_window(WindowId::new(2, 1));
+        tree.assert_children_are([a], root);
+        assert_eq!(tree.container_kind(root), ContainerKind::Stacked);
     }
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> CGRect {

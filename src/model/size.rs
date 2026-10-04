@@ -200,6 +200,11 @@ impl Size {
         }
     }
 
+    pub(super) fn copy_kind(&mut self, dest: NodeId, src: NodeId) {
+        self.info[dest].kind = self.info[src].kind;
+        self.info[dest].last_ungrouped_kind = self.info[src].last_ungrouped_kind;
+    }
+
     pub(super) fn kind(&self, node: NodeId) -> ContainerKind {
         self.info[node].kind
     }
