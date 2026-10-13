@@ -1194,7 +1194,7 @@ impl Reactor {
     pub fn update_layout(&mut self, new_wids: &[WindowId], skip_anim: bool) {
         let main_window = self.main_window();
         trace!(?main_window);
-        let mut anim = Animation::new();
+        let mut anim = Animation::new(&self.config.settings.animation);
         let mut targets = BTreeMap::new();
         for &screen in &self.screens {
             let Some(space) = screen.space else { continue };
@@ -1271,8 +1271,10 @@ impl Reactor {
         }
         // If the user is doing something with the mouse we don't want to
         // animate on top of that.
-        let skip_anim =
-            skip_anim || !self.config.settings.animate || self.layout.has_active_scroll_animation();
+        let skip_anim = skip_anim
+            || !self.config.settings.animate
+            || self.config.settings.animation.duration_ms == 0
+            || self.layout.has_active_scroll_animation();
         if let Some(tx) = &self.animation_tx
             && !anim.is_empty()
         {
