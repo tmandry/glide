@@ -31,9 +31,14 @@ enum SaveState {
 }
 
 impl SpaceLayoutMapping {
-    pub fn new(size: CGSize, tree: &mut LayoutTree, kind: LayoutKind) -> Self {
+    pub fn new(
+        size: CGSize,
+        tree: &mut LayoutTree,
+        kind: LayoutKind,
+        orientation: Orientation,
+    ) -> Self {
         let layout = match kind {
-            LayoutKind::Tree => tree.create_layout(),
+            LayoutKind::Tree => tree.create_layout_with_orientation(orientation),
             LayoutKind::Scroll => tree.create_scroll_layout(),
         };
         SpaceLayoutMapping {
@@ -180,7 +185,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::collections::HashMap;
-use crate::model::{LayoutId, LayoutKind, LayoutTree};
+use crate::model::{LayoutId, LayoutKind, LayoutTree, Orientation};
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +198,8 @@ mod tests {
     #[test]
     fn unmodified_layout_is_reused() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
         let layout1 = mapping.active_layout();
         assert_eq!(tree.layouts().len(), 1);
 
@@ -213,7 +219,8 @@ mod tests {
     #[test]
     fn prepare_modify_reuses_unique_layouts() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
         let original_layout = mapping.active_layout();
 
         let modified_layout = mapping.prepare_modify(&mut tree);
@@ -224,7 +231,8 @@ mod tests {
     #[test]
     fn prepare_modify_clones_shared_layouts() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
         let original_layout = mapping.active_layout();
         assert_eq!(tree.layouts().len(), 1);
 
@@ -243,7 +251,8 @@ mod tests {
     #[test]
     fn state_is_not_saved_without_retention() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
 
         // Switch without retention - should not save to memory
         mapping.activate_size(SIZE_2, &mut tree);
@@ -266,7 +275,8 @@ mod tests {
     #[test]
     fn state_is_saved_with_retention() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
 
         // Switch with retention - should save to memory
         mapping.retain_layout();
@@ -288,7 +298,8 @@ mod tests {
     #[test]
     fn correct_refcount_with_retain() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
         let layout1 = mapping.active_layout();
 
         // Initially refcount should be 1
@@ -320,7 +331,8 @@ mod tests {
     #[test]
     fn garbage_collection_removes_layouts_when_unused() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
         let layout1 = mapping.active_layout();
         assert_eq!(mapping.layouts().len(), 1);
         assert_eq!(tree.layouts().len(), 1);
@@ -350,7 +362,8 @@ mod tests {
     #[test]
     fn change_index() {
         let mut tree = LayoutTree::new();
-        let mut mapping = SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree);
+        let mut mapping =
+            SpaceLayoutMapping::new(SIZE_1, &mut tree, LayoutKind::Tree, Orientation::Horizontal);
 
         // Make three layouts.
         let layout1 = mapping.active_layout();
