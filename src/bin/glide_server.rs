@@ -147,7 +147,7 @@ fn main() {
         ws_tx.clone(),
     );
     let dock_sm_tx = sm_tx.clone();
-    let skylight_watcher = SkylightWatcher::new(mtm);
+    let skylight_watcher = SkylightWatcher::new(mtm, sm_tx.clone());
     Reactor::spawn(
         config.clone(),
         opt.one,

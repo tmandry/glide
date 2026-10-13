@@ -865,6 +865,8 @@ impl Reactor {
             Event::SaveAndExit(spaces) => self.save_and_exit(spaces),
             Event::ConfigChanged(config) => {
                 self.layout.set_config(&config);
+                // Sent before the layout update below, so it uses the new config.
+                self.group_indicators_tx.send(group_bars::Event::ConfigChanged(config.clone()));
                 self.config = config;
             }
         }

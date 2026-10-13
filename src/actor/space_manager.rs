@@ -198,8 +198,19 @@ impl SpaceManager {
                 self.request_space_refresh();
             }
             Event::ExposeActive(active) => {
+                // Both the Dock's overlay window and AX notifications report this.
+                if self.expose_active == active {
+                    return;
+                }
                 self.expose_active = active;
-                if !active {
+                self.group_indicators_tx.send(if active {
+                    group_bars::Event::Hide
+                } else {
+                    group_bars::Event::Show
+                });
+                if active {
+                    self.ws_tx.send(window_server::Event::ExposeConfirmed);
+                } else {
                     // Expose exited: request a space refresh so the reactor
                     // gets up-to-date visible windows.
                     self.request_space_refresh();
@@ -747,6 +758,8 @@ mod tests {
         h.drain_all();
 
         h.on_event(Event::ExposeActive(true));
+        let ws_events = drain_ws(&mut h.ws_rx);
+        assert!(ws_events.iter().any(|e| matches!(e, window_server::Event::ExposeConfirmed)));
 
         // SpaceChanged should NOT reach reactor.
         h.send_space_changed(vec![Some(space(10))]);

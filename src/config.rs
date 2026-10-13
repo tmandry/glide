@@ -309,13 +309,49 @@ pub struct StatusIconExperimental {
 
 #[derive(PartialConfig!)]
 #[derive_args(GroupBarsPartial)]
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GroupBars {
     pub enable: bool,
     pub thickness: f64,
     pub horizontal_placement: HorizontalPlacement,
     pub vertical_placement: VerticalPlacement,
+    pub selected_color: Color,
+    pub inactive_selected_color: Color,
+    pub background_color: Color,
+    pub inactive_background_color: Color,
+    pub border_color: Color,
+    pub border_width: f64,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, serde_with::DeserializeFromStr, serde_with::SerializeDisplay,
+)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl FromStr for Color {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = s.strip_prefix('#').and_then(|h| hex::decode(h).ok());
+        match bytes.as_deref() {
+            Some(&[r, g, b]) => Ok(Color { r, g, b, a: 255 }),
+            Some(&[r, g, b, a]) => Ok(Color { r, g, b, a }),
+            _ => Err(format!(
+                "invalid color {s:?}; expected \"#RRGGBB\" or \"#RRGGBBAA\""
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for Color {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", hex::encode_upper([self.r, self.g, self.b, self.a]))
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -469,6 +505,26 @@ mod tests {
     use crate::actor::layout::LayoutCommand;
     use crate::actor::reactor::Command as ReactorCommand;
     use crate::actor::wm_controller::WmCmd;
+
+    #[test]
+    fn parse_color() {
+        let c: Color = "#0080ff".parse().unwrap();
+        assert_eq!(
+            c,
+            Color {
+                r: 0,
+                g: 0x80,
+                b: 0xFF,
+                a: 0xFF
+            }
+        );
+        let c: Color = "#FFFFFF33".parse().unwrap();
+        assert_eq!(c.a, 0x33);
+        assert_eq!(c.to_string(), "#FFFFFF33");
+        for bad in ["0080FF", "#0080F", "#0080FF1", "#GG80FF"] {
+            assert!(bad.parse::<Color>().is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn default_config_is_valid() {

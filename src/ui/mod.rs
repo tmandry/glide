@@ -7,4 +7,4 @@ pub mod group_bar;
 pub mod permission_flow;
 pub mod status_bar;
 
-pub use group_bar::{Color, GroupDisplayData, GroupIndicatorNSView, GroupKind, IndicatorConfig};
+pub use group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind};

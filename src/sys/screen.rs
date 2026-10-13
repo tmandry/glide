@@ -200,6 +200,11 @@ pub fn get_ns_screens(mtm: MainThreadMarker) -> Vec<NSScreenInfo> {
         .collect()
 }
 
+/// Returns the bounds of each active display.
+pub fn display_bounds() -> Vec<CGRect> {
+    Actual.cg_screens().unwrap_or_default().into_iter().map(|s| s.bounds).collect()
+}
+
 pub struct Actual;
 #[allow(private_interfaces)]
 impl System for Actual {

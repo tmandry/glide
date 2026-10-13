@@ -545,6 +545,14 @@ pub const kCGSWindowIsTerminated: u32 = 804;
 #[expect(non_upper_case_globals)]
 pub const kCGSWindowCreated: u32 = 811;
 
+/// Sent when a window whose notifications were requested is ordered in.
+#[expect(non_upper_case_globals)]
+pub const kCGSWindowIsVisible: u32 = 815;
+
+/// Sent when a window whose notifications were requested is ordered out.
+#[expect(non_upper_case_globals)]
+pub const kCGSWindowIsInvisible: u32 = 816;
+
 /// This must be called to allow hiding the mouse from a background application.
 ///
 /// It relies on a private API, so not guaranteed to continue working, but it is

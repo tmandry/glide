@@ -13,7 +13,8 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSNormalWindowLevel, NSWindow,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSBackingStoreType, NSColor,
+    NSFloatingWindowLevel, NSNormalWindowLevel, NSWindow, NSWindowCollectionBehavior,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::CGRect;
@@ -45,7 +46,12 @@ pub enum Event {
     SpaceDisabled(SpaceId),
     GlobalDisabled,
     ConfigChanged(Arc<Config>),
+    Hide,
+    Show,
 }
+
+/// How long the bars take to fade out and in around Exposé, in seconds.
+const FADE_DURATION: f64 = 0.2;
 
 pub struct GroupBars {
     config: Arc<Config>,
@@ -54,6 +60,7 @@ pub struct GroupBars {
     indicators: HashMap<SpaceId, HashMap<NodeId, Indicator>>,
     coordinate_converter: CoordinateConverter,
     active_spaces: Vec<Option<SpaceId>>,
+    hidden: bool,
 }
 
 struct Indicator {
@@ -80,6 +87,7 @@ impl GroupBars {
             indicators: HashMap::default(),
             coordinate_converter: CoordinateConverter::default(),
             active_spaces: Vec::new(),
+            hidden: false,
         }
     }
 
@@ -111,13 +119,12 @@ impl GroupBars {
                 self.active_spaces = spaces;
             }
             Event::ConfigChanged(config) => {
+                if config.settings.group_bars != self.config.settings.group_bars {
+                    for indicator in self.indicators.values_mut().flat_map(|i| i.values_mut()) {
+                        indicator.view.set_config(&config.settings.group_bars);
+                    }
+                }
                 self.config = config;
-                // Nothing to do; we rely on the reactor to tell us which
-                // indicators to show. Otherwise we would have to retain the
-                // GroupInfo struct for every space.
-                //
-                // For now we keep the config for when it will be used to
-                // customize indicator appearance.
             }
             Event::SpaceDisabled(space) => {
                 self.indicators.remove(&space);
@@ -125,7 +132,20 @@ impl GroupBars {
             Event::GlobalDisabled => {
                 self.indicators.clear();
             }
+            Event::Hide => self.set_hidden(true),
+            Event::Show => self.set_hidden(false),
         }
+    }
+
+    fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+        let alpha = if hidden { 0.0 } else { 1.0 };
+        NSAnimationContext::beginGrouping();
+        NSAnimationContext::currentContext().setDuration(FADE_DURATION);
+        for indicator in self.indicators.values().flat_map(|i| i.values()) {
+            indicator.window.animator().setAlphaValue(alpha);
+        }
+        NSAnimationContext::endGrouping();
     }
 
     fn handle_groups_updated(&mut self, space_id: SpaceId, groups: Vec<GroupBarInfo>) {
@@ -169,7 +189,8 @@ impl GroupBars {
 
         let space_indicators = self.indicators.entry(space_id).or_default();
         let indicator = space_indicators.entry(group.node_id).or_insert_with(|| {
-            let mut view = GroupIndicatorNSView::new(CGRect::ZERO, self.mtm);
+            let mut view =
+                GroupIndicatorNSView::new(CGRect::ZERO, &self.config.settings.group_bars, self.mtm);
             view.set_click_callback(Rc::new(move |segment_index| {
                 Self::handle_indicator_clicked(group.node_id, segment_index);
             }));
@@ -188,6 +209,9 @@ impl GroupBars {
             is_selected: group.is_selected,
         });
         indicator.window.setIsVisible(group.is_visible);
+        if self.hidden {
+            indicator.window.setAlphaValue(0.0);
+        }
         indicator.window.setLevel(if group.is_on_top {
             NSFloatingWindowLevel
         } else {
@@ -220,8 +244,10 @@ fn make_indicator_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     // Configure as overlay window
     window.setLevel(NSFloatingWindowLevel);
     window.setBackgroundColor(Some(&NSColor::clearColor()));
-    window.setOpaque(true);
+    window.setOpaque(false);
     window.setIgnoresMouseEvents(true);
+    // Don't animate the indicator along with windows in Exposé.
+    window.setCollectionBehavior(NSWindowCollectionBehavior::Stationary);
 
     window
 }

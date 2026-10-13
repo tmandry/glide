@@ -7,17 +7,20 @@ use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use objc2::MainThreadMarker;
+use objc2_app_kit::NSRunningApplication;
+use objc2_foundation::ns_string;
 use tracing::{debug, instrument, warn};
 
 pub use crate::actor::app::pid_t;
 use crate::actor::app::{self, AppInfo, AppThreadHandle, Quiet, WindowId, WindowInfo};
 use crate::actor::{self, reactor, space_manager, wm_controller};
 use crate::collections::HashMap;
+use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::event::MouseState;
-use crate::sys::screen::{NSScreenInfo, ScreenCache, ScreenInfo, SpaceId};
+use crate::sys::screen::{self, NSScreenInfo, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::window_server::{
     self as sys_ws, SkylightConnection, SkylightNotifier, WindowServerId, WindowsOnScreen,
-    kCGSWindowIsTerminated,
+    kCGSWindowIsInvisible, kCGSWindowIsTerminated, kCGSWindowIsVisible,
 };
 
 /// CGWindowLevel values for windows we care about. Everything else (e.g.
@@ -25,6 +28,7 @@ use crate::sys::window_server::{
 const LAYER_NORMAL: i32 = 0; // kCGNormalWindowLevel
 const LAYER_FLOATING: i32 = 3; // kCGFloatingWindowLevel
 const LAYER_STATUS: i32 = 8; // kCGStatusWindowLevel (used by some panels)
+const LAYER_DOCK: i32 = 20; // kCGDockWindowLevel
 
 // ---------------------------------------------------------------------------
 // WindowServer – off main thread
@@ -94,6 +98,8 @@ pub enum Event {
     /// Sent by SpaceManager when it needs a fresh window list (e.g. after
     /// toggling a space or exiting expose).
     RequestSpaceRefresh,
+    /// Sent by SpaceManager when the Dock confirms Exposé.
+    ExposeConfirmed,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -130,6 +136,7 @@ impl WindowServer {
             Event::RegisterWindow(wsid, wid, tx) => {
                 self.skylight_tx.send(SkylightRequest::TrackWindow(wsid, wid, tx));
             }
+            Event::ExposeConfirmed => self.skylight_tx.send(SkylightRequest::FindExposeWindow),
             Event::ScreenParametersChanged(ns_screens) => self.handle_screen_parameters(ns_screens),
             Event::RetryScreenParameters { attempt, screens } => {
                 if !self.screen_config_retry_pending || attempt != self.screen_config_retry_attempt
@@ -300,6 +307,9 @@ struct SkylightWatcherState {
     weak_self: Weak<RefCell<Self>>,
     /// Registered windows (for SkyLight destruction tracking).
     registered_windows: HashMap<WindowServerId, (WindowId, AppThreadHandle)>,
+    sm_tx: space_manager::Sender,
+    /// The Dock's Exposé window.
+    expose_window: Option<WindowServerId>,
 }
 
 /// Commands sent from the reactor-thread `WindowServer` to the main-thread
@@ -307,13 +317,14 @@ struct SkylightWatcherState {
 #[derive(Debug)]
 pub enum SkylightRequest {
     TrackWindow(WindowServerId, WindowId, AppThreadHandle),
+    FindExposeWindow,
 }
 
 pub type SkylightSender = actor::Sender<SkylightRequest>;
 pub type SkylightReceiver = actor::Receiver<SkylightRequest>;
 
 impl SkylightWatcher {
-    pub fn new(mtm: MainThreadMarker) -> Self {
+    pub fn new(mtm: MainThreadMarker, sm_tx: space_manager::Sender) -> Self {
         Self(Rc::new_cyclic(
             |weak_self: &Weak<RefCell<SkylightWatcherState>>| {
                 let mut state = SkylightWatcherState {
@@ -321,6 +332,8 @@ impl SkylightWatcher {
                     notifiers: vec![],
                     weak_self: weak_self.clone(),
                     registered_windows: HashMap::default(),
+                    sm_tx,
+                    expose_window: None,
                 };
                 state.register_callbacks();
                 RefCell::new(state)
@@ -342,6 +355,18 @@ impl SkylightWatcherState {
         self.register_callback(kCGSWindowIsTerminated, |this, wsid| {
             this.on_window_destroyed(wsid)
         });
+        self.register_callback(kCGSWindowIsVisible, |this, wsid| {
+            this.on_window_visibility_changed(wsid, true)
+        });
+        self.register_callback(kCGSWindowIsInvisible, |this, wsid| {
+            this.on_window_visibility_changed(wsid, false)
+        });
+    }
+
+    fn on_window_visibility_changed(&mut self, wsid: WindowServerId, visible: bool) {
+        if self.expose_window == Some(wsid) {
+            self.sm_tx.send(space_manager::Event::ExposeActive(visible));
+        }
     }
 
     fn register_callback(&mut self, event: u32, callback: fn(&mut Self, WindowServerId)) {
@@ -375,17 +400,47 @@ impl SkylightWatcherState {
                     warn!("Failed to update SkylightConnection window list: {e}");
                 }
             }
+            SkylightRequest::FindExposeWindow => {
+                let found = find_dock_expose_window();
+                if found == self.expose_window {
+                    return;
+                }
+                if let Some(old) = self.expose_window.take() {
+                    _ = self.connection.remove_window(old);
+                }
+                self.expose_window = found.filter(|&wsid| self.connection.add_window(wsid).is_ok());
+            }
         }
     }
 
     fn on_window_destroyed(&mut self, wsid: WindowServerId) {
         debug!("Window destroyed: {wsid:?}");
+        if self.expose_window == Some(wsid) {
+            self.expose_window = None;
+            self.connection.on_window_destroyed(wsid);
+            return;
+        }
         let Some((wid, tx)) = self.registered_windows.remove(&wsid) else {
             return;
         };
         self.connection.on_window_destroyed(wsid);
         _ = tx.send(app::Request::WindowDestroyed(wid));
     }
+}
+
+/// The Dock keeps one persistent window at the Dock level and orders it in
+/// when Exposé starts; Exposé adds more on the same level, so take the oldest
+/// of those covering a whole display.
+fn find_dock_expose_window() -> Option<WindowServerId> {
+    let dock =
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.dock"));
+    let dock_pid = dock.iter().next()?.pid();
+    let displays = screen::display_bounds();
+    sys_ws::get_visible_windows_with_layer(Some(LAYER_DOCK))
+        .into_iter()
+        .filter(|w| w.pid == dock_pid && displays.contains(&w.frame))
+        .map(|w| w.id)
+        .min()
 }
 
 #[cfg(test)]
