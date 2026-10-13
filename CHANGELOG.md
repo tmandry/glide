@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.17](https://github.com/tmandry/glide/compare/v0.2.16...v0.2.17) (2026-10-13)
+
+
+### Bug Fixes
+
+* Don't manage native fullscreen spaces ([ef3b30f](https://github.com/tmandry/glide/commit/ef3b30f88445fe4b517eb4c60023011f6d3725dd))
+* Don't manage native fullscreen spaces ([08d8b2e](https://github.com/tmandry/glide/commit/08d8b2e0f4ee7aa5df73bec4887d6c56141086af))
+* Reset the layout of a space when its last window goes away ([ab4fcb8](https://github.com/tmandry/glide/commit/ab4fcb8396cb72524b7cb00bfe533e90e63aaba3))
+* Reset the layout of a space when its last window goes away ([7ba3089](https://github.com/tmandry/glide/commit/7ba308901f4ce88efaaffe743a1fb4ba742a3619))
+* Stop Glide from reacting to its own windows when group bars are disabled ([2837add](https://github.com/tmandry/glide/commit/2837add2ce3911743e869ed43da59014714b7e59))
+
 ## [0.2.16](https://github.com/tmandry/glide/compare/v0.2.15...v0.2.16) (2026-09-28)
 
 This release makes it easier to restart and update Glide without losing your
