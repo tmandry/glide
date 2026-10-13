@@ -95,6 +95,7 @@ enum Disabled {
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub animate: bool,
+    pub split_mode: SplitMode,
     pub default_disable: bool,
     pub auto_restore: bool,
     pub mouse_follows_focus: bool,
@@ -200,6 +201,14 @@ pub struct Experimental {
     pub status_icon: StatusIconExperimental,
     #[derive_args(ScrollConfigPartial)]
     pub scroll: ScrollConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitMode {
+    #[default]
+    Manual,
+    Bsp,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -771,5 +780,20 @@ mod tests {
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + ArrowDown"));
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + ArrowUp"));
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + ArrowRight"));
+    }
+
+    #[test]
+    fn split_mode_config() {
+        let config_default = Config::default();
+        assert_eq!(config_default.settings.split_mode, SplitMode::Manual);
+
+        let config_bsp = Config::parse(
+            r#"
+            [settings]
+            split_mode = "bsp"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config_bsp.settings.split_mode, SplitMode::Bsp);
     }
 }

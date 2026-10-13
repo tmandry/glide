@@ -30,6 +30,11 @@ outer_gap = 0
 # Gap between adjacent windows (in pixels).
 inner_gap = 0
 
+# Window split mode for tree layouts:
+# - "manual": traditional i3/sway style (new windows added to current container; manual split keys)
+# - "bsp": automatic binary space partitioning (new windows automatically split the focused window along its longest edge)
+split_mode = "manual"
+
 # The default layout kind for new spaces: "tree" or "scroll".
 # Note: "scroll" requires settings.experimental.scroll.enable = true.
 default_layout_kind = "tree"
@@ -118,6 +123,9 @@ default_keys = false
 # Toggle the parent container between horizontal and vertical, or between
 # tabbed and stacked.
 # "<key>" = "toggle_orientation"
+
+# Toggle between manual and bsp split mode.
+# "Alt + B" = "toggle_split_mode"
 
 # Change the parent node to a horizontal or vertical group, also known as
 # "tabbed" and "stacked" respectively. Groups show one window at a time,
