@@ -133,6 +133,10 @@ default_keys = false
 # whatever size and position you give them. Note that they do not actually
 # float on top of other windows, as that would require disabling security
 # protection on your machine.
+#
+# By default a window floats where it last floated. To center it instead, sized
+# as fractions of the screen:
+# "<key>" = { toggle_window_floating = { center = { width = 0.5, height = 0.5 } } }
 "Alt + Shift + Space" = "toggle_window_floating"
 
 # Toggle between focusing floating nodes. When switching to floating mode
