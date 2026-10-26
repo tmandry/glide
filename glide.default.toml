@@ -6,6 +6,16 @@
 # Enable animations.
 animate = true
 
+# Window animation settings.
+# Duration in milliseconds (set to 0 to disable animations).
+animation.duration_ms = 300
+
+# Animation curve: "ease_in_out_circ" (default), "ease_in_out", "ease_out", "ease_in", "linear", "ease_out_back" ("back"), "ease_out_elastic" ("elastic").
+animation.curve = "ease_in_out_circ"
+
+# Animation frame rate in frames per second.
+animation.fps = 100.0
+
 # Disable each space by default. When this is set, Use the
 # toggle_space_activated command to enable a space.
 default_disable = true
