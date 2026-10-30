@@ -921,7 +921,16 @@ impl Reactor {
                 let command_space = self
                     .main_window_space()
                     .or_else(|| self.active_screen().and_then(|screen| screen.space));
-                let response = self.layout.handle_command(command_space, &visible_spaces, cmd);
+                let response = match cmd {
+                    LayoutCommand::ToggleWindowFloating(placement) => {
+                        let screen = command_space.and_then(|space| {
+                            self.screens.iter().find(|screen| screen.space == Some(space))
+                        });
+                        let screen = screen.map(|screen| screen.frame);
+                        self.layout.toggle_window_floating(command_space, screen, placement)
+                    }
+                    cmd => self.layout.handle_command(command_space, &visible_spaces, cmd),
+                };
                 self.handle_layout_response(response);
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
@@ -1468,10 +1477,14 @@ pub mod tests {
         ));
     }
 
+    fn toggle_window_floating() -> Event {
+        Event::Command(Command::Layout(LayoutCommand::ToggleWindowFloating(
+            Default::default(),
+        )))
+    }
+
     #[test]
     fn floating_window_restores_its_last_user_frame() {
-        use LayoutCommand::ToggleWindowFloating;
-
         let mut apps = Apps::new();
         let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
         let space = SpaceId::new(1);
@@ -1491,7 +1504,7 @@ pub mod tests {
         reactor.send_layout_event(LayoutEvent::WindowFocused(vec![space], wid));
 
         // First float restores the frame the window had before it was tiled.
-        reactor.handle_event(Event::Command(Command::Layout(ToggleWindowFloating)));
+        reactor.handle_event(toggle_window_floating());
         let initial_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(50., 50.));
         let requests = apps.requests();
         assert!(requests.iter().any(|request| {
@@ -1513,10 +1526,10 @@ pub mod tests {
         assert_eq!(reactor.layout.floating_restore_frame(wid), Some(updated_frame));
         assert!(apps.requests().is_empty());
 
-        reactor.handle_event(Event::Command(Command::Layout(ToggleWindowFloating)));
+        reactor.handle_event(toggle_window_floating());
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(reactor.windows[&wid].frame_monotonic, screen);
-        reactor.handle_event(Event::Command(Command::Layout(ToggleWindowFloating)));
+        reactor.handle_event(toggle_window_floating());
         let requests = apps.requests();
         assert!(requests.iter().any(|request| {
             matches!(request, Request::SetWindowFrame(request_wid, frame, _) if *request_wid == wid && *frame == updated_frame)
@@ -1525,8 +1538,6 @@ pub mod tests {
 
     #[test]
     fn floating_frame_restoration_uses_animation() {
-        use LayoutCommand::ToggleWindowFloating;
-
         let mut apps = Apps::new();
         let (mut reactor, mut animation_rx) =
             Reactor::new_for_test_with_animation(LayoutManager::new_for_test(), true);
@@ -1550,7 +1561,7 @@ pub mod tests {
         apps.simulate_until_quiet(&mut reactor);
         reactor.send_layout_event(LayoutEvent::WindowFocused(vec![space], wid));
 
-        reactor.handle_event(Event::Command(Command::Layout(ToggleWindowFloating)));
+        reactor.handle_event(toggle_window_floating());
         assert!(
             apps.requests().is_empty(),
             "restore should be animated, not written directly"

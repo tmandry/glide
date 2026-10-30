@@ -144,6 +144,13 @@ default_keys = false
 # whatever size and position you give them. Note that they do not actually
 # float on top of other windows, as that would require disabling security
 # protection on your machine.
+#
+# By default a window floats with the position and size it last had while
+# floating. To place it differently, pass a position ("last" or "center") and
+# a size ("last", "current" for the size of its tile, a percentage of the
+# screen such as "50%", or separate percentages such as
+# { width = "80%", height = "50%" }):
+# "<key>" = { toggle_window_floating = { position = "center", size = "50%" } }
 "Alt + Shift + Space" = "toggle_window_floating"
 
 # Toggle between focusing floating nodes. When switching to floating mode
