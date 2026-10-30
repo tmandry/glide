@@ -667,6 +667,7 @@ dependencies = [
  "core-graphics",
  "core-graphics-types",
  "dirs",
+ "hex",
  "indexmap 2.13.0",
  "itertools",
  "libc",

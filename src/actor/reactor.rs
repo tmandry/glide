@@ -939,6 +939,8 @@ impl Reactor {
             Event::SpaceStateChanged(spaces) => self.space_state = Some(spaces),
             Event::ConfigChanged(config) => {
                 self.layout.set_config(&config);
+                // Sent before the layout update below, so it uses the new config.
+                self.group_indicators_tx.send(group_bars::Event::ConfigChanged(config.clone()));
                 self.config = config;
             }
         }

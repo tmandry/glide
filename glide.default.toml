@@ -39,6 +39,17 @@ group_bars.enable = true
 group_bars.thickness = 6
 group_bars.horizontal_placement = "top"
 group_bars.vertical_placement = "right"
+# Group bar colors, as "#RRGGBB" or "#RRGGBBAA" (the last byte is opacity).
+# The selected window's segment, in the focused group and in other groups.
+group_bars.selected_color = "#0080FF"
+group_bars.inactive_selected_color = "#004D99"
+# The rest of the bar, in the focused group and in other groups.
+group_bars.background_color = "#CCCCCC"
+group_bars.inactive_background_color = "#B3B3B3"
+# The bar's border and the separators between segments.
+group_bars.border_color = "#4D4D4D"
+# Width of the bar's border (in points).
+group_bars.border_width = 0.5
 
 # Enables the status icon.
 status_icon.enable = true

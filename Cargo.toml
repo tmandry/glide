@@ -53,6 +53,7 @@ core-foundation = "0.10.1"
 core-graphics = "0.25.0"
 core-graphics-types = "0.2.0"
 dirs = "5.0.1"
+hex = "0.4.3"
 indexmap = { version = "2.10.0", features = ["serde"] }
 livesplit-hotkey = "0.8.1"
 macro_rules_attribute = "0.2.2"
