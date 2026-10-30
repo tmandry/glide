@@ -28,12 +28,39 @@ pub enum LayoutKind {
     Scroll,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(from = "SavedLayoutTree")]
 pub struct LayoutTree {
+    tree: Tree<Components>,
+}
+
+/// The serialized form of [`LayoutTree`], which stores the layouts next to the
+/// tree.
+#[derive(Deserialize)]
+struct SavedLayoutTree {
     tree: Tree<Components>,
     layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
     #[serde(default)]
     layout_kinds: slotmap::SecondaryMap<LayoutId, LayoutKind>,
+}
+
+impl From<SavedLayoutTree> for LayoutTree {
+    fn from(mut saved: SavedLayoutTree) -> Self {
+        saved.tree.data.layout_roots = saved.layout_roots;
+        saved.tree.data.layout_kinds = saved.layout_kinds;
+        LayoutTree { tree: saved.tree }
+    }
+}
+
+impl Serialize for LayoutTree {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("LayoutTree", 3)?;
+        state.serialize_field("tree", &self.tree)?;
+        state.serialize_field("layout_roots", &self.tree.data.layout_roots)?;
+        state.serialize_field("layout_kinds", &self.tree.data.layout_kinds)?;
+        state.end()
+    }
 }
 
 slotmap::new_key_type! {
@@ -44,8 +71,6 @@ impl LayoutTree {
     pub fn new() -> LayoutTree {
         LayoutTree {
             tree: Tree::with_observer(Components::default()),
-            layout_roots: Default::default(),
-            layout_kinds: Default::default(),
         }
     }
 
@@ -66,27 +91,27 @@ impl LayoutTree {
 
     fn create_layout_with_kind(&mut self, kind: LayoutKind, root_kind: ContainerKind) -> LayoutId {
         let root = OwnedNode::new_root_in(&mut self.tree, "layout_root");
-        let id = self.layout_roots.insert(root);
-        self.layout_kinds.insert(id, kind);
-        self.tree.data.size.set_kind(self.layout_roots[id].id(), root_kind);
+        let id = self.tree.data.layout_roots.insert(root);
+        self.tree.data.layout_kinds.insert(id, kind);
+        self.tree.data.size.set_kind(self.tree.data.layout_roots[id].id(), root_kind);
         id
     }
 
     pub fn remove_layout(&mut self, layout: LayoutId) {
-        self.layout_roots.remove(layout).unwrap().remove(&mut self.tree);
-        self.layout_kinds.remove(layout);
+        self.tree.data.layout_roots.remove(layout).unwrap().remove(&mut self.tree);
+        self.tree.data.layout_kinds.remove(layout);
     }
 
     pub fn layouts(&self) -> impl ExactSizeIterator<Item = LayoutId> {
-        self.layout_roots.keys()
+        self.tree.data.layout_roots.keys()
     }
 
     pub fn root(&self, layout: LayoutId) -> NodeId {
-        self.layout_roots[layout].id()
+        self.tree.data.layout_roots[layout].id()
     }
 
     pub fn layout_kind(&self, layout: LayoutId) -> LayoutKind {
-        self.layout_kinds.get(layout).copied().unwrap_or_default()
+        self.tree.data.layout_kinds.get(layout).copied().unwrap_or_default()
     }
 
     pub fn is_scroll_layout(&self, layout: LayoutId) -> bool {
@@ -95,9 +120,9 @@ impl LayoutTree {
 
     /// Returns true if `node` is the root node of a scroll layout.
     fn is_scroll_root(&self, node: NodeId) -> bool {
-        for (layout_id, &kind) in &self.layout_kinds {
+        for (layout_id, &kind) in &self.tree.data.layout_kinds {
             if kind == LayoutKind::Scroll
-                && self.layout_roots.get(layout_id).map(|r| r.id()) == Some(node)
+                && self.tree.data.layout_roots.get(layout_id).map(|r| r.id()) == Some(node)
             {
                 return true;
             }
@@ -174,11 +199,11 @@ impl LayoutTree {
     }
 
     pub fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let source_root = self.layout_roots[layout].id();
+        let source_root = self.tree.data.layout_roots[layout].id();
         let cloned = source_root.deep_copy(&mut self.tree).make_root("layout_root");
         let cloned_root = cloned.id();
-        let dest_layout = self.layout_roots.insert(cloned);
-        self.layout_kinds.insert(dest_layout, self.layout_kind(layout));
+        let dest_layout = self.tree.data.layout_roots.insert(cloned);
+        self.tree.data.layout_kinds.insert(dest_layout, self.layout_kind(layout));
         self.print_tree(layout);
         for (src, dest) in iter::zip(
             source_root.traverse_preorder(&self.tree.map),
@@ -304,11 +329,11 @@ impl LayoutTree {
                     current.next();
                 }
                 (Some(des), None) => {
-                    self.add_window_under(layout, root, *des);
+                    self.add_window_under(layout, self.root(layout), *des);
                     desired.next();
                 }
                 (Some(des), Some((cur, _))) if des < cur => {
-                    self.add_window_under(layout, root, *des);
+                    self.add_window_under(layout, self.root(layout), *des);
                     desired.next();
                 }
                 (_, Some((_, node))) => {
@@ -732,9 +757,9 @@ impl LayoutTree {
                 new_parent
             } else {
                 // New root.
-                let layout_root = self.layout_roots.get_mut(layout).unwrap();
-                layout_root.replace(self.tree.mk_node()).push_back(layout_root.id());
-                layout_root.id()
+                let new_root = self.root(layout).wrap_root(&mut self.tree);
+                *self.tree.data.layout_roots[layout] = new_root;
+                new_root
             };
             self.tree.data.selection.select_locally(&self.tree.map, node);
             new_parent
@@ -997,7 +1022,7 @@ impl LayoutTree {
 
 impl Drop for LayoutTree {
     fn drop(&mut self) {
-        for (_, node) in self.layout_roots.drain() {
+        for (_, node) in self.tree.data.layout_roots.drain() {
             // It's okay to skip removing these, since we're dropping the map too.
             mem::forget(node);
         }
@@ -1006,12 +1031,20 @@ impl Drop for LayoutTree {
 
 /// The components of our data model own slices of information attached to every
 /// node.
+///
+/// They also own the root and kind of each layout, so that culling can replace
+/// the root of a layout when a node is removed.
 #[derive(Default, Serialize, Deserialize)]
 struct Components {
     selection: Selection,
     #[serde(alias = "layout")]
     size: Size,
     window: Window,
+    // The layouts are serialized by `LayoutTree`.
+    #[serde(skip)]
+    layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
+    #[serde(skip)]
+    layout_kinds: slotmap::SecondaryMap<LayoutId, LayoutKind>,
 }
 
 #[derive(Copy, Clone)]
@@ -1039,6 +1072,56 @@ impl Components {
         self.size.handle_event(map, event);
         self.window.handle_event(map, event);
     }
+
+    /// Replaces the parent of `node` with `node`, if it's the only child.
+    /// Returns whether it was replaced.
+    ///
+    /// A root is only replaced by a non-empty container, and never in a scroll
+    /// layout, whose root holds the columns. A group replacing the root keeps
+    /// the root's orientation.
+    fn promote(tree: &mut Tree<Self>, node: NodeId) -> bool {
+        let Some(parent) = node.parent(&tree.map) else {
+            return false;
+        };
+        if parent.only_child(&tree.map) != Some(node) {
+            return false;
+        }
+        if parent.parent(&tree.map).is_some() {
+            node.detach(tree)
+                .insert_after(parent)
+                .with(|node_id, tree| {
+                    // Assume the size of the parent before culling it.
+                    tree.data.size.assume_size_of(node_id, parent, &tree.map)
+                })
+                // Notify that the node was removed; this will cull the parent.
+                .finish();
+            return true;
+        }
+        if node.first_child(&tree.map).is_none() {
+            return false;
+        }
+        let Some(layout) = tree.data.layout_of_root(parent) else {
+            return false;
+        };
+        if tree.data.layout_kinds.get(layout) == Some(&LayoutKind::Scroll) {
+            return false;
+        }
+        let root_was_selected = tree.data.selection.current_selection(parent) == parent;
+        tree.data.size.assume_orientation_of(node, parent);
+        *tree.data.layout_roots[layout] = parent.replace_root_with_only_child(tree);
+        if root_was_selected {
+            tree.data.selection.select(&tree.map, node);
+        }
+        true
+    }
+
+    /// Returns the layout whose root is `node`.
+    fn layout_of_root(&self, node: NodeId) -> Option<LayoutId> {
+        self.layout_roots
+            .iter()
+            .find(|(_, root)| root.id() == node)
+            .map(|(layout, _)| layout)
+    }
 }
 
 impl tree::Observer for Components {
@@ -1054,30 +1137,28 @@ impl tree::Observer for Components {
         self.dispatch_event(map, TreeEvent::RemovingFromParent(node))
     }
 
+    /// Culls `parent` after one of its children was removed.
+    ///
+    /// An empty node is removed, which culls its own parent in turn. An empty
+    /// root is reset instead, so there's no group bar.
+    ///
+    /// A node left with one child is collapsed with [`Self::promote`]. While it's
+    /// the only child of its parent, it replaces that parent and is culled again
+    /// there, so it climbs as high as it can. Where it stops, its child replaces
+    /// it if `promote` allows.
     fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
-        // Decide whether to cull the parent node (which must be a container).
-        if parent.parent(&tree.map).is_none() {
-            // Don't cull the root node, which would require extra bookkeeping.
-            // Reset it once empty so there's no group bar.
-            if parent.is_empty(&tree.map) {
-                tree.data.size.reset_root(parent);
-            }
-            return;
-        }
         if parent.is_empty(&tree.map) {
-            parent.detach(tree).remove();
-        } else if parent.first_child(&tree.map) == parent.last_child(&tree.map) {
-            // Promote the only remaining child of the parent node.
-            let child = parent.first_child(&tree.map).unwrap();
-            child
-                .detach(tree)
-                .insert_after(parent)
-                .with(|child_id, tree| {
-                    // Assume the size of the parent before culling it.
-                    tree.data.size.assume_size_of(child_id, parent, &tree.map)
-                })
-                // Notify that the child was removed; this will cull the parent.
-                .finish();
+            if parent.parent(&tree.map).is_none() {
+                tree.data.size.reset_layout(parent);
+            } else {
+                parent.detach(tree).remove();
+            }
+        } else if let Some(child) = parent.only_child(&tree.map) {
+            if Self::promote(tree, parent) {
+                Self::removed_child(tree, parent);
+            } else {
+                Self::promote(tree, child);
+            }
         }
     }
 
@@ -1499,6 +1580,95 @@ mod tests {
 
         tree.remove_window(WindowId::new(2, 1));
         tree.assert_children_are([a1, a3], root);
+    }
+
+    #[test]
+    fn root_left_with_one_container_is_replaced_by_it() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let group = tree.add_container(root, ContainerKind::Stacked);
+        let a = tree.add_window_under(layout, group, WindowId::new(1, 1));
+        let b = tree.add_window_under(layout, group, WindowId::new(1, 2));
+        tree.add_window_under(layout, root, WindowId::new(2, 1));
+
+        tree.remove_window(WindowId::new(2, 1));
+        assert_eq!(tree.root(layout), group);
+        tree.assert_children_are([a, b], group);
+        assert_eq!(tree.container_kind(group), ContainerKind::Stacked);
+    }
+
+    #[test]
+    fn container_is_kept_over_its_parent() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let group = tree.add_container(root, ContainerKind::Stacked);
+        let a = tree.add_window_under(layout, group, WindowId::new(1, 1));
+        tree.add_window_under(layout, group, WindowId::new(1, 2));
+
+        tree.remove_window(WindowId::new(1, 2));
+        assert_eq!(tree.root(layout), group);
+        tree.assert_children_are([a], group);
+    }
+
+    #[test]
+    fn group_replacing_root_keeps_root_orientation() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout_with_orientation(Orientation::Vertical);
+        let root = tree.root(layout);
+        let group = tree.add_container(root, ContainerKind::Stacked);
+        tree.add_window_under(layout, group, WindowId::new(1, 1));
+        tree.add_window_under(layout, root, WindowId::new(2, 1));
+
+        tree.remove_window(WindowId::new(2, 1));
+        assert_eq!(tree.root(layout), group);
+        tree.remove_window(WindowId::new(1, 1));
+        assert_eq!(tree.container_kind(group), ContainerKind::Vertical);
+    }
+
+    #[test]
+    fn replacing_selected_root_selects_new_root() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let group = tree.add_container(root, ContainerKind::Vertical);
+        let a = tree.add_window_under(layout, group, WindowId::new(1, 1));
+        tree.add_window_under(layout, root, WindowId::new(2, 1));
+        tree.select(a);
+        tree.select(root);
+        assert_eq!(tree.selection(layout), root);
+
+        tree.remove_window(WindowId::new(2, 1));
+        assert_eq!(tree.selection(layout), group);
+    }
+
+    #[test]
+    fn set_windows_for_app_adds_to_current_root() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let group = tree.add_container(root, ContainerKind::Stacked);
+        let a = tree.add_window_under(layout, group, WindowId::new(1, 1));
+        tree.add_window_under(layout, root, WindowId::new(1, 2));
+
+        tree.set_windows_for_app(layout, 1, vec![WindowId::new(1, 1), WindowId::new(1, 3)]);
+        assert_eq!(tree.root(layout), group);
+        let d = tree.window_node(layout, WindowId::new(1, 3)).unwrap();
+        tree.assert_children_are([a, d], group);
+    }
+
+    #[test]
+    fn scroll_root_is_not_replaced() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_scroll_layout();
+        let a = tree.add_window_to_scroll_column(layout, WindowId::new(1, 1), true);
+        tree.add_window_to_scroll_column(layout, WindowId::new(2, 1), true);
+        let column = tree.column_of(layout, a).unwrap();
+
+        tree.remove_window(WindowId::new(2, 1));
+        assert_eq!(tree.columns(layout), vec![column]);
+        tree.assert_children_are([a], column);
     }
 
     #[test]

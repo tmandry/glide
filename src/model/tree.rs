@@ -152,6 +152,35 @@ impl NodeId {
         DetachedNode { id: self, tree }
     }
 
+    /// Removes this root and returns its only child as the new root.
+    ///
+    /// Doesn't emit `removed_child`, since this node is removed.
+    #[track_caller]
+    pub(super) fn replace_root_with_only_child<O: Observer>(self, tree: &mut Tree<O>) -> NodeId {
+        assert!(self.parent(&tree.map).is_none(), "node is not a root");
+        let child = self.only_child(&tree.map).expect("root doesn't have a single child");
+        tree.data.removing_from_parent(&tree.map, child);
+        tree.map.unlink(child);
+        tree.map[child].parent = None;
+        UnattachedNode { id: self, tree }.remove();
+        child
+    }
+
+    /// Returns the child of this node if it has exactly one.
+    pub(super) fn only_child(self, map: &NodeMap) -> Option<NodeId> {
+        let child = self.first_child(map)?;
+        (self.last_child(map) == Some(child)).then_some(child)
+    }
+
+    /// Inserts a new root above this one and returns it.
+    #[track_caller]
+    pub(super) fn wrap_root<O: Observer>(self, tree: &mut Tree<O>) -> NodeId {
+        assert!(self.parent(&tree.map).is_none(), "node is not a root");
+        let new_root = tree.mk_node().id;
+        UnattachedNode { id: self, tree }.push_back(new_root);
+        new_root
+    }
+
     #[track_caller]
     pub fn parent(self, map: &NodeMap) -> Option<NodeId> {
         map[self].parent
@@ -963,6 +992,34 @@ mod tests {
         t.other_root_node.remove(&mut t.tree);
         t.assert_events_are([RemovedFromForest(t.other_root)]);
         assert!(!t.tree.map.map.contains_key(t.other_root));
+    }
+
+    #[test]
+    fn replace_root_with_only_child() {
+        let mut t = TestTree::new();
+        let child = t.tree.mk_node().push_back(t.other_root);
+        let gc = t.tree.mk_node().push_back(child);
+        t.clear_events();
+
+        let new_root = t.other_root.replace_root_with_only_child(&mut t.tree);
+        *t.other_root_node = new_root;
+        assert_eq!(new_root, child);
+        t.assert_children_are([gc], child);
+        t.assert_events_are([
+            RemovingFromParent(child, t.other_root),
+            RemovedFromForest(t.other_root),
+        ]);
+        assert!(!t.tree.map.map.contains_key(t.other_root));
+    }
+
+    #[test]
+    fn wrap_root() {
+        let mut t = TestTree::new();
+
+        let new_root = t.other_root.wrap_root(&mut t.tree);
+        *t.other_root_node = new_root;
+        t.assert_children_are([t.other_root], new_root);
+        t.assert_events_are([AddedToForest(new_root), AddedToParent(t.other_root)]);
     }
 
     #[test]
