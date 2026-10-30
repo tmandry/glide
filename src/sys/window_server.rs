@@ -21,7 +21,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
-use sorted_vec::SortedVec;
+use sorted_vec::SortedSet;
 use static_assertions::assert_not_impl_any;
 use tracing::warn;
 
@@ -378,7 +378,7 @@ type SkylightNotifierCallback = extern "C-unwind" fn(
 /// events. This uses private APIs.
 pub struct SkylightConnection {
     cid: SLSConnectionID,
-    window_list: SortedVec<WindowServerId>,
+    window_list: SortedSet<WindowServerId>,
     _phantom: PhantomData<*mut ()>,
 }
 assert_not_impl_any!(SkylightConnection: Send, Sync);
@@ -387,13 +387,16 @@ impl SkylightConnection {
     pub fn new(_mtm: MainThreadMarker) -> Self {
         Self {
             cid: SLSDefaultConnectionForThread(),
-            window_list: SortedVec::new(),
+            window_list: SortedSet::new(),
             _phantom: PhantomData,
         }
     }
 
     pub fn add_window(&mut self, wsid: WindowServerId) -> Result<(), CGError> {
-        self.window_list.insert(wsid);
+        // Apps can hand out a new accessibility element for a window that is
+        // already registered. SkyLight rejects lists of more than 1024
+        // windows, so keep each window in the list once.
+        self.window_list.find_or_insert(wsid);
         self.update_windows()
     }
 
