@@ -148,7 +148,13 @@ impl WindowServer {
             Event::WindowCreated(wid, info, mouse_state) => {
                 let pid = wid.pid;
                 self.send_reactor_event(reactor::Event::WindowCreated(wid, info, mouse_state));
-                self.send_windows_on_screen_if_changed(Some(pid));
+                // The reactor places the window by its spaces, and may not have gotten
+                // the last list, since space changes are held back during expose.
+                let on_screen = self.get_windows_on_screen();
+                self.send_reactor_event(reactor::Event::WindowsOnScreenUpdated {
+                    pid: Some(pid),
+                    on_screen,
+                });
                 self.send_reactor_event(reactor::Event::WindowBecameVisible(wid));
             }
             Event::ApplicationMainWindowChanged(pid, wid, quiet) => {
@@ -421,6 +427,7 @@ mod tests {
             pid: 1,
             layer,
             frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0)),
+            spaces: vec![],
         }
     }
 
@@ -550,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn window_created_sends_windows_on_screen_if_changed() {
+    fn window_created_sends_windows_on_screen() {
         set_mock_windows(vec![make_window(1, LAYER_NORMAL)]);
 
         let mut h = TestHarness::new();

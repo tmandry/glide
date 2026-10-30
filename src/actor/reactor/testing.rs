@@ -167,6 +167,7 @@ impl Apps {
                         id: info.sys_id?,
                         layer: 0,
                         frame: info.frame,
+                        spaces: vec![],
                     })
                 })
                 .collect();

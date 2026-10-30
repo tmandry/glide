@@ -596,8 +596,7 @@ impl Reactor {
             },
             Event::WindowBecameVisible(wid) => {
                 if self.window_is_tracked(wid)
-                    && let Some(window) = self.windows.get(&wid)
-                    && let Some(space) = self.best_space_for_window(&window.frame_monotonic)
+                    && let Some(space) = self.layout_space_for_window(wid)
                     && let Some(info) = self.layout_window_info(wid)
                 {
                     animation_focus_wids.push(wid);
@@ -1080,8 +1079,7 @@ impl Reactor {
             .filter(|wid| wid.pid == pid)
             .filter(|wid| self.window_is_tracked(*wid))
         {
-            let Some(window) = self.windows.get(&wid) else { continue };
-            let Some(space) = self.best_space_for_window(&window.frame_monotonic) else {
+            let Some(space) = self.layout_space_for_window(wid) else {
                 continue;
             };
             let Some(layout_info) = self.layout_window_info(wid) else {
@@ -1125,6 +1123,22 @@ impl Reactor {
 
     fn best_space_for_window(&self, frame: &CGRect) -> Option<SpaceId> {
         self.screens[self.best_screen_idx_for_window(frame)?].space
+    }
+
+    /// The space to lay a window out in: the one shown on its screen, unless
+    /// the window server has the window in other spaces. That happens while
+    /// space changes are held back during expose, or before one is reported.
+    fn layout_space_for_window(&self, wid: WindowId) -> Option<SpaceId> {
+        let window = self.windows.get(&wid)?;
+        let space = self.best_space_for_window(&window.frame_monotonic)?;
+        let spaces = window
+            .window_server_id
+            .and_then(|wsid| self.window_server_info.get(&wsid))
+            .map(|info| &info.spaces);
+        match spaces {
+            Some(spaces) if !spaces.is_empty() && !spaces.contains(&space) => None,
+            _ => Some(space),
+        }
     }
 
     /// Gathers the window properties the layout uses to classify a window.
@@ -1795,6 +1809,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: CGRect::ZERO,
+                spaces: vec![],
             })
             .collect::<Vec<_>>();
         reactor.handle_event(Event::ScreenParametersChanged {
@@ -1883,6 +1898,7 @@ pub mod tests {
             pid: 2,
             layer: 0,
             frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.)),
+            spaces: vec![],
         }];
         reactor.handle_event(Event::ScreenParametersChanged {
             frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.))],
@@ -1924,6 +1940,7 @@ pub mod tests {
                 pid: wid.pid,
                 layer: 0,
                 frame: reactor.windows[wid].frame_monotonic,
+                spaces: vec![],
             })
             .collect();
         reactor.handle_event(Event::ScreenParametersChanged {
@@ -1961,12 +1978,14 @@ pub mod tests {
             pid: 2,
             layer: 0,
             frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.)),
+            spaces: vec![],
         }];
         on_screen.extend(reactor.windows.iter().map(|(wid, window)| WindowServerInfo {
             id: window.window_server_id.unwrap(),
             pid: wid.pid,
             layer: 0,
             frame: window.frame_monotonic,
+            spaces: vec![],
         }));
         reactor.handle_event(Event::ScreenParametersChanged {
             frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.))],
@@ -2007,6 +2026,7 @@ pub mod tests {
                 pid: wid.pid,
                 layer: 0,
                 frame: reactor.windows[wid].frame_monotonic,
+                spaces: vec![],
             })
             .collect();
         reactor.handle_event(Event::SpaceChanged(
@@ -2047,6 +2067,7 @@ pub mod tests {
                 pid: wid.pid,
                 layer: 0,
                 frame: reactor.windows[wid].frame_monotonic,
+                spaces: vec![],
             })
             .collect();
         reactor.handle_event(Event::SpaceChanged(
@@ -2084,12 +2105,14 @@ pub mod tests {
             pid: 9,
             layer: 0,
             frame: CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.)),
+            spaces: vec![],
         }];
         on_screen.extend(desired.iter().map(|wid| WindowServerInfo {
             id: reactor.windows[wid].window_server_id.unwrap(),
             pid: wid.pid,
             layer: 0,
             frame: reactor.windows[wid].frame_monotonic,
+            spaces: vec![],
         }));
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
@@ -2155,6 +2178,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: reactor.windows[&w1].frame_monotonic,
+                spaces: vec![],
             },
         );
         reactor.window_server_info.insert(
@@ -2164,6 +2188,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: reactor.windows[&w2].frame_monotonic,
+                spaces: vec![],
             },
         );
 
@@ -2227,12 +2252,14 @@ pub mod tests {
                 pid: 9,
                 layer: 3,
                 frame: CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.)),
+                spaces: vec![],
             },
             WindowServerInfo {
                 id: WindowServerId::new(91),
                 pid: 9,
                 layer: 0,
                 frame: CGRect::new(CGPoint::new(2000., 10.), CGSize::new(100., 100.)),
+                spaces: vec![],
             },
         ];
         on_screen.extend(desired.iter().map(|wid| WindowServerInfo {
@@ -2240,6 +2267,7 @@ pub mod tests {
             pid: wid.pid,
             layer: 0,
             frame: reactor.windows[wid].frame_monotonic,
+            spaces: vec![],
         }));
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
@@ -2706,6 +2734,7 @@ pub mod tests {
                 pid: 1,
                 layer: 10,
                 frame: CGRect::ZERO,
+                spaces: vec![],
             }]),
         });
 
@@ -2873,6 +2902,7 @@ pub mod tests {
                         id: WindowServerId::new(n),
                         layer: 0,
                         frame: CGRect::ZERO,
+                        spaces: vec![],
                     })
                     .collect(),
             ),
@@ -2949,6 +2979,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 500.)),
+                spaces: vec![],
             }]),
         });
 

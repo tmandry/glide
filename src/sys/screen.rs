@@ -11,11 +11,13 @@ use bitflags::bitflags;
 use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CFArray, CFRetained, CFString, CGPoint, CGRect};
+use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CGPoint, CGRect};
 use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList};
 use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+
+use crate::sys::window_server::WindowServerId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -349,6 +351,31 @@ pub mod diagnostic {
     }
 }
 
+/// Returns the spaces `window` is in, or none if the window server doesn't
+/// say. A window shown on all spaces is in more than one.
+///
+/// Note: This relies on private APIs and might break.
+pub fn window_spaces(window: WindowServerId) -> Vec<SpaceId> {
+    let windows = CFArray::from_retained_objects(&[CFNumber::new_i32(window.as_u32() as i32)]);
+    let Some(spaces) = (unsafe {
+        CGSCopySpacesForWindows(
+            CGSMainConnectionID(),
+            CGSSpaceMask::ALL_SPACES,
+            windows.as_opaque(),
+        )
+    }) else {
+        return Vec::new();
+    };
+    // SAFETY: the call returns an owned (+1) array of space id numbers.
+    let spaces: CFRetained<CFArray<CFNumber>> =
+        unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(spaces)) };
+    spaces
+        .iter()
+        .flat_map(|id| NonZeroU64::new(id.as_i64()? as u64))
+        .map(SpaceId)
+        .collect()
+}
+
 // Based on https://github.com/asmagill/hs._asm.undocumented.spaces/blob/master/CGSSpace.h.
 // Also see https://github.com/koekeishiya/yabai/blob/d55a647913ab72d8d8b348bee2d3e59e52ce4a5d/src/misc/extern.h.
 
@@ -362,6 +389,11 @@ unsafe extern "C" {
     fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: &CFString) -> u64;
     fn CGSSpaceGetType(cid: c_int, sid: u64) -> c_int;
     fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> Option<NonNull<CFString>>;
+    fn CGSCopySpacesForWindows(
+        cid: c_int,
+        mask: CGSSpaceMask,
+        windows: &CFArray,
+    ) -> Option<NonNull<CFArray>>;
 }
 
 bitflags! {
