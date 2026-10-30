@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.18](https://github.com/tmandry/glide/compare/v0.2.17...v0.2.18) (2026-10-30)
+
+
+### Bug Fixes
+
+* Detect Mission Control on macOS 27 ([133ca36](https://github.com/tmandry/glide/commit/133ca366b32b8ea96ce297845fb8454511dd7274))
+* Detect Mission Control on macOS 27 ([c61fbff](https://github.com/tmandry/glide/commit/c61fbffe2045016caf126488713d5c75b1e711b4))
+* Show startup alerts on every space, in front of other apps ([c6322fc](https://github.com/tmandry/glide/commit/c6322fc68df947d6c42c2b803b527771adbcc55c))
+* Show startup alerts on every space, in front of other apps ([cfb6d48](https://github.com/tmandry/glide/commit/cfb6d4809697a2473447b02233f91389dfafcddf))
+
 ## [0.2.17](https://github.com/tmandry/glide/compare/v0.2.16...v0.2.17) (2026-10-27)
 
 This release makes your workspace more resilient by saving layout changes as
