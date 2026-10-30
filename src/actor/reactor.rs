@@ -539,6 +539,7 @@ impl Reactor {
         self.log_event(&event);
         let mut animation_focus_wids: Vec<WindowId> = Vec::new();
         let mut is_resize = false;
+        let mut command_response = None;
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {
             Event::ApplicationLaunched {
@@ -921,8 +922,9 @@ impl Reactor {
                 let command_space = self
                     .main_window_space()
                     .or_else(|| self.active_screen().and_then(|screen| screen.space));
-                let response = self.layout.handle_command(command_space, &visible_spaces, cmd);
-                self.handle_layout_response(response);
+                let mut response = self.layout.handle_command(command_space, &visible_spaces, cmd);
+                self.pending_frame_overrides.extend(mem::take(&mut response.frame_overrides));
+                command_response = Some(response);
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
@@ -949,6 +951,9 @@ impl Reactor {
         }
         if !self.in_drag {
             self.update_layout(&animation_focus_wids, is_resize, now);
+        }
+        if let Some(response) = command_response {
+            self.handle_layout_response(response);
         }
     }
 
@@ -3191,5 +3196,74 @@ pub mod tests {
             !reactor.layout.has_active_scroll_animation(Instant::now()),
             "timer should be dormant when no scroll animation is active"
         );
+    }
+
+    #[test]
+    fn it_warps_the_mouse_to_the_focused_window_moved_by_a_command() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        reactor.raise_manager_tx = raise_manager_tx;
+        let screen_size = CGSize::new(1000., 1000.);
+        let left_screen = CGRect::new(CGPoint::new(0., 0.), screen_size);
+        let right_screen = CGRect::new(CGPoint::new(1000., 0.), screen_size);
+        let half_size = CGSize::new(screen_size.width / 2., screen_size.height);
+        let left_half = |screen: CGRect| CGRect::new(screen.origin, half_size);
+        let right_half =
+            |screen: CGRect| CGRect::new(CGPoint::new(screen.mid().x, screen.origin.y), half_size);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![left_screen, right_screen],
+            spaces: vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
+            scale_factors: vec![2.0, 2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+
+        //         left screen             right screen
+        //   +---------------------+----------+----------+
+        //   |          1          |    2     |    3     |
+        //   +---------------------+----------+----------+
+        let mut windows = make_windows(3);
+        windows[0].frame.origin = left_screen.origin;
+        windows[1].frame.origin = right_screen.origin;
+        windows[2].frame.origin = right_screen.origin;
+        let moved = WindowId::new(1, 2);
+        reactor.handle_events(apps.make_app_with_opts(1, windows, Some(moved), true));
+        reactor.handle_event(Event::ApplicationGloballyActivated(1));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        while raise_manager_rx.try_recv().is_ok() {}
+
+        let mut move_and_expect_warp = |direction, new_frame: CGRect| {
+            reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveNode(
+                direction,
+            ))));
+            apps.simulate_until_quiet(&mut reactor);
+            assert_eq!(apps.windows[&moved].frame, new_frame);
+            let msg = raise_manager_rx.try_recv().expect("Should have sent a raise request").1;
+            let raise::Event::RaiseRequest(request) = msg else {
+                panic!("Unexpected event: {msg:?}");
+            };
+            assert_eq!(request.focus_window, Some((moved, Some(new_frame.mid()))));
+            assert!(raise_manager_rx.try_recv().is_err());
+        };
+
+        //   +---------------------+----------+----------+
+        //   |          1          |    3     |    2     |
+        //   +---------------------+----------+----------+
+        move_and_expect_warp(Direction::Right, right_half(right_screen));
+
+        //   +---------------------+----------+----------+
+        //   |          1          |    2     |    3     |
+        //   +---------------------+----------+----------+
+        move_and_expect_warp(Direction::Left, left_half(right_screen));
+
+        //   +----------+----------+---------------------+
+        //   |    1     |    2     |          3          |
+        //   +----------+----------+---------------------+
+        move_and_expect_warp(Direction::Left, right_half(left_screen));
+
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(raise_manager_rx.try_recv().is_err());
     }
 }

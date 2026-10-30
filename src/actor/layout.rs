@@ -1005,7 +1005,10 @@ impl LayoutManager {
                         self.tree.move_node_after(self.tree.selection(new_layout), selection);
                     }
                 }
-                EventResponse::default()
+                EventResponse {
+                    focus_window: self.tree.window_at(selection),
+                    ..Default::default()
+                }
             }
             LayoutCommand::Split(orientation) => {
                 // Don't mark as written yet, since merely splitting doesn't
