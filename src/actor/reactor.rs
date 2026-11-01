@@ -605,9 +605,9 @@ impl Reactor {
                 }
             }
             Event::WindowDestroyed(wid) => {
-                self.layout.cancel_interactive_state();
-                self.in_drag = false;
-                self.resizing_window = None;
+                if self.resizing_window == Some(wid) {
+                    self.resizing_window = None;
+                }
                 if self.windows.remove(&wid).is_none() {
                     warn!("Got destroyed event for unknown window {wid:?}");
                 }
@@ -617,8 +617,8 @@ impl Reactor {
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if mouse_state == Some(MouseState::Up) {
-                    // The button is up, so any resize we were holding off on is
-                    // over, even if we never saw the MouseUp event.
+                    // The button is up, so any resize we were holding
+                    // off on is over, even if we never saw the MouseUp event.
                     self.resizing_window = None;
                 }
                 let window = self.windows.get_mut(&wid).unwrap();
@@ -2387,6 +2387,53 @@ pub mod tests {
             reactor.handle_event(event);
         }
         assert_eq!(screen2, apps.windows[&dragged].frame);
+    }
+
+    /// Chrome destroys the window it tore a tab off into when the tab is
+    /// dropped on another window, which happens while the button is still
+    /// down. That must not re-tile the windows mid-drag.
+    #[test]
+    fn it_keeps_suppressing_updates_when_a_dragged_window_is_destroyed() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(3)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+
+        // A drag of window 1 is in progress: the app reports a pure move with
+        // the button down.
+        let dragged = WindowId::new(1, 1);
+        let frame = apps.windows[&dragged].frame;
+        let moved = CGRect::new(CGPoint::new(frame.origin.x + 200., frame.origin.y), frame.size);
+        apps.windows.get_mut(&dragged).unwrap().frame = moved;
+        reactor.handle_event(Event::WindowFrameChanged(
+            dragged,
+            moved,
+            apps.windows[&dragged].last_seen_txid,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        let wids = written_wids(apps.requests());
+        assert!(wids.is_empty(), "drag should be suppressed: {wids:?}");
+
+        // Another window goes away while the button is still down.
+        reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 3)));
+        let wids = written_wids(apps.requests());
+        assert!(wids.is_empty(), "should still be suppressed mid-drag: {wids:?}");
+
+        // Releasing the mouse applies the layout.
+        reactor.handle_event(Event::MouseUp);
+        let wids = written_wids(apps.requests());
+        assert!(!wids.is_empty(), "release should re-tile the windows");
     }
 
     #[test]

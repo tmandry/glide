@@ -643,6 +643,7 @@ impl LayoutManager {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
+                self.cancel_interactive_state_for(wid);
                 self.tree.remove_window(wid);
                 self.floating_windows.remove(&wid);
                 self.floating_restore_frames.remove(&wid);
@@ -1626,6 +1627,19 @@ impl LayoutManager {
     pub fn cancel_interactive_state(&mut self) {
         self.interactive_resize = None;
         self.interactive_move = None;
+    }
+
+    fn cancel_interactive_state_for(&mut self, wid: WindowId) {
+        if self.interactive_move.as_ref().is_some_and(|state| state.window_id == wid) {
+            self.interactive_move = None;
+        }
+        if self
+            .interactive_resize
+            .as_ref()
+            .is_some_and(|state| self.tree.window_at(state.window_node) == Some(wid))
+        {
+            self.interactive_resize = None;
+        }
     }
 
     pub fn has_interactive_state(&self) -> bool {
