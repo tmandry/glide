@@ -1486,6 +1486,7 @@ impl LayoutManager {
     }
 
     pub fn update_interactive_resize(&mut self, mouse: CGPoint, screen: CGRect) -> bool {
+        self.drop_stale_interactive_state();
         let Some(state) = self.interactive_resize.as_mut() else {
             return false;
         };
@@ -1565,6 +1566,7 @@ impl LayoutManager {
         config: &Config,
         now: Instant,
     ) -> bool {
+        self.drop_stale_interactive_state();
         let Some(state) = self.interactive_move.as_mut() else {
             return false;
         };
@@ -1627,6 +1629,23 @@ impl LayoutManager {
     pub fn cancel_interactive_state(&mut self) {
         self.interactive_resize = None;
         self.interactive_move = None;
+    }
+
+    /// Drops interactive state that refers to a node the tree no longer has.
+    /// Removing a window can cull its column, so a resize of the window that
+    /// stays is left holding a node that was deleted.
+    fn drop_stale_interactive_state(&mut self) {
+        if let Some(state) = &self.interactive_resize
+            && !(self.tree.map().contains(state.column_node)
+                && self.tree.map().contains(state.window_node))
+        {
+            self.interactive_resize = None;
+        }
+        if let Some(state) = &self.interactive_move
+            && !self.tree.map().contains(state.window_node)
+        {
+            self.interactive_move = None;
+        }
     }
 
     fn cancel_interactive_state_for(&mut self, wid: WindowId) {
@@ -2777,6 +2796,49 @@ mod tests {
             .map(|(wid, _)| wid)
             .collect::<Vec<_>>();
         assert!(!tiled.contains(&nonstandard));
+    }
+
+    /// Removing a window culls its column once one window is left, so a
+    /// resize of the window that stays holds a node that no longer exists.
+    #[test]
+    fn interactive_resize_is_dropped_when_its_column_is_culled() {
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let mut config = Config::default();
+        config.settings.experimental.scroll.enable = true;
+        config.settings.experimental.scroll.new_window_in_column = NewWindowPlacement::SameColumn;
+        config.settings.default_layout_kind = LayoutKind::Scroll;
+        mgr.set_config(&Arc::new(config));
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let screen = rect(0, 0, 1000, 1000);
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 1)));
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 2)));
+
+        let layout = mgr.layout(space);
+        let kept = WindowId::new(pid, 1);
+        let closed = WindowId::new(pid, 2);
+        let node = mgr.tree.window_node(layout, kept).unwrap();
+        let column = node.parent(mgr.tree.map()).unwrap();
+        assert_eq!(
+            Some(column),
+            mgr.tree.window_node(layout, closed).unwrap().parent(mgr.tree.map()),
+            "both windows should share a column"
+        );
+        assert!(mgr.begin_interactive_resize(
+            column,
+            node,
+            ResizeEdge(ResizeEdge::RIGHT),
+            CGPoint::new(500., 500.),
+        ));
+
+        _ = mgr.handle_event(WindowRemoved(closed));
+        assert!(!mgr.tree.map().contains(column), "the column should be culled");
+
+        assert!(!mgr.update_interactive_resize(CGPoint::new(520., 500.), screen));
+        assert!(!mgr.has_interactive_state());
     }
 
     #[test]

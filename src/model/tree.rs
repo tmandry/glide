@@ -50,6 +50,13 @@ impl NodeMap {
         self.map.capacity()
     }
 
+    /// Whether `node` is still in the forest. Indexing with a node that was
+    /// removed panics, so anything holding a node id across tree mutations
+    /// has to check.
+    pub fn contains(&self, node: NodeId) -> bool {
+        self.map.contains_key(node)
+    }
+
     pub fn reserve(&mut self, additional: usize) {
         self.map.reserve(additional)
     }
