@@ -140,6 +140,11 @@ pub enum Event {
     // TODO: Consider replacing with WindowsOnScreenUpdated.
     WindowBecameVisible(WindowId),
     WindowDestroyed(WindowId),
+    /// Window was moved or resized.
+    ///
+    /// We check if the mouse is held down to detect an entered drag. We can't
+    /// wait for the mouse actor to tell us because that event could come in
+    /// late.
     WindowFrameChanged(
         WindowId,
         #[serde(with = "CGRectDef")] CGRect,
