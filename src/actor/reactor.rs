@@ -137,6 +137,10 @@ pub enum Event {
         on_screen: WindowsOnScreen,
     },
 
+    /// Updates window metadata without changing visibility or triggering layout.
+    /// Entries omitted from the update are preserved.
+    WindowServerInfoUpdated(Vec<WindowServerInfo>),
+
     // TODO: Consider replacing with WindowsOnScreenUpdated.
     WindowBecameVisible(WindowId),
     WindowDestroyed(WindowId),
@@ -594,6 +598,10 @@ impl Reactor {
                 Some(_) => self.update_partial_window_server_info(on_screen),
                 None => self.update_complete_window_server_info(on_screen),
             },
+            Event::WindowServerInfoUpdated(info) => {
+                self.window_server_info.extend(info.into_iter().map(|info| (info.id, info)));
+                return;
+            }
             Event::WindowBecameVisible(wid) => {
                 if self.window_is_tracked(wid)
                     && let Some(space) = self.layout_space_for_window(wid)

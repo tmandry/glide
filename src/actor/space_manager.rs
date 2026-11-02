@@ -169,6 +169,8 @@ impl SpaceManager {
                 if !self.expose_active {
                     self.reactor_tx
                         .send(reactor::Event::SpaceChanged(self.active_spaces(), on_screen));
+                } else {
+                    self.reactor_tx.send(reactor::Event::WindowServerInfoUpdated(on_screen.info));
                 }
                 self.status_tx.send(status::Event::SpaceChanged(spaces));
                 self.send_space_enabled_status();
@@ -766,10 +768,12 @@ mod tests {
 
         h.on_event(Event::ExposeActive(true));
 
-        // SpaceChanged should NOT reach reactor.
         h.send_space_changed(vec![Some(space(10))]);
         let events = drain(&mut h.reactor_rx);
-        assert!(space_changed_spaces(&events).is_none());
+        assert!(matches!(
+            events.as_slice(),
+            [reactor::Event::WindowServerInfoUpdated(entries)] if entries.is_empty()
+        ));
 
         // Exiting expose sends RequestSpaceRefresh to ws_tx.
         h.on_event(Event::ExposeActive(false));
