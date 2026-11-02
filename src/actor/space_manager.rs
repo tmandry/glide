@@ -207,6 +207,7 @@ impl SpaceManager {
             }
             Event::ExposeActive(active) => {
                 self.expose_active = active;
+                self.group_indicators_tx.send(group_bars::Event::SetHidden(active));
                 if !active {
                     // Expose exited: request a space refresh so the reactor
                     // gets up-to-date visible windows.
