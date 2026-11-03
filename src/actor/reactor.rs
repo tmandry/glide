@@ -137,9 +137,15 @@ pub enum Event {
         on_screen: WindowsOnScreen,
     },
 
-    /// Updates window metadata without changing visibility or triggering layout.
-    /// Entries omitted from the update are preserved.
+    /// Updated window server info for some windows, sent instead of
+    /// SpaceChanged while space changes are held back during expose.
+    ///
+    /// Only the given entries are replaced; the visible windows are left
+    /// unchanged.
     WindowServerInfoUpdated(Vec<WindowServerInfo>),
+
+    /// Expose (Mission Control) was entered or exited.
+    ExposeActive(bool),
 
     // TODO: Consider replacing with WindowsOnScreenUpdated.
     WindowBecameVisible(WindowId),
@@ -248,6 +254,7 @@ pub struct Reactor {
     active_screen_idx: Option<u16>,
     main_window_tracker: MainWindowTracker,
     in_drag: bool,
+    expose_active: bool,
     /// The window the user is currently resizing with the mouse, if any.
     ///
     /// We don't write frames to this window until the resize ends, since a
@@ -438,6 +445,7 @@ impl Reactor {
             active_screen_idx: None,
             main_window_tracker: MainWindowTracker::default(),
             in_drag: false,
+            expose_active: false,
             resizing_window: None,
             frame_attempts: HashMap::default(),
             record,
@@ -600,8 +608,8 @@ impl Reactor {
             },
             Event::WindowServerInfoUpdated(info) => {
                 self.window_server_info.extend(info.into_iter().map(|info| (info.id, info)));
-                return;
             }
+            Event::ExposeActive(active) => self.expose_active = active,
             Event::WindowBecameVisible(wid) => {
                 if self.window_is_tracked(wid)
                     && let Some(space) = self.layout_space_for_window(wid)
@@ -954,7 +962,7 @@ impl Reactor {
             self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
             self.update_active_screen();
         }
-        if !self.in_drag {
+        if !self.in_drag && !self.expose_active {
             self.update_layout(&animation_focus_wids, is_resize, now);
         }
     }
@@ -2423,6 +2431,36 @@ pub mod tests {
             reactor.handle_event(event);
         }
         assert_eq!(screen2, apps.windows[&dragged].frame);
+    }
+
+    #[test]
+    fn it_holds_off_layout_during_expose() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let wid = WindowId::new(1, 1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![full_screen],
+            spaces: vec![Some(SpaceId::new(1))],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(2)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_ne!(full_screen, apps.windows[&wid].frame);
+
+        reactor.handle_event(Event::ExposeActive(true));
+        reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
+        assert!(
+            apps.requests().is_empty(),
+            "reactor shouldn't move windows during expose"
+        );
+
+        reactor.handle_event(Event::ExposeActive(false));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(full_screen, apps.windows[&wid].frame);
     }
 
     #[test]

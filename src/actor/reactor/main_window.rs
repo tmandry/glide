@@ -100,7 +100,8 @@ impl MainWindowTracker {
             | Event::SaveAndExit(_)
             | Event::SpaceStateChanged(_)
             | Event::WindowsOnScreenUpdated { .. }
-            | Event::WindowServerInfoUpdated(_) => return None,
+            | Event::WindowServerInfoUpdated(_)
+            | Event::ExposeActive(_) => return None,
         };
         if Some(event_pid) == self.global_frontmost && quiet_edge == Quiet::No {
             if let Some(wid) = self.main_window() {

@@ -209,6 +209,7 @@ impl SpaceManager {
             }
             Event::ExposeActive(active) => {
                 self.expose_active = active;
+                self.reactor_tx.send(reactor::Event::ExposeActive(active));
                 if !active {
                     // Expose exited: request a space refresh so the reactor
                     // gets up-to-date visible windows.
@@ -767,6 +768,8 @@ mod tests {
         h.drain_all();
 
         h.on_event(Event::ExposeActive(true));
+        let events = drain(&mut h.reactor_rx);
+        assert!(matches!(events.as_slice(), [reactor::Event::ExposeActive(true)]));
 
         h.send_space_changed(vec![Some(space(10))]);
         let events = drain(&mut h.reactor_rx);
@@ -777,6 +780,11 @@ mod tests {
 
         // Exiting expose sends RequestSpaceRefresh to ws_tx.
         h.on_event(Event::ExposeActive(false));
+        let events = drain(&mut h.reactor_rx);
+        assert!(matches!(
+            events.as_slice(),
+            [reactor::Event::ExposeActive(false)]
+        ));
         let ws_events = drain_ws(&mut h.ws_rx);
         assert!(ws_events.iter().any(|e| matches!(e, window_server::Event::RequestSpaceRefresh)));
     }
