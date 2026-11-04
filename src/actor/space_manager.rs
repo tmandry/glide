@@ -12,6 +12,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, instrument, warn};
 
+use crate::actor::reactor::ExposeActive;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{group_bars, mouse, reactor, status, window_server, wm_controller};
 use crate::collections::HashSet;
@@ -166,10 +167,11 @@ impl SpaceManager {
             }
             Event::SpaceChanged(spaces, on_screen) => {
                 self.handle_space_changed(&spaces);
-                if !self.expose_active {
-                    self.reactor_tx
-                        .send(reactor::Event::SpaceChanged(self.active_spaces(), on_screen));
-                }
+                self.reactor_tx.send(reactor::Event::SpaceChanged(
+                    self.active_spaces(),
+                    on_screen,
+                    ExposeActive(self.expose_active),
+                ));
                 self.status_tx.send(status::Event::SpaceChanged(spaces));
                 self.send_space_enabled_status();
             }
@@ -207,9 +209,20 @@ impl SpaceManager {
             }
             Event::ExposeActive(active) => {
                 self.expose_active = active;
-                if !active {
-                    // Expose exited: request a space refresh so the reactor
-                    // gets up-to-date visible windows.
+                if active {
+                    self.reactor_tx.send(reactor::Event::SpaceChanged(
+                        self.active_spaces(),
+                        // The reactor knows not to trust WindowsOnScreen when
+                        // expose is active.
+                        WindowsOnScreen::default(),
+                        ExposeActive(true),
+                    ));
+                } else {
+                    // Expose exited. Request a space refresh so the reactor
+                    // gets up-to-date visible windows. The reactor also skips
+                    // updating most of its state during space changes while
+                    // expose is active, so this will make sure those updates
+                    // happen.
                     self.request_space_refresh();
                 }
             }
@@ -493,7 +506,7 @@ mod tests {
     /// Extract the spaces from a reactor SpaceChanged event.
     fn space_changed_spaces(events: &[reactor::Event]) -> Option<&Vec<Option<SpaceId>>> {
         events.iter().find_map(|e| match e {
-            reactor::Event::SpaceChanged(spaces, _) => Some(spaces),
+            reactor::Event::SpaceChanged(spaces, _, _) => Some(spaces),
             _ => None,
         })
     }
@@ -758,23 +771,50 @@ mod tests {
     }
 
     #[test]
-    fn expose_suppresses_space_changed() {
+    fn expose_marks_space_changed() {
         let mut h = TestHarness::new();
         h.setup_space(screen(1), space(10));
         h.on_event(Event::ToggleSpace(screen(1)));
         h.drain_all();
 
         h.on_event(Event::ExposeActive(true));
+        let events = drain(&mut h.reactor_rx);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [reactor::Event::SpaceChanged(spaces, _, ExposeActive(true))]
+                    if *spaces == vec![Some(space(10))]
+            ),
+            "{events:?}"
+        );
 
-        // SpaceChanged should NOT reach reactor.
         h.send_space_changed(vec![Some(space(10))]);
         let events = drain(&mut h.reactor_rx);
-        assert!(space_changed_spaces(&events).is_none());
+        assert!(
+            matches!(
+                events.as_slice(),
+                [reactor::Event::SpaceChanged(_, _, ExposeActive(true))]
+            ),
+            "{events:?}"
+        );
 
-        // Exiting expose sends RequestSpaceRefresh to ws_tx.
+        // Exiting expose sends nothing to the reactor until the space refresh
+        // comes back.
         h.on_event(Event::ExposeActive(false));
+        let events = drain(&mut h.reactor_rx);
+        assert!(events.is_empty(), "{events:?}");
         let ws_events = drain_ws(&mut h.ws_rx);
         assert!(ws_events.iter().any(|e| matches!(e, window_server::Event::RequestSpaceRefresh)));
+
+        h.send_space_changed(vec![Some(space(10))]);
+        let events = drain(&mut h.reactor_rx);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [reactor::Event::SpaceChanged(_, _, ExposeActive(false))]
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]

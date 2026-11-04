@@ -145,7 +145,7 @@ mod tests {
     use test_log::test;
 
     use super::super::testing::{Apps, make_windows};
-    use super::super::{Event, LayoutManager, Quiet, Reactor, SpaceId, WindowId};
+    use super::super::{Event, ExposeActive, LayoutManager, Quiet, Reactor, SpaceId, WindowId};
     use crate::sys::screen::CoordinateConverter;
     use crate::sys::window_server::WindowsOnScreen;
 
@@ -350,7 +350,11 @@ mod tests {
             false,
         ));
 
-        reactor.handle_event(SpaceChanged(vec![None], WindowsOnScreen::new(vec![])));
+        reactor.handle_event(SpaceChanged(
+            vec![None],
+            WindowsOnScreen::new(vec![]),
+            ExposeActive(false),
+        ));
         reactor.handle_event(ApplicationActivated(3, Quiet::No));
         reactor.handle_event(ApplicationGloballyActivated(3));
         reactor.handle_event(WindowsDiscovered {
@@ -360,7 +364,11 @@ mod tests {
         });
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
 
-        reactor.handle_event(SpaceChanged(vec![Some(space)], WindowsOnScreen::new(vec![])));
+        reactor.handle_event(SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::new(vec![]),
+            ExposeActive(false),
+        ));
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(3, 1)));
     }
 }

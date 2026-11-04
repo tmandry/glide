@@ -963,8 +963,6 @@ impl State {
         // Often we get this event for new windows before the WindowCreated
         // notification. If that happens, register it and send the corresponding
         // event here.
-        // FIXME: This can happen ahead of a space change and result in us adding
-        // a window to the wrong space.
         let wid = match self.id(&elem).ok() {
             Some(wid) => wid,
             None => {

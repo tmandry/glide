@@ -91,7 +91,11 @@ pub enum Event {
     /// of SpaceId to window list, and Reactor would maintain a list per
     /// space. Then we can update the windows on screen for the space before
     /// sending SpaceChanged.
-    SpaceChanged(Vec<Option<SpaceId>>, WindowsOnScreen),
+    SpaceChanged(
+        Vec<Option<SpaceId>>,
+        WindowsOnScreen,
+        #[serde(default)] ExposeActive,
+    ),
 
     /// All running apps at launch have been registered.
     StartupComplete,
@@ -126,7 +130,14 @@ pub enum Event {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     },
-    WindowCreated(WindowId, WindowInfo, MouseState),
+    /// A window was created. The window server info is included when the
+    /// window server knows the window, even if it is not on screen yet.
+    WindowCreated(
+        WindowId,
+        WindowInfo,
+        MouseState,
+        #[serde(default)] Option<WindowServerInfo>,
+    ),
 
     /// Updated list of windows visible on screen from the window server.
     ///
@@ -219,6 +230,9 @@ pub enum Event {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ExposeActive(pub bool);
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum Command {
@@ -249,6 +263,7 @@ pub struct Reactor {
     active_screen_idx: Option<u16>,
     main_window_tracker: MainWindowTracker,
     in_drag: bool,
+    expose_active: bool,
     /// The window the user is currently resizing with the mouse, if any.
     ///
     /// We don't write frames to this window until the resize ends, since a
@@ -439,6 +454,7 @@ impl Reactor {
             active_screen_idx: None,
             main_window_tracker: MainWindowTracker::default(),
             in_drag: false,
+            expose_active: false,
             resizing_window: None,
             frame_attempts: HashMap::default(),
             record,
@@ -581,12 +597,15 @@ impl Reactor {
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 self.on_windows_discovered(pid, new, known_visible);
             }
-            Event::WindowCreated(wid, window, mouse_state) => {
+            Event::WindowCreated(wid, window, mouse_state, server_info) => {
                 // TODO: It's possible for a window to be on multiple spaces
                 // or move spaces. (Add a test)
                 // FIXME: We assume all windows are on the main screen.
                 if let Some(wsid) = window.sys_id {
                     self.window_ids.insert(wsid, wid);
+                }
+                if let Some(info) = server_info {
+                    self.window_server_info.insert(info.id, info);
                 }
                 self.windows.insert(wid, window.clone().into());
                 if mouse_state == MouseState::Down {
@@ -601,8 +620,7 @@ impl Reactor {
             },
             Event::WindowBecameVisible(wid) => {
                 if self.window_is_tracked(wid)
-                    && let Some(window) = self.windows.get(&wid)
-                    && let Some(space) = self.best_space_for_window(&window.frame_monotonic)
+                    && let Some(space) = self.layout_space_for_window(wid)
                     && let Some(info) = self.layout_window_info(wid)
                 {
                     animation_focus_wids.push(wid);
@@ -650,14 +668,24 @@ impl Reactor {
                 if let Some(old) = old_screen
                     && let Some(new) = new_screen
                     && old != new
-                    && let Some(info) = self.layout_window_info(wid)
                 {
-                    self.send_layout_event(LayoutEvent::WindowSpaceChanged {
-                        wid,
-                        added: self.screens[new].space,
-                        removed: self.screens[old].space,
-                        info,
-                    });
+                    // The window server moves the window to the space on its
+                    // new screen. Forget the cached spaces until it reports
+                    // them again.
+                    if let Some(info) = self.windows[&wid]
+                        .window_server_id
+                        .and_then(|wsid| self.window_server_info.get_mut(&wsid))
+                    {
+                        info.spaces.clear();
+                    }
+                    if let Some(info) = self.layout_window_info(wid) {
+                        self.send_layout_event(LayoutEvent::WindowSpaceChanged {
+                            wid,
+                            added: self.screens[new].space,
+                            removed: self.screens[old].space,
+                            info,
+                        });
+                    }
                 }
                 if old_frame.size != new_frame.size {
                     let screens = self
@@ -727,9 +755,27 @@ impl Reactor {
                 self.group_indicators_tx
                     .send(group_bars::Event::ScreenParametersChanged(spaces, converter));
             }
-            Event::SpaceChanged(spaces, on_screen) => {
-                let visible_window_order = on_screen.visible.clone();
-                self.update_complete_window_server_info(on_screen);
+            Event::SpaceChanged(spaces, on_screen, expose_active) => {
+                if expose_active.0 && !self.expose_active {
+                    self.finish_animation();
+                }
+                self.expose_active = expose_active.0;
+                info!(?self.expose_active, "space changed");
+                if self.expose_active {
+                    // In Expose, the visible list is useless; it can contain
+                    // all windows. The updated WindowServerInfo is still useful
+                    // though, especially for noticing when windows were moved
+                    // between spaces.
+                    //
+                    // For now, we just update the info and return. SpaceManager
+                    // sends another SpaceChanged event after exiting Expose so
+                    // we can update the remaining state below.
+                    let potentially_all_or_no_windows = on_screen;
+                    self.window_server_info.extend(
+                        potentially_all_or_no_windows.info.into_iter().map(|info| (info.id, info)),
+                    );
+                    return;
+                }
                 if spaces.len() != self.screens.len() {
                     warn!(
                         "Ignoring space change event: we have {} spaces, but {} screens",
@@ -738,13 +784,13 @@ impl Reactor {
                     );
                     return;
                 }
-                self.layout.cancel_interactive_state();
-                self.in_drag = false;
-                self.resizing_window = None;
-                info!("space changed");
                 for (space, screen) in spaces.iter().zip(&mut self.screens) {
                     screen.space = *space;
                 }
+                let visible_window_order = on_screen.visible.clone();
+                self.update_complete_window_server_info(on_screen);
+                self.layout.cancel_interactive_state();
+                self.resizing_window = None;
                 let response = self
                     .screens
                     .iter()
@@ -1087,8 +1133,7 @@ impl Reactor {
             .filter(|wid| wid.pid == pid)
             .filter(|wid| self.window_is_tracked(*wid))
         {
-            let Some(window) = self.windows.get(&wid) else { continue };
-            let Some(space) = self.best_space_for_window(&window.frame_monotonic) else {
+            let Some(space) = self.layout_space_for_window(wid) else {
                 continue;
             };
             let Some(layout_info) = self.layout_window_info(wid) else {
@@ -1132,6 +1177,31 @@ impl Reactor {
 
     fn best_space_for_window(&self, frame: &CGRect) -> Option<SpaceId> {
         self.screens[self.best_screen_idx_for_window(frame)?].space
+    }
+
+    /// The currently visible space to a window belongs to, if any.
+    ///
+    /// This is `best_space_for_window`, but filtered through the window
+    /// server's space list for this window if we have it. These can get out
+    /// of sync during a space change, especially during expose when
+    /// SpaceManager filters out SpaceChanged events.
+    ///
+    /// Note that for windows without a WindowServerId this filter will not
+    /// be available, and we return whatever space is currently on that
+    /// window's screen. This function should therefore only be called for
+    /// windows we think are on a currently visible space, or that we know
+    /// have a WindowServerId.
+    fn layout_space_for_window(&self, wid: WindowId) -> Option<SpaceId> {
+        let window = self.windows.get(&wid)?;
+        let space = self.best_space_for_window(&window.frame_monotonic)?;
+        let spaces = window
+            .window_server_id
+            .and_then(|wsid| self.window_server_info.get(&wsid))
+            .map(|info| &info.spaces);
+        match spaces {
+            Some(spaces) if !spaces.is_empty() && !spaces.contains(&space) => None,
+            _ => Some(space),
+        }
     }
 
     /// Gathers the window properties the layout uses to classify a window.
@@ -1299,8 +1369,21 @@ impl Reactor {
         self.best_space_for_window(&self.windows.get(&self.main_window()?)?.frame_monotonic)
     }
 
+    /// Move windows in the active animation, if any, to their final frames.
+    fn finish_animation(&self) {
+        if let Some(tx) = &self.animation_tx
+            && tx.send(AnimationMessage::FinishActive).is_err()
+        {
+            error!("Animation manager exited unexpectedly");
+        }
+    }
+
     #[instrument(skip(self), fields())]
     pub fn update_layout(&mut self, new_wids: &[WindowId], skip_anim: bool, now: Instant) {
+        if self.expose_active {
+            // Don't update window layout during expose.
+            return;
+        }
         let main_window = self.main_window();
         trace!(?main_window);
         let mut anim = Animation::new();
@@ -1395,6 +1478,7 @@ impl Reactor {
                 match err.0 {
                     AnimationMessage::Replace(animation) => animation.skip_to_end(),
                     AnimationMessage::SkipToEnd(animation) => animation.skip_to_end(),
+                    AnimationMessage::FinishActive => {}
                 }
             }
         } else {
@@ -1802,6 +1886,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: CGRect::ZERO,
+                spaces: vec![],
             })
             .collect::<Vec<_>>();
         reactor.handle_event(Event::ScreenParametersChanged {
@@ -1829,6 +1914,7 @@ pub mod tests {
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(SpaceId::new(1))],
             WindowsOnScreen::new(ws_info),
+            ExposeActive(false),
         ));
         reactor.handle_events(apps.simulate_events());
         assert_eq!(
@@ -1890,6 +1976,7 @@ pub mod tests {
             pid: 2,
             layer: 0,
             frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.)),
+            spaces: vec![],
         }];
         reactor.handle_event(Event::ScreenParametersChanged {
             frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.))],
@@ -1931,6 +2018,7 @@ pub mod tests {
                 pid: wid.pid,
                 layer: 0,
                 frame: reactor.windows[wid].frame_monotonic,
+                spaces: vec![],
             })
             .collect();
         reactor.handle_event(Event::ScreenParametersChanged {
@@ -1968,12 +2056,14 @@ pub mod tests {
             pid: 2,
             layer: 0,
             frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.)),
+            spaces: vec![],
         }];
         on_screen.extend(reactor.windows.iter().map(|(wid, window)| WindowServerInfo {
             id: window.window_server_id.unwrap(),
             pid: wid.pid,
             layer: 0,
             frame: window.frame_monotonic,
+            spaces: vec![],
         }));
         reactor.handle_event(Event::ScreenParametersChanged {
             frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.))],
@@ -2014,11 +2104,13 @@ pub mod tests {
                 pid: wid.pid,
                 layer: 0,
                 frame: reactor.windows[wid].frame_monotonic,
+                spaces: vec![],
             })
             .collect();
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
@@ -2054,11 +2146,13 @@ pub mod tests {
                 pid: wid.pid,
                 layer: 0,
                 frame: reactor.windows[wid].frame_monotonic,
+                spaces: vec![],
             })
             .collect();
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
@@ -2091,16 +2185,19 @@ pub mod tests {
             pid: 9,
             layer: 0,
             frame: CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.)),
+            spaces: vec![],
         }];
         on_screen.extend(desired.iter().map(|wid| WindowServerInfo {
             id: reactor.windows[wid].window_server_id.unwrap(),
             pid: wid.pid,
             layer: 0,
             frame: reactor.windows[wid].frame_monotonic,
+            spaces: vec![],
         }));
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
@@ -2162,6 +2259,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: reactor.windows[&w1].frame_monotonic,
+                spaces: vec![],
             },
         );
         reactor.window_server_info.insert(
@@ -2171,6 +2269,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: reactor.windows[&w2].frame_monotonic,
+                spaces: vec![],
             },
         );
 
@@ -2234,12 +2333,14 @@ pub mod tests {
                 pid: 9,
                 layer: 3,
                 frame: CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.)),
+                spaces: vec![],
             },
             WindowServerInfo {
                 id: WindowServerId::new(91),
                 pid: 9,
                 layer: 0,
                 frame: CGRect::new(CGPoint::new(2000., 10.), CGSize::new(100., 100.)),
+                spaces: vec![],
             },
         ];
         on_screen.extend(desired.iter().map(|wid| WindowServerInfo {
@@ -2247,10 +2348,12 @@ pub mod tests {
             pid: wid.pid,
             layer: 0,
             frame: reactor.windows[wid].frame_monotonic,
+            spaces: vec![],
         }));
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
@@ -2281,6 +2384,7 @@ pub mod tests {
             WindowId::new(1, 2),
             make_window(2),
             MouseState::Up,
+            None,
         ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
     }
@@ -2441,6 +2545,336 @@ pub mod tests {
         reactor.handle_event(Event::MouseUp);
         let wids = written_wids(apps.requests());
         assert!(!wids.is_empty(), "release should re-tile the windows");
+    }
+
+    fn ws_info(pid: pid_t, wsid: u32, frame: CGRect, spaces: Vec<SpaceId>) -> WindowServerInfo {
+        WindowServerInfo {
+            id: WindowServerId::new(wsid),
+            pid,
+            layer: 0,
+            frame,
+            spaces,
+        }
+    }
+
+    fn layout_windows(reactor: &Reactor, space: SpaceId, screen: CGRect) -> Vec<WindowId> {
+        reactor
+            .layout
+            .calculate_layout(space, screen, &reactor.config, Instant::now())
+            .into_iter()
+            .map(|(wid, _)| wid)
+            .collect()
+    }
+
+    #[test]
+    fn it_lays_out_new_window_only_in_its_window_server_space() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space1)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(1)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+
+        // The window server has the new window in space2, but space1 is shown.
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        apps.windows.insert(
+            wid2,
+            testing::WindowState {
+                frame: make_window(2).frame,
+                ..Default::default()
+            },
+        );
+        reactor.handle_event(Event::WindowCreated(wid2, make_window(2), MouseState::Up, None));
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: Some(1),
+            on_screen: WindowsOnScreen::new(vec![
+                ws_info(1, 1, apps.windows[&wid1].frame, vec![space1]),
+                ws_info(1, 2, make_window(2).frame, vec![space2]),
+            ]),
+        });
+        reactor.handle_event(Event::WindowBecameVisible(wid2));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, screen), vec![wid1]);
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space2)],
+            WindowsOnScreen::new(vec![ws_info(1, 2, make_window(2).frame, vec![space2])]),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space2, screen), vec![wid2]);
+        assert_eq!(screen, apps.windows[&wid2].frame);
+    }
+
+    #[test]
+    fn it_uses_window_server_info_from_window_creation() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space1)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(1)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+
+        // The new window isn't on screen yet, so only the info sent with its
+        // creation says it's in space2.
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        reactor.handle_event(Event::WindowCreated(
+            wid2,
+            make_window(2),
+            MouseState::Up,
+            Some(ws_info(1, 2, make_window(2).frame, vec![space2])),
+        ));
+        reactor.handle_event(Event::WindowBecameVisible(wid2));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, screen), vec![wid1]);
+    }
+
+    #[test]
+    fn it_lays_out_discovered_window_only_in_its_window_server_space() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space1)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+
+        // The window server has window 2 in space2, but space1 is shown.
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        let windows = make_windows(2);
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: Some(1),
+            on_screen: WindowsOnScreen::new(vec![
+                ws_info(1, 1, windows[0].frame, vec![space1]),
+                ws_info(1, 2, windows[1].frame, vec![space2]),
+            ]),
+        });
+        reactor.handle_events(apps.make_app_without_ws_info(1, windows, Some(wid1), false));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, screen), vec![wid1]);
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space2)],
+            WindowsOnScreen::new(vec![ws_info(1, 2, apps.windows[&wid2].frame, vec![space2])]),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space2, screen), vec![wid2]);
+        assert_eq!(screen, apps.windows[&wid2].frame);
+    }
+
+    #[test]
+    fn it_deserializes_space_changed_without_expose_flag() {
+        let event: Event =
+            ron::de::from_str("SpaceChanged([Some((1))],(visible:[],info:[]))").unwrap();
+        assert!(matches!(event, Event::SpaceChanged(_, _, ExposeActive(false))));
+    }
+
+    #[test]
+    fn it_holds_off_layout_during_expose() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let wid = WindowId::new(1, 1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![full_screen],
+            spaces: vec![Some(SpaceId::new(1))],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(2)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_ne!(full_screen, apps.windows[&wid].frame);
+
+        let space = SpaceId::new(1);
+        let on_screen = |reactor: &Reactor| {
+            WindowsOnScreen::new(
+                reactor
+                    .windows
+                    .iter()
+                    .filter_map(|(wid, window)| {
+                        Some(WindowServerInfo {
+                            id: window.window_server_id?,
+                            pid: wid.pid,
+                            layer: 0,
+                            frame: window.frame_monotonic,
+                            spaces: vec![space],
+                        })
+                    })
+                    .collect(),
+            )
+        };
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+        reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
+        assert!(
+            apps.requests().is_empty(),
+            "reactor shouldn't move windows during expose"
+        );
+
+        // A space change during expose doesn't resume layout.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            on_screen(&reactor),
+            ExposeActive(true),
+        ));
+        assert!(
+            apps.requests().is_empty(),
+            "reactor shouldn't move windows during expose"
+        );
+
+        // Layout resumes with the space change that follows expose exit.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            on_screen(&reactor),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(full_screen, apps.windows[&wid].frame);
+    }
+
+    #[test]
+    fn it_finishes_animation_when_expose_opens() {
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let (animation_tx, mut animation_rx) = mpsc::unbounded_channel();
+        reactor.animation_tx = Some(animation_tx);
+        let space = SpaceId::new(1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        while animation_rx.try_recv().is_ok() {}
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+        assert!(matches!(
+            animation_rx.try_recv(),
+            Ok(AnimationMessage::FinishActive)
+        ));
+
+        // Only the space change that opens expose finishes the animation.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+        assert!(animation_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn it_does_not_raise_windows_on_space_change_during_expose() {
+        let mut apps = Apps::new();
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.raise_manager_tx = raise_manager_tx;
+        let space = SpaceId::new(1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app_with_opts(1, make_windows(2), None, false));
+        let _events = apps.simulate_events();
+        while raise_manager_rx.try_recv().is_ok() {}
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+
+        assert!(raise_manager_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn it_keeps_window_dragged_between_spaces_on_discovery() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen1, screen2],
+            spaces: vec![Some(space1), Some(space2)],
+            scale_factors: vec![2.0, 2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        let dragged = WindowId::new(1, 1);
+        let windows = make_windows(2);
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: Some(1),
+            on_screen: WindowsOnScreen::new(vec![
+                ws_info(1, 1, windows[0].frame, vec![space1]),
+                ws_info(1, 2, windows[1].frame, vec![space1]),
+            ]),
+        });
+        reactor.handle_events(apps.make_app_without_ws_info(1, windows, Some(dragged), false));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(layout_windows(&reactor, space1, screen1).contains(&dragged));
+
+        // Drag window 1 onto screen2. The window server info cached for it
+        // still says space1.
+        let frame = apps.windows[&dragged].frame;
+        let new_frame = CGRect::new(CGPoint::new(1100., frame.origin.y), frame.size);
+        reactor.handle_event(Event::WindowFrameChanged(
+            dragged,
+            new_frame,
+            apps.windows[&dragged].last_seen_txid,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        assert_eq!(layout_windows(&reactor, space2, screen2), vec![dragged]);
+
+        reactor.handle_event(Event::WindowsDiscovered {
+            pid: 1,
+            new: vec![],
+            known_visible: vec![dragged, WindowId::new(1, 2)],
+        });
+        assert_eq!(layout_windows(&reactor, space2, screen2), vec![dragged]);
     }
 
     #[test]
@@ -2760,6 +3194,7 @@ pub mod tests {
                 pid: 1,
                 layer: 10,
                 frame: CGRect::ZERO,
+                spaces: vec![],
             }]),
         });
 
@@ -2775,6 +3210,7 @@ pub mod tests {
             WindowId::new(1, 2),
             make_window(2),
             MouseState::Up,
+            None,
         ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
     }
@@ -2927,6 +3363,7 @@ pub mod tests {
                         id: WindowServerId::new(n),
                         layer: 0,
                         frame: CGRect::ZERO,
+                        spaces: vec![],
                     })
                     .collect(),
             ),
@@ -3003,6 +3440,7 @@ pub mod tests {
                 pid: 1,
                 layer: 0,
                 frame: CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 500.)),
+                spaces: vec![],
             }]),
         });
 

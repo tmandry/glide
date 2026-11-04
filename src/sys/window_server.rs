@@ -26,7 +26,7 @@ use static_assertions::assert_not_impl_any;
 use tracing::warn;
 
 use super::geometry::CGRectDef;
-use super::screen::CoordinateConverter;
+use super::screen::{self, CoordinateConverter, SpaceId};
 use crate::sys::app::ProcessSerialNumber;
 
 /// The window ID used by the window server.
@@ -121,6 +121,8 @@ pub struct WindowServerInfo {
     pub layer: i32,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
+    #[serde(default)]
+    pub spaces: Vec<SpaceId>,
 }
 
 /// A snapshot of windows currently visible on screen from the window server.
@@ -194,11 +196,13 @@ fn make_info(
     if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&frame_dict), &mut frame) } {
         return None;
     }
+    let id = WindowServerId(id.try_into().ok()?);
     Some(WindowServerInfo {
-        id: WindowServerId(id.try_into().ok()?),
+        id,
         pid: pid.try_into().ok()?,
         layer,
         frame,
+        spaces: screen::window_spaces(id),
     })
 }
 

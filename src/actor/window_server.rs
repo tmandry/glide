@@ -147,7 +147,13 @@ impl WindowServer {
             }
             Event::WindowCreated(wid, info, mouse_state) => {
                 let pid = wid.pid;
-                self.send_reactor_event(reactor::Event::WindowCreated(wid, info, mouse_state));
+                let server_info = info.sys_id.and_then(|wsid| self.get_window(wsid));
+                self.send_reactor_event(reactor::Event::WindowCreated(
+                    wid,
+                    info,
+                    mouse_state,
+                    server_info,
+                ));
                 self.send_windows_on_screen_if_changed(Some(pid));
                 self.send_reactor_event(reactor::Event::WindowBecameVisible(wid));
             }
@@ -290,6 +296,16 @@ impl WindowServer {
         MOCK_VISIBLE_WINDOWS.with(|w| w.borrow().clone())
     }
 
+    #[cfg(not(test))]
+    fn get_window(&self, wsid: WindowServerId) -> Option<sys_ws::WindowServerInfo> {
+        sys_ws::get_window(wsid)
+    }
+
+    #[cfg(test)]
+    fn get_window(&self, wsid: WindowServerId) -> Option<sys_ws::WindowServerInfo> {
+        MOCK_WINDOWS.with(|w| w.borrow().iter().find(|w| w.id == wsid).cloned())
+    }
+
     fn send_reactor_event(&self, event: reactor::Event) {
         self.sm_tx.send(space_manager::Event::ReactorEvent(event));
     }
@@ -400,6 +416,8 @@ impl SkylightWatcherState {
 #[cfg(test)]
 thread_local! {
     static MOCK_VISIBLE_WINDOWS: RefCell<Vec<sys_ws::WindowServerInfo>> = RefCell::new(vec![]);
+    /// Windows returned by lookups by id, whether or not they are visible.
+    static MOCK_WINDOWS: RefCell<Vec<sys_ws::WindowServerInfo>> = RefCell::new(vec![]);
 }
 
 #[cfg(test)]
@@ -421,11 +439,16 @@ mod tests {
             pid: 1,
             layer,
             frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0)),
+            spaces: vec![],
         }
     }
 
     fn set_mock_windows(windows: Vec<WindowServerInfo>) {
         MOCK_VISIBLE_WINDOWS.with(|w| *w.borrow_mut() = windows);
+    }
+
+    fn set_mock_lookup_windows(windows: Vec<WindowServerInfo>) {
+        MOCK_WINDOWS.with(|w| *w.borrow_mut() = windows);
     }
 
     struct TestHarness {
@@ -575,6 +598,37 @@ mod tests {
             reactor_events
                 .iter()
                 .any(|e| matches!(e, reactor::Event::WindowBecameVisible(_)))
+        );
+    }
+
+    #[test]
+    fn window_created_includes_server_info_for_offscreen_window() {
+        set_mock_windows(vec![]);
+        let mut server_info = make_window(5, LAYER_NORMAL);
+        server_info.spaces = vec![SpaceId::new(2)];
+        set_mock_lookup_windows(vec![server_info]);
+
+        let mut h = TestHarness::new();
+        let info = WindowInfo {
+            is_standard: true,
+            title: String::new().into(),
+            frame: CGRect::ZERO,
+            sys_id: Some(wsid(5)),
+            is_resizable: true,
+            ax_role: "AXWindow".into(),
+            ax_subrole: None,
+        };
+        h.on_event(Event::WindowCreated(WindowId::new(1, 1), info, MouseState::Up));
+        let sm_events = h.drain_sm();
+        let reactor_events = find_reactor_events(&sm_events);
+
+        assert!(
+            reactor_events.iter().any(|e| matches!(
+                e,
+                reactor::Event::WindowCreated(_, _, _, Some(info))
+                    if info.id == wsid(5) && info.spaces == vec![SpaceId::new(2)]
+            )),
+            "{reactor_events:?}"
         );
     }
 }
