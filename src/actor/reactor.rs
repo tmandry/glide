@@ -1141,9 +1141,18 @@ impl Reactor {
         self.screens[self.best_screen_idx_for_window(frame)?].space
     }
 
-    /// The space to lay a window out in: the one shown on its screen, unless
-    /// the window server has the window in other spaces. That happens while
-    /// space changes are held back during expose, or before one is reported.
+    /// The currently visible space to a window belongs to, if any.
+    ///
+    /// This is `best_space_for_window`, but filtered through the window
+    /// server's space list for this window if we have it. These can get out
+    /// of sync during a space change, especially during expose when
+    /// SpaceManager filters out SpaceChanged events.
+    ///
+    /// Note that for windows without a WindowServerId this filter will not
+    /// be available, and we return whatever space is currently on that
+    /// window's screen. This function should therefore only be called for
+    /// windows we think are on a currently visible space, or that we know
+    /// have a WindowServerId.
     fn layout_space_for_window(&self, wid: WindowId) -> Option<SpaceId> {
         let window = self.windows.get(&wid)?;
         let space = self.best_space_for_window(&window.frame_monotonic)?;
