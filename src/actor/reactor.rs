@@ -962,7 +962,7 @@ impl Reactor {
             self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
             self.update_active_screen();
         }
-        if !self.in_drag && !self.expose_active {
+        if !self.in_drag {
             self.update_layout(&animation_focus_wids, is_resize, now);
         }
     }
@@ -1333,6 +1333,10 @@ impl Reactor {
 
     #[instrument(skip(self), fields())]
     pub fn update_layout(&mut self, new_wids: &[WindowId], skip_anim: bool, now: Instant) {
+        if self.expose_active {
+            // Don't update window layout during expose.
+            return;
+        }
         let main_window = self.main_window();
         trace!(?main_window);
         let mut anim = Animation::new();
