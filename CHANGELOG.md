@@ -2,36 +2,46 @@
 
 ## [0.2.18](https://github.com/tmandry/glide/compare/v0.2.17...v0.2.18) (2026-11-04)
 
+This release improves reliability when using Mission Control, moving windows
+between Spaces, and dragging tabs between windows. It also adds customizable
+group bar colors and enables self-updates.
 
 ### Features
 
-* Add configuration for group bar colors ([ab1c0fc](https://github.com/tmandry/glide/commit/ab1c0fcba3bda0c9efeb114adfbe282a8180cd0c))
-* Wire group indicators to config ([2135714](https://github.com/tmandry/glide/commit/2135714700f72fc0039c4094ac3aae33078bf903))
-
+* Customize group bar colors, opacity, and border width under
+  `[settings.group_bars]`, with separate colors for focused and inactive groups.
+  Colors accept `"#RRGGBB"` or `"#RRGGBBAA"`. For example, set
+  `selected_color = "#0080FF"` and `border_width = 0.5`, then run
+  `glide config update` to apply changes without restarting
+  ([#276](https://github.com/tmandry/glide/pull/276)).
+* Self-updates are now enabled for Glide 0.2.16 and later. Install available
+  updates from the Glide status menu, or use `glide update check` and
+  `glide update install`
+  ([#274](https://github.com/tmandry/glide/pull/274)).
 
 ### Bug Fixes
 
-* Changing spaces should not clear in_drag ([01cc25a](https://github.com/tmandry/glide/commit/01cc25a4f6aa93bb45a2844c7c5c4b0b09d0ebe7))
-* Detect Mission Control on macOS 27 ([133ca36](https://github.com/tmandry/glide/commit/133ca366b32b8ea96ce297845fb8454511dd7274))
-* Detect Mission Control on macOS 27 ([c61fbff](https://github.com/tmandry/glide/commit/c61fbffe2045016caf126488713d5c75b1e711b4))
-* Don't let repeat registrations overflow SkyLight's window list ([b137e1c](https://github.com/tmandry/glide/commit/b137e1c845cdf7f3a5ea88ca479b90ca04697b73))
-* Don't let repeat registrations overflow SkyLight's window list ([98d73b3](https://github.com/tmandry/glide/commit/98d73b3cea39fb046bed44803975986b5830085f))
-* Don't rearrange while a tab is dragged between windows ([d201103](https://github.com/tmandry/glide/commit/d20110356dc71683d7c779d43f760ca124d370b2))
-* Don't rearrange while a tab is dragged between windows ([6c97f8f](https://github.com/tmandry/glide/commit/6c97f8ff73de13cfa923fa047e104be64767b487))
-* Drop an interactive resize whose column was culled ([2d369e4](https://github.com/tmandry/glide/commit/2d369e4b5517856a0840224aa20609122002bce1))
-* Keep a window dragged to another screen through window discovery ([46fa773](https://github.com/tmandry/glide/commit/46fa7733be0811eff20ad581ff85813ab6edbae5))
-* Keep window metadata current during expose ([c856edb](https://github.com/tmandry/glide/commit/c856edb6fa2e1d19f58680689165d9c621ae7325))
-* Lay out windows only in a space the window server has them in ([42f168c](https://github.com/tmandry/glide/commit/42f168c33e31572a894ddd6ec08d9b0605d10eb4))
-* Look up a new window's spaces before it appears on screen ([256fa9f](https://github.com/tmandry/glide/commit/256fa9f8288913fa1201570f5e6480ad2f545b1b))
-* Show startup alerts on every space, in front of other apps ([c6322fc](https://github.com/tmandry/glide/commit/c6322fc68df947d6c42c2b803b527771adbcc55c))
-* Show startup alerts on every space, in front of other apps ([cfb6d48](https://github.com/tmandry/glide/commit/cfb6d4809697a2473447b02233f91389dfafcddf))
+* Recognize Mission Control, App Exposé, and Show Desktop on macOS 27. Finish
+  running window animations when they open and wait until they close to
+  rearrange windows, including in scrolling layouts
+  ([#269](https://github.com/tmandry/glide/pull/269),
+  [a76067a](https://github.com/tmandry/glide/commit/a76067a6022cd73aed296e6e282ce1bedba5d1cd),
+  [0e9d2ad](https://github.com/tmandry/glide/commit/0e9d2ad5b3d4ad4f585bb7d5d45a99aad9aa9878)).
+* Keep windows in the correct Space when switching Spaces or using Mission
+  Control, including newly detected windows belonging to fullscreen apps
+  ([42f168c](https://github.com/tmandry/glide/commit/42f168c33e31572a894ddd6ec08d9b0605d10eb4),
+  [256fa9f](https://github.com/tmandry/glide/commit/256fa9f8288913fa1201570f5e6480ad2f545b1b)).
+* Avoid rearranging windows mid-drag when moving a browser tab between windows
+  or dragging a window between Spaces
+  ([#275](https://github.com/tmandry/glide/pull/275),
+  [01cc25a](https://github.com/tmandry/glide/commit/01cc25a4f6aa93bb45a2844c7c5c4b0b09d0ebe7)).
+* Preserve closed-window detection during long sessions with apps such as
+  Safari and 1Password that repeatedly report the same windows
+  ([#267](https://github.com/tmandry/glide/pull/267)).
+* Show startup permission prompts and configuration errors in front of other
+  apps on every Space, including fullscreen Spaces, so they are visible when
+  Glide starts at login ([#268](https://github.com/tmandry/glide/pull/268)).
 
-
-### Improvements
-
-* Don't continue animating viewports during expose ([5a5a801](https://github.com/tmandry/glide/commit/5a5a801d90156e99ef3f9ceab5126e9acb787723))
-* Finish running animations when Mission Control opens ([0e9d2ad](https://github.com/tmandry/glide/commit/0e9d2ad5b3d4ad4f585bb7d5d45a99aad9aa9878))
-* Hold off layout while Mission Control is open ([a76067a](https://github.com/tmandry/glide/commit/a76067a6022cd73aed296e6e282ce1bedba5d1cd))
 
 ## [0.2.17](https://github.com/tmandry/glide/compare/v0.2.16...v0.2.17) (2026-10-27)
 
