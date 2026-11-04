@@ -2459,6 +2459,116 @@ pub mod tests {
         assert_eq!(screen2, apps.windows[&dragged].frame);
     }
 
+    fn ws_info(pid: pid_t, wsid: u32, frame: CGRect, spaces: Vec<SpaceId>) -> WindowServerInfo {
+        WindowServerInfo {
+            id: WindowServerId::new(wsid),
+            pid,
+            layer: 0,
+            frame,
+            spaces,
+        }
+    }
+
+    fn layout_windows(reactor: &Reactor, space: SpaceId, screen: CGRect) -> Vec<WindowId> {
+        reactor
+            .layout
+            .calculate_layout(space, screen, &reactor.config, Instant::now())
+            .into_iter()
+            .map(|(wid, _)| wid)
+            .collect()
+    }
+
+    #[test]
+    fn it_lays_out_new_window_only_in_its_window_server_space() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space1)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(1)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+
+        // The window server has the new window in space2, but space1 is shown.
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        apps.windows.insert(
+            wid2,
+            testing::WindowState {
+                frame: make_window(2).frame,
+                ..Default::default()
+            },
+        );
+        reactor.handle_event(Event::WindowCreated(wid2, make_window(2), MouseState::Up));
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: Some(1),
+            on_screen: WindowsOnScreen::new(vec![
+                ws_info(1, 1, apps.windows[&wid1].frame, vec![space1]),
+                ws_info(1, 2, make_window(2).frame, vec![space2]),
+            ]),
+        });
+        reactor.handle_event(Event::WindowBecameVisible(wid2));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, screen), vec![wid1]);
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space2)],
+            WindowsOnScreen::new(vec![ws_info(1, 2, make_window(2).frame, vec![space2])]),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space2, screen), vec![wid2]);
+        assert_eq!(screen, apps.windows[&wid2].frame);
+    }
+
+    #[test]
+    fn it_lays_out_discovered_window_only_in_its_window_server_space() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space1)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+
+        // The window server has window 2 in space2, but space1 is shown.
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        let windows = make_windows(2);
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: Some(1),
+            on_screen: WindowsOnScreen::new(vec![
+                ws_info(1, 1, windows[0].frame, vec![space1]),
+                ws_info(1, 2, windows[1].frame, vec![space2]),
+            ]),
+        });
+        reactor.handle_events(apps.make_app_without_ws_info(1, windows, Some(wid1), false));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, screen), vec![wid1]);
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space2)],
+            WindowsOnScreen::new(vec![ws_info(1, 2, apps.windows[&wid2].frame, vec![space2])]),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space2, screen), vec![wid2]);
+        assert_eq!(screen, apps.windows[&wid2].frame);
+    }
+
     #[test]
     fn it_deserializes_space_changed_without_expose_flag() {
         let event: Event =
