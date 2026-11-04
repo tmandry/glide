@@ -111,13 +111,12 @@ impl GroupBars {
                 self.active_spaces = spaces;
             }
             Event::ConfigChanged(config) => {
+                if config.settings.group_bars != self.config.settings.group_bars {
+                    for indicator in self.indicators.values_mut().flat_map(|i| i.values_mut()) {
+                        indicator.view.set_config(&config.settings.group_bars);
+                    }
+                }
                 self.config = config;
-                // Nothing to do; we rely on the reactor to tell us which
-                // indicators to show. Otherwise we would have to retain the
-                // GroupInfo struct for every space.
-                //
-                // For now we keep the config for when it will be used to
-                // customize indicator appearance.
             }
             Event::SpaceDisabled(space) => {
                 self.indicators.remove(&space);
@@ -169,7 +168,8 @@ impl GroupBars {
 
         let space_indicators = self.indicators.entry(space_id).or_default();
         let indicator = space_indicators.entry(group.node_id).or_insert_with(|| {
-            let mut view = GroupIndicatorNSView::new(CGRect::ZERO, self.mtm);
+            let mut view =
+                GroupIndicatorNSView::new(CGRect::ZERO, &self.config.settings.group_bars, self.mtm);
             view.set_click_callback(Rc::new(move |segment_index| {
                 Self::handle_indicator_clicked(group.node_id, segment_index);
             }));
@@ -220,7 +220,7 @@ fn make_indicator_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     // Configure as overlay window
     window.setLevel(NSFloatingWindowLevel);
     window.setBackgroundColor(Some(&NSColor::clearColor()));
-    window.setOpaque(true);
+    window.setOpaque(false);
     window.setIgnoresMouseEvents(true);
 
     window
