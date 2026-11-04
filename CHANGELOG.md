@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.2.18](https://github.com/tmandry/glide/compare/v0.2.17...v0.2.18) (2026-11-04)
+
+This release improves reliability when using Mission Control, moving windows
+between Spaces, and dragging tabs between windows. It also adds customizable
+group bar colors and enables self-updates.
+
+### Features
+
+* Customize group bar colors, opacity, and border width under
+  `[settings.group_bars]`, with separate colors for focused and inactive groups.
+  Colors accept `"#RRGGBB"` or `"#RRGGBBAA"`. For example, set
+  `selected_color = "#0080FF"` and `border_width = 0.5`, then run
+  `glide config update` to apply changes without restarting
+  ([#276](https://github.com/tmandry/glide/pull/276)).
+* Self-updates are now enabled for Glide 0.2.16 and later. Install available
+  updates from the Glide status menu, or use `glide update check` and
+  `glide update install`
+  ([#274](https://github.com/tmandry/glide/pull/274)).
+
+### Bug Fixes
+
+* Recognize Mission Control, App Exposé, and Show Desktop on macOS 27. Finish
+  running window animations when they open and wait until they close to
+  rearrange windows, including in scrolling layouts
+  ([#269](https://github.com/tmandry/glide/pull/269),
+  [a76067a](https://github.com/tmandry/glide/commit/a76067a6022cd73aed296e6e282ce1bedba5d1cd),
+  [0e9d2ad](https://github.com/tmandry/glide/commit/0e9d2ad5b3d4ad4f585bb7d5d45a99aad9aa9878)).
+* Keep windows in the correct Space when switching Spaces or using Mission
+  Control, including newly detected windows belonging to fullscreen apps
+  ([42f168c](https://github.com/tmandry/glide/commit/42f168c33e31572a894ddd6ec08d9b0605d10eb4),
+  [256fa9f](https://github.com/tmandry/glide/commit/256fa9f8288913fa1201570f5e6480ad2f545b1b)).
+* Avoid rearranging windows mid-drag when moving a browser tab between windows
+  or dragging a window between Spaces
+  ([#275](https://github.com/tmandry/glide/pull/275),
+  [01cc25a](https://github.com/tmandry/glide/commit/01cc25a4f6aa93bb45a2844c7c5c4b0b09d0ebe7)).
+* Preserve closed-window detection during long sessions with apps such as
+  Safari and 1Password that repeatedly report the same windows
+  ([#267](https://github.com/tmandry/glide/pull/267)).
+* Show startup permission prompts and configuration errors in front of other
+  apps on every Space, including fullscreen Spaces, so they are visible when
+  Glide starts at login ([#268](https://github.com/tmandry/glide/pull/268)).
+
+
 ## [0.2.17](https://github.com/tmandry/glide/compare/v0.2.16...v0.2.17) (2026-10-27)
 
 This release makes your workspace more resilient by saving layout changes as
