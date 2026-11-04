@@ -741,6 +741,9 @@ impl Reactor {
                     .send(group_bars::Event::ScreenParametersChanged(spaces, converter));
             }
             Event::SpaceChanged(spaces, on_screen, expose_active) => {
+                if expose_active.0 && !self.expose_active {
+                    self.finish_animation();
+                }
                 self.expose_active = expose_active.0;
                 info!(?self.expose_active, "space changed");
                 if self.expose_active {
@@ -1349,6 +1352,15 @@ impl Reactor {
         self.best_space_for_window(&self.windows.get(&self.main_window()?)?.frame_monotonic)
     }
 
+    /// Move windows in the active animation, if any, to their final frames.
+    fn finish_animation(&self) {
+        if let Some(tx) = &self.animation_tx
+            && tx.send(AnimationMessage::FinishActive).is_err()
+        {
+            error!("Animation manager exited unexpectedly");
+        }
+    }
+
     #[instrument(skip(self), fields())]
     pub fn update_layout(&mut self, new_wids: &[WindowId], skip_anim: bool, now: Instant) {
         if self.expose_active {
@@ -1449,6 +1461,7 @@ impl Reactor {
                 match err.0 {
                     AnimationMessage::Replace(animation) => animation.skip_to_end(),
                     AnimationMessage::SkipToEnd(animation) => animation.skip_to_end(),
+                    AnimationMessage::FinishActive => {}
                 }
             }
         } else {
@@ -2687,6 +2700,40 @@ pub mod tests {
         ));
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(full_screen, apps.windows[&wid].frame);
+    }
+
+    #[test]
+    fn it_finishes_animation_when_expose_opens() {
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let (animation_tx, mut animation_rx) = mpsc::unbounded_channel();
+        reactor.animation_tx = Some(animation_tx);
+        let space = SpaceId::new(1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        while animation_rx.try_recv().is_ok() {}
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+        assert!(matches!(
+            animation_rx.try_recv(),
+            Ok(AnimationMessage::FinishActive)
+        ));
+
+        // Only the space change that opens expose finishes the animation.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+        assert!(animation_rx.try_recv().is_err());
     }
 
     #[test]

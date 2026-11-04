@@ -18,6 +18,8 @@ pub type Receiver = mpsc::UnboundedReceiver<Message>;
 pub enum Message {
     Replace(Animation),
     SkipToEnd(Animation),
+    /// Jump the active animation, if any, to its final frames.
+    FinishActive,
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +115,10 @@ impl AnimationManager {
             Message::SkipToEnd(animation) => {
                 self.finish_active();
                 animation.skip_to_end();
+                None
+            }
+            Message::FinishActive => {
+                self.finish_active();
                 None
             }
         }
@@ -410,6 +416,31 @@ mod tests {
             }
             _ => panic!("expected AnimationFrame, got {request:?}"),
         }
+    }
+
+    #[test]
+    fn finish_active_jumps_to_final_frame() {
+        let (tx, mut rx) = unbounded_channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let wid = WindowId::new(1, 1);
+        let finish = rect(50.0, 60.0, 10.0, 10.0);
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(animation(
+            &handle,
+            wid,
+            rect(0.0, 0.0, 10.0, 10.0),
+            finish,
+        )));
+        manager.tick();
+        _ = collect_requests(&mut rx);
+
+        assert_eq!(manager.handle_message(Message::FinishActive), None);
+        let requests = collect_requests(&mut rx);
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_animation_frame(&requests[0], wid, finish);
+        assert!(matches!(requests[1], Request::EndWindowAnimation(req_wid) if req_wid == wid));
+        assert!(manager.active.is_none());
+        assert_eq!(manager.tick(), None);
     }
 
     #[test]
