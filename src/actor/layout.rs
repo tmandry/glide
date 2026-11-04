@@ -2668,6 +2668,35 @@ mod tests {
         assert!(!tiled.contains(&nonstandard));
     }
 
+    #[test]
+    fn resize_band_covers_the_border_and_not_the_interior() {
+        // The band is RESIZE_EDGE_THRESHOLD (8) wide on each side of the
+        // border, so it reaches 92..108 around a left edge at x = 100.
+        let frame = rect(100, 100, 200, 100);
+        let cases = [
+            ((200.0, 150.0), false, "the middle"),
+            ((103.0, 150.0), true, "inside the left edge"),
+            ((95.0, 150.0), true, "outside the left edge"),
+            ((85.0, 150.0), false, "too far outside the left edge"),
+            ((295.0, 150.0), true, "inside the right edge"),
+            ((285.0, 150.0), false, "inside, past the right band"),
+            ((200.0, 103.0), true, "inside the top edge"),
+            ((200.0, 195.0), true, "inside the bottom edge"),
+            ((103.0, 103.0), true, "the top left corner"),
+        ];
+        for ((x, y), expected, desc) in cases {
+            assert_eq!(
+                expected,
+                is_in_resize_band(CGPoint::new(x, y), frame),
+                "({x}, {y}) is {desc}"
+            );
+        }
+
+        // A window narrower than the band has no interior to drag by.
+        let sliver = rect(100, 100, 10, 100);
+        assert!(is_in_resize_band(CGPoint::new(105.0, 150.0), sliver));
+    }
+
     /// A resize comes back from the app as a new frame, so a scroll layout has
     /// to widen the column from the reported frame rather than the mouse.
     #[test]
