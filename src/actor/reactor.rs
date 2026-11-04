@@ -642,7 +642,7 @@ impl Reactor {
                 if mouse_state == Some(MouseState::Up) {
                     // The button is up, so any resize we were holding
                     // off on is over, even if we never saw the MouseUp event.
-                    self.resizing_window = None;
+                    self.end_user_resize(now);
                 }
                 let window = self.windows.get_mut(&wid).unwrap();
                 if last_seen != window.last_sent_txid {
@@ -819,67 +819,47 @@ impl Reactor {
                 self.update_visible_windows();
             }
             Event::LeftMouseDown(point) => {
-                if let Some(screen) = self.active_screen()
+                if let Some(&screen) = self.active_screen()
                     && let Some(space) = screen.space
+                    // A press on a window edge starts the app's own resize,
+                    // which the layout picks up as a WindowResized event. Only
+                    // a press inside the window begins a drag.
+                    && !self.layout.is_on_scroll_resize_edge(
+                        space,
+                        point,
+                        screen.frame,
+                        &self.config,
+                        now,
+                    )
+                    && let Some((wid, node)) = self.layout.hit_test_scroll_window(
+                        space,
+                        point,
+                        screen.frame,
+                        &self.config,
+                        now,
+                    )
                 {
-                    if let Some((col, win, edges)) = self.layout.hit_test_scroll_edges(
-                        space,
-                        point,
-                        screen.frame,
-                        &self.config,
-                        now,
-                    ) {
-                        self.layout.begin_interactive_resize(col, win, edges, point);
-                        self.in_drag = true;
-                    } else if let Some((wid, node)) = self.layout.hit_test_scroll_window(
-                        space,
-                        point,
-                        screen.frame,
-                        &self.config,
-                        now,
-                    ) {
-                        self.layout.begin_interactive_move(space, wid, node, point);
-                        self.in_drag = true;
-                    }
+                    self.layout.begin_interactive_move(space, wid, node, point);
+                    self.in_drag = true;
                 }
             }
             Event::LeftMouseDragged(point) => {
-                if let Some(&screen) = self.active_screen() {
-                    if screen.space.is_some() {
-                        if self.layout.update_interactive_resize(point, screen.frame) {
-                            self.update_layout(&[], true, now);
-                        } else if self.layout.update_interactive_move(
-                            point,
-                            screen.frame,
-                            &self.config,
-                            now,
-                        ) {
-                            self.update_layout(&[], false, now);
-                        }
-                    }
+                if let Some(&screen) = self.active_screen()
+                    && screen.space.is_some()
+                    && self.layout.update_interactive_move(point, screen.frame, &self.config, now)
+                {
+                    self.update_layout(&[], false, now);
                 }
             }
             Event::MouseUp => {
-                if self.layout.has_interactive_state() {
-                    if let Some(&screen) = self.active_screen() {
-                        if let Some(space) = screen.space {
-                            self.layout.end_interactive_resize(
-                                space,
-                                screen.frame,
-                                &self.config,
-                                now,
-                            );
-                            self.layout.end_interactive_move(
-                                space,
-                                screen.frame,
-                                &self.config,
-                                now,
-                            );
-                        }
-                    }
+                if self.layout.has_interactive_state()
+                    && let Some(&screen) = self.active_screen()
+                    && let Some(space) = screen.space
+                {
+                    self.layout.end_interactive_move(space, screen.frame, &self.config, now);
                 }
                 self.in_drag = false;
-                self.resizing_window = None;
+                self.end_user_resize(now);
                 // Now re-check the layout.
             }
             Event::MouseMovedOverWindow(wsid, key_focus_pid) => {
@@ -1375,6 +1355,27 @@ impl Reactor {
             && tx.send(AnimationMessage::FinishActive).is_err()
         {
             error!("Animation manager exited unexpectedly");
+        }
+    }
+
+    /// Finishes a user resize of a tiled window, if one was in progress.
+    ///
+    /// `update_layout` leaves the viewport alone while a resize is in
+    /// progress, so a column the user grew past the edge of the screen stays
+    /// out of view until the resize ends.
+    fn end_user_resize(&mut self, now: Instant) {
+        if self.resizing_window.take().is_none() {
+            return;
+        }
+        if self.expose_active {
+            // Expose holds off layout updates, so leave the viewport alone
+            // too. The resize state is cleared either way.
+            return;
+        }
+        if let Some(&screen) = self.active_screen()
+            && let Some(space) = screen.space
+        {
+            self.layout.end_user_resize(space, screen.frame, &self.config, now);
         }
     }
 
