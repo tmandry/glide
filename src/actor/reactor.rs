@@ -1367,6 +1367,11 @@ impl Reactor {
         if self.resizing_window.take().is_none() {
             return;
         }
+        if self.expose_active {
+            // Expose holds off layout updates, so leave the viewport alone
+            // too. The resize state is cleared either way.
+            return;
+        }
         if let Some(&screen) = self.active_screen()
             && let Some(space) = screen.space
         {
