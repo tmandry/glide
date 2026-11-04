@@ -663,14 +663,24 @@ impl Reactor {
                 if let Some(old) = old_screen
                     && let Some(new) = new_screen
                     && old != new
-                    && let Some(info) = self.layout_window_info(wid)
                 {
-                    self.send_layout_event(LayoutEvent::WindowSpaceChanged {
-                        wid,
-                        added: self.screens[new].space,
-                        removed: self.screens[old].space,
-                        info,
-                    });
+                    // The window server moves the window to the space on its
+                    // new screen. Forget the cached spaces until it reports
+                    // them again.
+                    if let Some(info) = self.windows[&wid]
+                        .window_server_id
+                        .and_then(|wsid| self.window_server_info.get_mut(&wsid))
+                    {
+                        info.spaces.clear();
+                    }
+                    if let Some(info) = self.layout_window_info(wid) {
+                        self.send_layout_event(LayoutEvent::WindowSpaceChanged {
+                            wid,
+                            added: self.screens[new].space,
+                            removed: self.screens[old].space,
+                            info,
+                        });
+                    }
                 }
                 if old_frame.size != new_frame.size {
                     let screens = self
@@ -2761,6 +2771,56 @@ pub mod tests {
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn it_keeps_window_dragged_between_spaces_on_discovery() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen1, screen2],
+            spaces: vec![Some(space1), Some(space2)],
+            scale_factors: vec![2.0, 2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        let dragged = WindowId::new(1, 1);
+        let windows = make_windows(2);
+        reactor.handle_event(Event::WindowsOnScreenUpdated {
+            pid: Some(1),
+            on_screen: WindowsOnScreen::new(vec![
+                ws_info(1, 1, windows[0].frame, vec![space1]),
+                ws_info(1, 2, windows[1].frame, vec![space1]),
+            ]),
+        });
+        reactor.handle_events(apps.make_app_without_ws_info(1, windows, Some(dragged), false));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(layout_windows(&reactor, space1, screen1).contains(&dragged));
+
+        // Drag window 1 onto screen2. The window server info cached for it
+        // still says space1.
+        let frame = apps.windows[&dragged].frame;
+        let new_frame = CGRect::new(CGPoint::new(1100., frame.origin.y), frame.size);
+        reactor.handle_event(Event::WindowFrameChanged(
+            dragged,
+            new_frame,
+            apps.windows[&dragged].last_seen_txid,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+        assert_eq!(layout_windows(&reactor, space2, screen2), vec![dragged]);
+
+        reactor.handle_event(Event::WindowsDiscovered {
+            pid: 1,
+            new: vec![],
+            known_visible: vec![dragged, WindowId::new(1, 2)],
+        });
+        assert_eq!(layout_windows(&reactor, space2, screen2), vec![dragged]);
     }
 
     #[test]
