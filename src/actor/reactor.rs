@@ -749,7 +749,6 @@ impl Reactor {
                     return;
                 }
                 self.layout.cancel_interactive_state();
-                self.in_drag = false;
                 self.resizing_window = None;
                 info!("space changed");
                 for (space, screen) in spaces.iter().zip(&mut self.screens) {
