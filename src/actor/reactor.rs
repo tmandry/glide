@@ -91,7 +91,11 @@ pub enum Event {
     /// of SpaceId to window list, and Reactor would maintain a list per
     /// space. Then we can update the windows on screen for the space before
     /// sending SpaceChanged.
-    SpaceChanged(Vec<Option<SpaceId>>, WindowsOnScreen),
+    SpaceChanged(
+        Vec<Option<SpaceId>>,
+        WindowsOnScreen,
+        #[serde(default)] ExposeActive,
+    ),
 
     /// All running apps at launch have been registered.
     StartupComplete,
@@ -136,16 +140,6 @@ pub enum Event {
         pid: Option<pid_t>,
         on_screen: WindowsOnScreen,
     },
-
-    /// Updated window server info for some windows, sent instead of
-    /// SpaceChanged while space changes are held back during expose.
-    ///
-    /// Only the given entries are replaced; the visible windows are left
-    /// unchanged.
-    WindowServerInfoUpdated(Vec<WindowServerInfo>),
-
-    /// Expose (Mission Control) was entered or exited.
-    ExposeActive(bool),
 
     // TODO: Consider replacing with WindowsOnScreenUpdated.
     WindowBecameVisible(WindowId),
@@ -223,6 +217,9 @@ pub enum Event {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ExposeActive(pub bool);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -606,10 +603,6 @@ impl Reactor {
                 Some(_) => self.update_partial_window_server_info(on_screen),
                 None => self.update_complete_window_server_info(on_screen),
             },
-            Event::WindowServerInfoUpdated(info) => {
-                self.window_server_info.extend(info.into_iter().map(|info| (info.id, info)));
-            }
-            Event::ExposeActive(active) => self.expose_active = active,
             Event::WindowBecameVisible(wid) => {
                 if self.window_is_tracked(wid)
                     && let Some(space) = self.layout_space_for_window(wid)
@@ -737,9 +730,24 @@ impl Reactor {
                 self.group_indicators_tx
                     .send(group_bars::Event::ScreenParametersChanged(spaces, converter));
             }
-            Event::SpaceChanged(spaces, on_screen) => {
-                let visible_window_order = on_screen.visible.clone();
-                self.update_complete_window_server_info(on_screen);
+            Event::SpaceChanged(spaces, on_screen, expose_active) => {
+                self.expose_active = expose_active.0;
+                info!(?self.expose_active, "space changed");
+                if self.expose_active {
+                    // In Expose, the visible list is useless; it can contain
+                    // all windows. The updated WindowServerInfo is still useful
+                    // though, especially for noticing when windows were moved
+                    // between spaces.
+                    //
+                    // For now, we just update the info and return. SpaceManager
+                    // sends another SpaceChanged event after exiting Expose so
+                    // we can update the remaining state below.
+                    let potentially_all_or_no_windows = on_screen;
+                    self.window_server_info.extend(
+                        potentially_all_or_no_windows.info.into_iter().map(|info| (info.id, info)),
+                    );
+                    return;
+                }
                 if spaces.len() != self.screens.len() {
                     warn!(
                         "Ignoring space change event: we have {} spaces, but {} screens",
@@ -748,12 +756,13 @@ impl Reactor {
                     );
                     return;
                 }
-                self.layout.cancel_interactive_state();
-                self.resizing_window = None;
-                info!("space changed");
                 for (space, screen) in spaces.iter().zip(&mut self.screens) {
                     screen.space = *space;
                 }
+                let visible_window_order = on_screen.visible.clone();
+                self.update_complete_window_server_info(on_screen);
+                self.layout.cancel_interactive_state();
+                self.resizing_window = None;
                 let response = self
                     .screens
                     .iter()
@@ -1865,6 +1874,7 @@ pub mod tests {
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(SpaceId::new(1))],
             WindowsOnScreen::new(ws_info),
+            ExposeActive(false),
         ));
         reactor.handle_events(apps.simulate_events());
         assert_eq!(
@@ -2060,6 +2070,7 @@ pub mod tests {
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
@@ -2101,6 +2112,7 @@ pub mod tests {
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
@@ -2145,6 +2157,7 @@ pub mod tests {
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
@@ -2300,6 +2313,7 @@ pub mod tests {
         reactor.handle_event(Event::SpaceChanged(
             vec![Some(space)],
             WindowsOnScreen::new(on_screen),
+            ExposeActive(false),
         ));
 
         assert!(raise_manager_rx.try_recv().is_err());
@@ -2446,6 +2460,13 @@ pub mod tests {
     }
 
     #[test]
+    fn it_deserializes_space_changed_without_expose_flag() {
+        let event: Event =
+            ron::de::from_str("SpaceChanged([Some((1))],(visible:[],info:[]))").unwrap();
+        assert!(matches!(event, Event::SpaceChanged(_, _, ExposeActive(false))));
+    }
+
+    #[test]
     fn it_holds_off_layout_during_expose() {
         let mut apps = Apps::new();
         let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
@@ -2463,16 +2484,82 @@ pub mod tests {
         apps.simulate_until_quiet(&mut reactor);
         assert_ne!(full_screen, apps.windows[&wid].frame);
 
-        reactor.handle_event(Event::ExposeActive(true));
+        let space = SpaceId::new(1);
+        let on_screen = |reactor: &Reactor| {
+            WindowsOnScreen::new(
+                reactor
+                    .windows
+                    .iter()
+                    .filter_map(|(wid, window)| {
+                        Some(WindowServerInfo {
+                            id: window.window_server_id?,
+                            pid: wid.pid,
+                            layer: 0,
+                            frame: window.frame_monotonic,
+                            spaces: vec![space],
+                        })
+                    })
+                    .collect(),
+            )
+        };
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
         assert!(
             apps.requests().is_empty(),
             "reactor shouldn't move windows during expose"
         );
 
-        reactor.handle_event(Event::ExposeActive(false));
+        // A space change during expose doesn't resume layout.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            on_screen(&reactor),
+            ExposeActive(true),
+        ));
+        assert!(
+            apps.requests().is_empty(),
+            "reactor shouldn't move windows during expose"
+        );
+
+        // Layout resumes with the space change that follows expose exit.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            on_screen(&reactor),
+            ExposeActive(false),
+        ));
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(full_screen, apps.windows[&wid].frame);
+    }
+
+    #[test]
+    fn it_does_not_raise_windows_on_space_change_during_expose() {
+        let mut apps = Apps::new();
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.raise_manager_tx = raise_manager_tx;
+        let space = SpaceId::new(1);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app_with_opts(1, make_windows(2), None, false));
+        let _events = apps.simulate_events();
+        while raise_manager_rx.try_recv().is_ok() {}
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+
+        assert!(raise_manager_rx.try_recv().is_err());
     }
 
     #[test]
