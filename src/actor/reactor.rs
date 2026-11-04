@@ -130,7 +130,14 @@ pub enum Event {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     },
-    WindowCreated(WindowId, WindowInfo, MouseState),
+    /// A window was created. The window server info is included when the
+    /// window server knows the window, even if it is not on screen yet.
+    WindowCreated(
+        WindowId,
+        WindowInfo,
+        MouseState,
+        #[serde(default)] Option<WindowServerInfo>,
+    ),
 
     /// Updated list of windows visible on screen from the window server.
     ///
@@ -585,12 +592,15 @@ impl Reactor {
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 self.on_windows_discovered(pid, new, known_visible);
             }
-            Event::WindowCreated(wid, window, mouse_state) => {
+            Event::WindowCreated(wid, window, mouse_state, server_info) => {
                 // TODO: It's possible for a window to be on multiple spaces
                 // or move spaces. (Add a test)
                 // FIXME: We assume all windows are on the main screen.
                 if let Some(wsid) = window.sys_id {
                     self.window_ids.insert(wsid, wid);
+                }
+                if let Some(info) = server_info {
+                    self.window_server_info.insert(info.id, info);
                 }
                 self.windows.insert(wid, window.clone().into());
                 if mouse_state == MouseState::Down {
@@ -2344,6 +2354,7 @@ pub mod tests {
             WindowId::new(1, 2),
             make_window(2),
             MouseState::Up,
+            None,
         ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
     }
@@ -2506,7 +2517,7 @@ pub mod tests {
                 ..Default::default()
             },
         );
-        reactor.handle_event(Event::WindowCreated(wid2, make_window(2), MouseState::Up));
+        reactor.handle_event(Event::WindowCreated(wid2, make_window(2), MouseState::Up, None));
         reactor.handle_event(Event::WindowsOnScreenUpdated {
             pid: Some(1),
             on_screen: WindowsOnScreen::new(vec![
@@ -2526,6 +2537,39 @@ pub mod tests {
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(layout_windows(&reactor, space2, screen), vec![wid2]);
         assert_eq!(screen, apps.windows[&wid2].frame);
+    }
+
+    #[test]
+    fn it_uses_window_server_info_from_window_creation() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space1)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(1)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+
+        // The new window isn't on screen yet, so only the info sent with its
+        // creation says it's in space2.
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        reactor.handle_event(Event::WindowCreated(
+            wid2,
+            make_window(2),
+            MouseState::Up,
+            Some(ws_info(1, 2, make_window(2).frame, vec![space2])),
+        ));
+        reactor.handle_event(Event::WindowBecameVisible(wid2));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, screen), vec![wid1]);
     }
 
     #[test]
@@ -3005,6 +3049,7 @@ pub mod tests {
             WindowId::new(1, 2),
             make_window(2),
             MouseState::Up,
+            None,
         ));
         reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
     }
