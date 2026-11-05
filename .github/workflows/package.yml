@@ -95,9 +95,23 @@ jobs:
           chmod +x ~/.bin/codesign
           export PATH=~/.bin:"$PATH"
 
+          # Retry on failure: notarization and stapling talk to Apple's
+          # servers and occasionally fail with transient network errors.
+          retry() {
+            local attempt
+            for attempt in 1 2 3 4; do
+              "$@" && return 0
+              if [[ $attempt -lt 4 ]]; then
+                echo "::warning::Attempt $attempt of '$*' failed; retrying in $((attempt * 30))s"
+                sleep $((attempt * 30))
+              fi
+            done
+            return 1
+          }
+
           # Package, sign, and (if release) notarize
-          cargo packager --release --target aarch64-apple-darwin
-          cargo packager --release --target x86_64-apple-darwin
+          retry cargo packager --release --target aarch64-apple-darwin
+          retry cargo packager --release --target x86_64-apple-darwin
 
       - name: Verify codesigning
         run: |
