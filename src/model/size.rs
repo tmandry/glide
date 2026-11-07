@@ -614,99 +614,43 @@ fn size_with_group_indicator(
     }
 
     let thickness = config.thickness;
+    // The bar and the gap between it and the group's windows.
+    let reserved = thickness + config.gap;
+    let CGRect { origin, size } = rect;
+    let rect = |x, y, width, height| CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
 
     match container_kind {
-        ContainerKind::Tabbed => {
-            // Horizontal indicator
-            match config.horizontal_placement {
-                HorizontalPlacement::Top => {
-                    let group_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x,
-                            y: rect.origin.y + thickness,
-                        },
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: rect.size.height - thickness,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: thickness,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-                HorizontalPlacement::Bottom => {
-                    let group_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: rect.size.height - thickness,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x,
-                            y: rect.origin.y + group_frame.size.height,
-                        },
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: thickness,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-            }
-        }
-        ContainerKind::Stacked => {
-            // Vertical indicator
-            match config.vertical_placement {
-                VerticalPlacement::Left => {
-                    let group_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x + thickness,
-                            y: rect.origin.y,
-                        },
-                        size: CGSize {
-                            width: rect.size.width - thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-                VerticalPlacement::Right => {
-                    let group_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: rect.size.width - thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x + group_frame.size.width,
-                            y: rect.origin.y,
-                        },
-                        size: CGSize {
-                            width: thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-            }
-        }
-        _ => (rect, None),
+        ContainerKind::Tabbed => match config.horizontal_placement {
+            HorizontalPlacement::Top => (
+                rect(origin.x, origin.y + reserved, size.width, size.height - reserved),
+                Some(rect(origin.x, origin.y, size.width, thickness)),
+            ),
+            HorizontalPlacement::Bottom => (
+                rect(origin.x, origin.y, size.width, size.height - reserved),
+                Some(rect(
+                    origin.x,
+                    origin.y + size.height - thickness,
+                    size.width,
+                    thickness,
+                )),
+            ),
+        },
+        ContainerKind::Stacked => match config.vertical_placement {
+            VerticalPlacement::Left => (
+                rect(origin.x + reserved, origin.y, size.width - reserved, size.height),
+                Some(rect(origin.x, origin.y, thickness, size.height)),
+            ),
+            VerticalPlacement::Right => (
+                rect(origin.x, origin.y, size.width - reserved, size.height),
+                Some(rect(
+                    origin.x + size.width - thickness,
+                    origin.y,
+                    thickness,
+                    size.height,
+                )),
+            ),
+        },
+        _ => (rect(origin.x, origin.y, size.width, size.height), None),
     }
 }
 
@@ -955,6 +899,45 @@ mod tests {
 
         assert_eq!(window_frame_disabled, rect(0, 0, 1000, 1000));
         assert_eq!(window_frame_enabled, rect(0, 20, 1000, 980));
+    }
+
+    #[test]
+    fn it_leaves_a_gap_between_indicators_and_windows() {
+        use crate::config::{HorizontalPlacement, VerticalPlacement};
+
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let tabbed = tree.add_container(root, ContainerKind::Tabbed);
+        tree.add_window_under(layout, tabbed, WindowId::new(1, 1));
+        let stacked = tree.add_container(root, ContainerKind::Stacked);
+        tree.add_window_under(layout, stacked, WindowId::new(2, 1));
+
+        let screen = rect(0, 0, 2000, 1000);
+        let mut config = Config::default();
+        config.settings.group_bars.thickness = 20.0;
+        config.settings.group_bars.gap = 10.0;
+        let frame_of =
+            |frames: &[(WindowId, CGRect)], wid| frames.iter().find(|(w, _)| *w == wid).unwrap().1;
+        let indicator_of = |groups: &[GroupBarInfo], node| {
+            groups.iter().find(|g| g.node_id == node).unwrap().indicator_frame
+        };
+
+        config.settings.group_bars.horizontal_placement = HorizontalPlacement::Top;
+        config.settings.group_bars.vertical_placement = VerticalPlacement::Left;
+        let (frames, groups) = tree.calculate_layout_and_groups(layout, screen, &config);
+        assert_eq!(indicator_of(&groups, tabbed), rect(0, 0, 1000, 20));
+        assert_eq!(frame_of(&frames, WindowId::new(1, 1)), rect(0, 30, 1000, 970));
+        assert_eq!(indicator_of(&groups, stacked), rect(1000, 0, 20, 1000));
+        assert_eq!(frame_of(&frames, WindowId::new(2, 1)), rect(1030, 0, 970, 1000));
+
+        config.settings.group_bars.horizontal_placement = HorizontalPlacement::Bottom;
+        config.settings.group_bars.vertical_placement = VerticalPlacement::Right;
+        let (frames, groups) = tree.calculate_layout_and_groups(layout, screen, &config);
+        assert_eq!(indicator_of(&groups, tabbed), rect(0, 980, 1000, 20));
+        assert_eq!(frame_of(&frames, WindowId::new(1, 1)), rect(0, 0, 1000, 970));
+        assert_eq!(indicator_of(&groups, stacked), rect(1980, 0, 20, 1000));
+        assert_eq!(frame_of(&frames, WindowId::new(2, 1)), rect(1000, 0, 970, 1000));
     }
 
     #[test]

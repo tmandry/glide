@@ -315,6 +315,7 @@ pub struct GroupBars {
     pub enable: bool,
     pub style: GroupBarStyle,
     pub thickness: f64,
+    pub gap: f64,
     pub horizontal_placement: HorizontalPlacement,
     pub vertical_placement: VerticalPlacement,
     pub selected_color: Color,

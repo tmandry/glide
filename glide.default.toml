@@ -41,6 +41,8 @@ group_bars.enable = true
 # colors below; colors with some transparency work best.
 group_bars.style = "solid"
 group_bars.thickness = 6
+# Space between the bar and the windows in its group (in pixels).
+group_bars.gap = 0
 group_bars.horizontal_placement = "top"
 group_bars.vertical_placement = "right"
 # Group bar colors, as "#RRGGBB" or "#RRGGBBAA" (the last byte is opacity).
