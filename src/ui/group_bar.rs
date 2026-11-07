@@ -105,6 +105,7 @@ fn set_font(layer: &CATextLayer, font: &NSFont) {
 /// Inner state for the indicator view
 pub struct IndicatorState {
     config: GroupBars,
+    backdrop: Option<GlassBackdrop>,
     group_data: Option<GroupDisplayData>,
     background_layer: Option<Retained<CALayer>>,
     separator_layers: Vec<Retained<CALayer>>,
@@ -204,9 +205,7 @@ objc2::define_class!(
 pub struct GroupIndicatorNSView {
     /// Holds the backdrop (if any) and the indicator view on top of it.
     root: Retained<NSView>,
-    backdrop: Option<GlassBackdrop>,
     view: Retained<ClickableIndicatorView>,
-    mtm: MainThreadMarker,
 }
 
 /// The material drawn behind the segments when `style = "glass"`.
@@ -286,7 +285,7 @@ impl ClickableIndicatorView {
     }
 
     fn close_button_frame(group_data: &GroupDisplayData, bounds: CGRect, index: usize) -> CGRect {
-        let segment = GroupIndicatorNSView::calculate_segment_frame(group_data, bounds, index);
+        let segment = Self::calculate_segment_frame(group_data, bounds, index);
         let side = LabelMetrics::new(bounds).side;
         CGRect::new(
             CGPoint::new(
@@ -375,6 +374,7 @@ impl GroupIndicatorNSView {
     pub fn new(frame: CGRect, config: &GroupBars, mtm: MainThreadMarker) -> Self {
         let state = IndicatorState {
             config: config.clone(),
+            backdrop: None,
             group_data: None,
             background_layer: None,
             separator_layers: Vec::new(),
@@ -416,40 +416,12 @@ impl GroupIndicatorNSView {
         fill_superview(&view);
         root.addSubview(&view);
 
-        let mut this = Self {
-            root,
-            backdrop: None,
-            view,
-            mtm,
-        };
-        this.update_backdrop();
-        this
+        view.update_backdrop();
+        Self { root, view }
     }
 
     pub fn view(&self) -> &NSView {
         &self.root
-    }
-
-    /// Adds or removes the backdrop to match the configured style.
-    fn update_backdrop(&mut self) {
-        let style = self.view.ivars().borrow().config.style;
-        match (style, &self.backdrop) {
-            (GroupBarStyle::Glass, None) => {
-                let backdrop = GlassBackdrop::new(self.root.bounds(), self.mtm);
-                fill_superview(backdrop.view());
-                self.root.addSubview_positioned_relativeTo(
-                    backdrop.view(),
-                    NSWindowOrderingMode::Below,
-                    Some(&self.view),
-                );
-                self.backdrop = Some(backdrop);
-            }
-            (GroupBarStyle::Solid, Some(backdrop)) => {
-                backdrop.view().removeFromSuperview();
-                self.backdrop = None;
-            }
-            _ => {}
-        }
     }
 
     pub fn update(&mut self, group_data: GroupDisplayData) {
@@ -459,25 +431,25 @@ impl GroupIndicatorNSView {
         };
 
         self.view.ivars().borrow_mut().group_data = Some(group_data.clone());
-        self.update_layers();
+        self.view.update_layers();
 
         // Animate if selection changed
         if let Some(old_index) = old_selected {
             if old_index != group_data.selected_index {
-                self.animate_selection_change(old_index, group_data.selected_index);
+                self.view.animate_selection_change(old_index, group_data.selected_index);
             }
         }
     }
 
     pub fn set_config(&mut self, config: &GroupBars) {
         self.view.ivars().borrow_mut().config = config.clone();
-        self.update_backdrop();
-        self.update_layers();
+        self.view.update_backdrop();
+        self.view.update_layers();
     }
 
     pub fn clear(&mut self) {
         self.view.ivars().borrow_mut().group_data = None;
-        self.clear_layers();
+        self.view.clear_layers();
     }
 
     pub fn set_click_callback(&mut self, callback: SegmentClickCallback) {
@@ -542,11 +514,39 @@ impl GroupIndicatorNSView {
         let bounds = self.view.bounds();
         ClickableIndicatorView::segment_at_point_static(point, group_data, &bounds)
     }
+}
+
+impl ClickableIndicatorView {
+    /// Adds or removes the backdrop to match the configured style.
+    fn update_backdrop(&self) {
+        // SAFETY: The view's superview is the root view, an ordinary NSView.
+        let Some(root) = (unsafe { self.superview() }) else {
+            return;
+        };
+        let mut state = self.ivars().borrow_mut();
+        match (state.config.style, &state.backdrop) {
+            (GroupBarStyle::Glass, None) => {
+                let backdrop = GlassBackdrop::new(root.bounds(), MainThreadMarker::from(self));
+                fill_superview(backdrop.view());
+                root.addSubview_positioned_relativeTo(
+                    backdrop.view(),
+                    NSWindowOrderingMode::Below,
+                    Some(self),
+                );
+                state.backdrop = Some(backdrop);
+            }
+            (GroupBarStyle::Solid, Some(backdrop)) => {
+                backdrop.view().removeFromSuperview();
+                state.backdrop = None;
+            }
+            _ => {}
+        }
+    }
 
     /// Clear all layers
-    fn clear_layers(&mut self) {
+    fn clear_layers(&self) {
         unsafe {
-            if let Some(parent_layer) = self.view.layer() {
+            if let Some(parent_layer) = self.layer() {
                 if let Some(sublayers) = parent_layer.sublayers() {
                     // Convert to vec before iterating to avoid mutation panic.
                     for sublayer in sublayers.to_vec() {
@@ -556,7 +556,7 @@ impl GroupIndicatorNSView {
             }
         }
 
-        let mut state = self.view.ivars().borrow_mut();
+        let mut state = self.ivars().borrow_mut();
         state.background_layer = None;
         state.separator_layers.clear();
         state.selected_layer = None;
@@ -565,8 +565,8 @@ impl GroupIndicatorNSView {
     }
 
     /// Update the layer structure to match current group data
-    fn update_layers(&mut self) {
-        let group_data = match self.group_data() {
+    fn update_layers(&self) {
+        let group_data = match self.ivars().borrow().group_data.clone() {
             Some(data) => data,
             None => {
                 self.clear_layers();
@@ -574,9 +574,9 @@ impl GroupIndicatorNSView {
             }
         };
 
-        let bounds = self.view.bounds();
+        let bounds = self.bounds();
 
-        let parent_layer = match self.view.layer() {
+        let parent_layer = match self.layer() {
             Some(layer) => layer,
             None => return,
         };
@@ -588,18 +588,18 @@ impl GroupIndicatorNSView {
         self.update_separator_layers(&parent_layer, &group_data, bounds);
         self.update_selected_layer(&parent_layer, &group_data, bounds);
         self.update_label_layers(&parent_layer, &group_data, bounds);
-        self.view.update_close_layer();
+        self.update_close_layer();
     }
 
     /// Lays out the icon and title of each tab. Only tabbed groups are labeled.
     fn update_label_layers(
-        &mut self,
+        &self,
         parent_layer: &CALayer,
         group_data: &GroupDisplayData,
         bounds: CGRect,
     ) {
-        let scale = self.view.window().map_or(2.0, |w| w.backingScaleFactor());
-        let mut state = self.view.ivars().borrow_mut();
+        let scale = self.window().map_or(2.0, |w| w.backingScaleFactor());
+        let mut state = self.ivars().borrow_mut();
         let show_titles = state.config.show_titles;
         let show_icons = state.config.show_icons;
         let wanted = if shows_labels(&state.config, group_data) {
@@ -670,11 +670,11 @@ impl GroupIndicatorNSView {
     }
 
     /// Ensure we have the correct number of separator layers
-    fn ensure_separator_layers(&mut self, total_count: usize) {
+    fn ensure_separator_layers(&self, total_count: usize) {
         // We need (total_count - 1) separators between segments
         let needed_count = if total_count > 1 { total_count - 1 } else { 0 };
 
-        let mut state = self.view.ivars().borrow_mut();
+        let mut state = self.ivars().borrow_mut();
 
         // Remove excess layers
         while state.separator_layers.len() > needed_count {
@@ -691,12 +691,12 @@ impl GroupIndicatorNSView {
     }
 
     fn update_background_layer(
-        &mut self,
+        &self,
         parent_layer: &CALayer,
         group_data: &GroupDisplayData,
         bounds: CGRect,
     ) {
-        let mut state = self.view.ivars().borrow_mut();
+        let mut state = self.ivars().borrow_mut();
 
         let background_layer = if let Some(existing) = &state.background_layer {
             existing.clone()
@@ -716,7 +716,7 @@ impl GroupIndicatorNSView {
         } else {
             state.config.inactive_background_color
         };
-        let paint_background = match &self.backdrop {
+        let paint_background = match &state.backdrop {
             Some(backdrop) => {
                 backdrop.set_appearance(corner_radius(&state.config, bounds), &bg_color)
             }
@@ -738,7 +738,7 @@ impl GroupIndicatorNSView {
     }
 
     fn update_separator_layers(
-        &mut self,
+        &self,
         parent_layer: &CALayer,
         group_data: &GroupDisplayData,
         bounds: CGRect,
@@ -752,7 +752,7 @@ impl GroupIndicatorNSView {
             GroupKind::Vertical => bounds.size.height / group_data.total_count as f64,
         };
 
-        let state = self.view.ivars().borrow();
+        let state = self.ivars().borrow();
         let separator_color = state.config.border_color.to_nscolor().CGColor();
         for (index, layer) in state.separator_layers.iter().enumerate() {
             // Calculate separator position (between segments)
@@ -784,7 +784,7 @@ impl GroupIndicatorNSView {
     }
 
     fn update_selected_layer(
-        &mut self,
+        &self,
         parent_layer: &CALayer,
         group_data: &GroupDisplayData,
         bounds: CGRect,
@@ -794,7 +794,7 @@ impl GroupIndicatorNSView {
         }
 
         let selected_layer = {
-            let mut state = self.view.ivars().borrow_mut();
+            let mut state = self.ivars().borrow_mut();
 
             if let Some(existing) = &state.selected_layer {
                 existing.clone()
@@ -812,7 +812,7 @@ impl GroupIndicatorNSView {
         selected_layer.setFrame(segment_frame);
 
         let selected_color = {
-            let state = self.view.ivars().borrow();
+            let state = self.ivars().borrow();
             if group_data.is_selected {
                 state.config.selected_color.to_nscolor()
             } else {
@@ -853,14 +853,14 @@ impl GroupIndicatorNSView {
 
     fn animate_selection_change(&self, _from_index: usize, to_index: usize) {
         let (selected_layer, group_data, bounds) = {
-            let state = self.view.ivars().borrow();
+            let state = self.ivars().borrow();
             let Some(selected_layer) = state.selected_layer.clone() else {
                 return;
             };
             let Some(group_data) = state.group_data.clone() else {
                 return;
             };
-            let bounds = self.view.bounds();
+            let bounds = self.bounds();
             (selected_layer, group_data, bounds)
         };
 
