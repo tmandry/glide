@@ -64,7 +64,14 @@ group_bars.corner_radius = 4
 # labeled. Hovering over a labeled tab shows a button to close its window.
 group_bars.show_titles = false
 group_bars.show_icons = false
+# Title colors of the selected tab and the other tabs.
 group_bars.text_color = "#1A1A1A"
+group_bars.inactive_text_color = "#1A1A1AB3"
+# Highlight of an unselected tab under the mouse.
+group_bars.hover_color = "#FFFFFF14"
+# The close button's ✕ and the square behind it.
+group_bars.close_color = "#1A1A1ACC"
+group_bars.close_background_color = "#1A1A1A26"
 
 # Enables the status icon.
 status_icon.enable = true

@@ -328,6 +328,10 @@ pub struct GroupBars {
     pub show_titles: bool,
     pub show_icons: bool,
     pub text_color: Color,
+    pub inactive_text_color: Color,
+    pub hover_color: Color,
+    pub close_color: Color,
+    pub close_background_color: Color,
 }
 
 #[derive(

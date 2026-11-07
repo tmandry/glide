@@ -126,6 +126,7 @@ pub struct IndicatorState {
     selected_layer: Option<Retained<CALayer>>,
     label_layers: Vec<LabelLayers>,
     close_button: Option<CloseButton>,
+    hover_layer: Option<Retained<CALayer>>,
     /// The segment under the mouse.
     hovered_index: Option<usize>,
     drag: Option<TabDrag>,
@@ -176,19 +177,13 @@ impl CloseButton {
         Self { square, strokes }
     }
 
-    fn update(&self, frame: CGRect, color: Color) {
+    fn update(&self, frame: CGRect, config: &GroupBars) {
         let side = frame.size.width;
         self.square.setFrame(frame);
         self.square.setCornerRadius(side * 0.25);
-        let background = Color {
-            a: (f64::from(color.a) * 0.15) as u8,
-            ..color
-        };
-        self.square.setBackgroundColor(Some(&background.to_nscolor().CGColor()));
-        let stroke_color = Color {
-            a: (f64::from(color.a) * 0.8) as u8,
-            ..color
-        };
+        self.square
+            .setBackgroundColor(Some(&config.close_background_color.to_nscolor().CGColor()));
+        let stroke_color = config.close_color;
         const STROKE_WIDTH: f64 = 1.5;
         for stroke in &self.strokes {
             stroke.setBounds(CGRect::new(CGPoint::ZERO, CGSize::new(side * 0.5, STROKE_WIDTH)));
@@ -411,7 +406,7 @@ impl ClickableIndicatorView {
         if state.hovered_index != hovered_index {
             state.hovered_index = hovered_index;
             drop(state);
-            self.update_close_layer();
+            self.update_hover_layers();
         }
     }
 
@@ -427,8 +422,8 @@ impl ClickableIndicatorView {
         )
     }
 
-    /// Shows the close button on the hovered tab of a labeled bar.
-    fn update_close_layer(&self) {
+    /// Highlights the hovered tab of a labeled bar and shows its close button.
+    fn update_hover_layers(&self) {
         let bounds = self.bounds();
         let Some(parent_layer) = self.layer() else { return };
         let mut state = self.ivars().borrow_mut();
@@ -452,11 +447,27 @@ impl ClickableIndicatorView {
                 state
                     .close_button
                     .get_or_insert_with(|| CloseButton::new(&parent_layer))
-                    .update(frame, state.config.text_color);
+                    .update(frame, &state.config);
+
+                // The selected tab is already highlighted.
+                let highlight = index != group_data.selected_index;
+                let hover_layer = state.hover_layer.get_or_insert_with(|| {
+                    let layer = CALayer::layer();
+                    // Below the labels, above the bar's background.
+                    parent_layer.insertSublayer_above(&layer, state.background_layer.as_deref());
+                    layer
+                });
+                hover_layer.setFrame(Self::calculate_segment_frame(group_data, bounds, index));
+                hover_layer
+                    .setBackgroundColor(Some(&state.config.hover_color.to_nscolor().CGColor()));
+                hover_layer.setHidden(!highlight);
             }
             None => {
                 if let Some(button) = &state.close_button {
                     button.square.setHidden(true);
+                }
+                if let Some(layer) = &state.hover_layer {
+                    layer.setHidden(true);
                 }
             }
         }
@@ -497,6 +508,7 @@ impl GroupIndicatorNSView {
             selected_layer: None,
             label_layers: Vec::new(),
             close_button: None,
+            hover_layer: None,
             hovered_index: None,
             click_callback: None,
             close_callback: None,
@@ -685,6 +697,7 @@ impl ClickableIndicatorView {
         state.selected_layer = None;
         state.label_layers.clear();
         state.close_button = None;
+        state.hover_layer = None;
     }
 
     /// Update the layer structure to match current group data
@@ -711,7 +724,7 @@ impl ClickableIndicatorView {
         self.update_separator_layers(&parent_layer, &group_data, bounds);
         self.update_selected_layer(&parent_layer, &group_data, bounds);
         self.update_label_layers(&parent_layer, &group_data, bounds);
-        self.update_close_layer();
+        self.update_hover_layers();
     }
 
     /// Lays out the icon and title of each tab. Only tabbed groups are labeled.
@@ -741,10 +754,7 @@ impl ClickableIndicatorView {
         let regular = NSFont::systemFontOfSize(font_size);
         let bold = NSFont::boldSystemFontOfSize(font_size);
         let text_color = state.config.text_color;
-        let dimmed_text_color = Color {
-            a: (f64::from(text_color.a) * 0.7) as u8,
-            ..text_color
-        };
+        let inactive_text_color = state.config.inactive_text_color;
 
         for (index, (layers, tab)) in state.label_layers.iter().zip(&group_data.tabs).enumerate() {
             let is_active = index == group_data.selected_index;
@@ -789,7 +799,7 @@ impl ClickableIndicatorView {
                 let color = if is_active {
                     text_color
                 } else {
-                    dimmed_text_color
+                    inactive_text_color
                 };
                 layers.title.setForegroundColor(Some(&color.to_nscolor().CGColor()));
                 layers.title.setContentsScale(scale);
