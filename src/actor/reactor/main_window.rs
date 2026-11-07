@@ -84,6 +84,7 @@ impl MainWindowTracker {
             | Event::WindowCreated(..)
             | Event::WindowBecameVisible(..)
             | Event::WindowDestroyed(..)
+            | Event::WindowTitleChanged(..)
             | Event::WindowFrameChanged(..)
             | Event::ScreenParametersChanged { .. }
             | Event::SpaceChanged(..)

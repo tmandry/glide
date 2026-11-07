@@ -151,6 +151,10 @@ pub enum Event {
     // TODO: Consider replacing with WindowsOnScreenUpdated.
     WindowBecameVisible(WindowId),
     WindowDestroyed(WindowId),
+    WindowTitleChanged(
+        WindowId,
+        #[serde(serialize_with = "redact::expose_secret")] Secret<String>,
+    ),
     /// Window was moved or resized.
     ///
     /// We check if the mouse is held down to detect an entered drag. We can't
@@ -342,7 +346,6 @@ pub struct TransactionId(u32);
 
 #[derive(Debug)]
 struct WindowState {
-    #[allow(unused)]
     title: Secret<String>,
     /// The last known frame of the window. Always includes the last write.
     ///
@@ -640,6 +643,11 @@ impl Reactor {
                 self.frame_attempts.remove(&wid);
                 //animation_focus_wid = self.window_order.last().cloned();
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            }
+            Event::WindowTitleChanged(wid, title) => {
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.title = title;
+                }
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if mouse_state == Some(MouseState::Up) {
