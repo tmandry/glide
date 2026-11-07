@@ -23,7 +23,8 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_quartz_core::{
-    CALayer, CATextLayer, kCAAlignmentCenter, kCAGravityResizeAspect, kCATruncationEnd,
+    CALayer, CATextLayer, CATransaction, kCAAlignmentCenter, kCAGravityResizeAspect,
+    kCATruncationEnd,
 };
 use redact::Secret;
 
@@ -68,6 +69,19 @@ pub struct TabLabel {
 }
 
 pub type SegmentClickCallback = Rc<dyn Fn(usize)>;
+/// Called with the old and new index of a tab dragged to a new position.
+pub type TabMoveCallback = Rc<dyn Fn(usize, usize)>;
+
+/// How far the mouse must move before a press on a tab becomes a drag.
+const DRAG_THRESHOLD: f64 = 8.0;
+
+/// A tab being pressed or dragged.
+struct TabDrag {
+    index: usize,
+    start_x: f64,
+    /// How far the tab has been dragged, once past the threshold.
+    offset: Option<f64>,
+}
 
 const LABEL_PADDING: f64 = 8.0;
 const LABEL_SPACING: f64 = 5.0;
@@ -114,8 +128,26 @@ pub struct IndicatorState {
     close_layer: Option<Retained<CATextLayer>>,
     /// The segment under the mouse.
     hovered_index: Option<usize>,
+    drag: Option<TabDrag>,
     click_callback: Option<SegmentClickCallback>,
     close_callback: Option<SegmentClickCallback>,
+    move_callback: Option<TabMoveCallback>,
+}
+
+impl IndicatorState {
+    /// How far the tab at `index` is displaced by a drag.
+    fn drag_offset(&self, index: usize) -> f64 {
+        match &self.drag {
+            Some(TabDrag {
+                index: i, offset: Some(offset), ..
+            }) if *i == index => *offset,
+            _ => 0.0,
+        }
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.drag.as_ref().is_some_and(|drag| drag.offset.is_some())
+    }
 }
 
 struct LabelLayers {
@@ -175,11 +207,60 @@ objc2::define_class!(
             } else {
                 state.click_callback.clone()
             };
-            let Some(callback) = callback else { return };
+            let can_drag = !on_close_button && group_data.group_kind == GroupKind::Horizontal;
 
             // Drop the active borrow before invoking the callback.
             drop(state);
-            callback(segment_index);
+            if can_drag {
+                self.ivars().borrow_mut().drag = Some(TabDrag {
+                    index: segment_index,
+                    start_x: location.x,
+                    offset: None,
+                });
+            }
+            if let Some(callback) = callback {
+                callback(segment_index);
+            }
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            let location = self.convertPoint_fromView(event.locationInWindow(), None);
+            {
+                let mut state = self.ivars().borrow_mut();
+                let Some(drag) = &mut state.drag else { return };
+                let offset = location.x - drag.start_x;
+                if drag.offset.is_none() && offset.abs() < DRAG_THRESHOLD {
+                    return;
+                }
+                drag.offset = Some(offset);
+            }
+            // Track the mouse instead of animating toward it.
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            self.update_layers();
+            CATransaction::commit();
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            let location = self.convertPoint_fromView(event.locationInWindow(), None);
+            let mut state = self.ivars().borrow_mut();
+            let Some(drag) = state.drag.take() else { return };
+            let (Some(_), Some(group_data)) = (drag.offset, &state.group_data) else { return };
+            let count = group_data.total_count;
+            let bounds = self.bounds();
+            let to = ((location.x / bounds.size.width) * count as f64)
+                .floor()
+                .clamp(0.0, count.saturating_sub(1) as f64) as usize;
+            let callback = state.move_callback.clone();
+            drop(state);
+            self.update_layers();
+            if to != drag.index
+                && let Some(callback) = callback
+            {
+                callback(drag.index, to);
+            }
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -309,7 +390,9 @@ impl ClickableIndicatorView {
                 .as_ref()
                 .zip(state.hovered_index)
                 .filter(|(group_data, index)| {
-                    shows_labels(&state.config, group_data) && *index < group_data.total_count
+                    shows_labels(&state.config, group_data)
+                        && *index < group_data.total_count
+                        && !state.is_dragging()
                 });
         let Some((group_data, index)) = hovered else {
             if let Some(layer) = &state.close_layer {
@@ -384,6 +467,8 @@ impl GroupIndicatorNSView {
             hovered_index: None,
             click_callback: None,
             close_callback: None,
+            drag: None,
+            move_callback: None,
         };
         let view = ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(state));
         // The view fills `root`, which takes `frame`.
@@ -459,6 +544,11 @@ impl GroupIndicatorNSView {
     /// Called when the close button of a tab is clicked.
     pub fn set_close_callback(&mut self, callback: SegmentClickCallback) {
         self.view.ivars().borrow_mut().close_callback = Some(callback);
+    }
+
+    /// Called when a tab is dragged to a new position.
+    pub fn set_move_callback(&mut self, callback: TabMoveCallback) {
+        self.view.ivars().borrow_mut().move_callback = Some(callback);
     }
 
     pub fn group_data(&self) -> Option<GroupDisplayData> {
@@ -625,7 +715,12 @@ impl ClickableIndicatorView {
 
         for (index, (layers, tab)) in state.label_layers.iter().zip(&group_data.tabs).enumerate() {
             let is_active = index == group_data.selected_index;
-            let segment = Self::calculate_segment_frame(group_data, bounds, index);
+            let mut segment = Self::calculate_segment_frame(group_data, bounds, index);
+            let offset = state.drag_offset(index);
+            segment.origin.x += offset;
+            let z_position = if offset == 0.0 { 0.0 } else { 1.0 };
+            layers.icon.setZPosition(z_position);
+            layers.title.setZPosition(z_position);
             let min_x = segment.origin.x + LABEL_PADDING;
             let max_x = segment.max().x - LABEL_PADDING;
 
@@ -806,8 +901,9 @@ impl ClickableIndicatorView {
             }
         };
 
-        let segment_frame =
+        let mut segment_frame =
             Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
+        segment_frame.origin.x += self.ivars().borrow().drag_offset(group_data.selected_index);
 
         selected_layer.setFrame(segment_frame);
 
@@ -864,7 +960,8 @@ impl ClickableIndicatorView {
             (selected_layer, group_data, bounds)
         };
 
-        let to_frame = Self::calculate_segment_frame(&group_data, bounds, to_index);
+        let mut to_frame = Self::calculate_segment_frame(&group_data, bounds, to_index);
+        to_frame.origin.x += self.ivars().borrow().drag_offset(to_index);
 
         selected_layer.setFrame(to_frame);
     }

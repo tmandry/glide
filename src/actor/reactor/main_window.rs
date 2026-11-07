@@ -92,6 +92,7 @@ impl MainWindowTracker {
             | Event::MouseMovedOverWindow(..)
             | Event::GroupBarTabClicked(..)
             | Event::GroupBarTabCloseClicked(..)
+            | Event::GroupBarTabMoved { .. }
             | Event::RaiseCompleted { .. }
             | Event::RaiseRequestFailed { .. }
             | Event::RaiseTimeout { .. }

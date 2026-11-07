@@ -238,6 +238,11 @@ impl GroupBars {
             };
             view.set_click_callback(tab_callback(reactor::Event::GroupBarTabClicked));
             view.set_close_callback(tab_callback(reactor::Event::GroupBarTabCloseClicked));
+            let events_tx = self.events_tx.clone();
+            view.set_move_callback(Rc::new(move |from, to| {
+                debug!(?node_id, from, to, "Group bar tab moved");
+                events_tx.send(reactor::Event::GroupBarTabMoved { group: node_id, from, to });
+            }));
             let window = make_indicator_window(self.mtm);
             window.setContentView(Some(view.view()));
             Indicator { view, window, windows }

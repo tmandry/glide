@@ -42,6 +42,7 @@ use crate::actor::{group_bars, space_manager, status, window_server, wm_controll
 use crate::collections::{HashMap, HashSet};
 use crate::config::Config;
 use crate::log::{self, MetricsCommand};
+use crate::model::NodeId;
 use crate::sys::app::pid_t;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -189,6 +190,12 @@ pub enum Event {
     GroupBarTabClicked(WindowId),
     /// The close button of a group bar tab was clicked.
     GroupBarTabCloseClicked(WindowId),
+    /// A group bar tab was dragged from index `from` to index `to`.
+    GroupBarTabMoved {
+        group: NodeId,
+        from: usize,
+        to: usize,
+    },
 
     /// A raise request completed. Used by the raise manager to track when
     /// all raise requests in a sequence have finished.
@@ -951,6 +958,9 @@ impl Reactor {
                         ..Default::default()
                     },
                 );
+            }
+            Event::GroupBarTabMoved { group, from, to } => {
+                self.send_layout_event(LayoutEvent::GroupChildMoved { group, from, to });
             }
             Event::GroupBarTabCloseClicked(wid) => {
                 if self.windows.contains_key(&wid)
