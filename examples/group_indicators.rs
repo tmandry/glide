@@ -188,6 +188,9 @@ fn create_content_view(mtm: MainThreadMarker) -> (Retained<NSView>, IndicatorDem
     indicator_rc.borrow_mut().set_click_callback(Rc::new(move |segment_index| {
         indicator_rc_clone.borrow_mut().click_segment(segment_index);
     }));
+    indicator_rc.borrow_mut().set_close_callback(Rc::new(move |segment_index| {
+        println!("Close button of tab {segment_index} clicked");
+    }));
     content_view.addSubview(indicator_rc.borrow().view());
     demo.add_indicator(indicator_rc);
     y_position -= 60.0;

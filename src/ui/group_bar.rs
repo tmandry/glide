@@ -14,11 +14,11 @@ use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{DeclaredClass, MainThreadOnly, msg_send};
+use objc2::{AnyThread, DeclaredClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSEvent, NSFont, NSGlassEffectView, NSImage, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindowOrderingMode,
+    NSAutoresizingMaskOptions, NSColor, NSEvent, NSFont, NSGlassEffectView, NSImage,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
 };
 use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSString};
@@ -69,6 +69,39 @@ pub struct TabLabel {
 
 pub type SegmentClickCallback = Rc<dyn Fn(usize)>;
 
+const LABEL_PADDING: f64 = 8.0;
+const LABEL_SPACING: f64 = 5.0;
+
+/// Sizes of the label elements for a bar of the given bounds.
+struct LabelMetrics {
+    font_size: f64,
+    /// Side of the square icon and close button.
+    side: f64,
+    line_height: f64,
+}
+
+impl LabelMetrics {
+    fn new(bounds: CGRect) -> Self {
+        let font_size = (bounds.size.height * 0.5).clamp(8.0, 14.0);
+        Self {
+            font_size,
+            side: (font_size + 3.0).min(bounds.size.height),
+            line_height: (font_size * 1.3).min(bounds.size.height),
+        }
+    }
+}
+
+fn shows_labels(config: &GroupBars, group_data: &GroupDisplayData) -> bool {
+    (config.show_titles || config.show_icons) && group_data.group_kind == GroupKind::Horizontal
+}
+
+/// Sets the font of a text layer.
+fn set_font(layer: &CATextLayer, font: &NSFont) {
+    // SAFETY: NSFont is toll-free bridged with CTFont, which this property
+    // accepts.
+    unsafe { layer.setFont(Some(&*(font as *const NSFont as *const CFType))) };
+}
+
 /// Inner state for the indicator view
 pub struct IndicatorState {
     config: GroupBars,
@@ -77,7 +110,11 @@ pub struct IndicatorState {
     separator_layers: Vec<Retained<CALayer>>,
     selected_layer: Option<Retained<CALayer>>,
     label_layers: Vec<LabelLayers>,
+    close_layer: Option<Retained<CATextLayer>>,
+    /// The segment under the mouse.
+    hovered_index: Option<usize>,
     click_callback: Option<SegmentClickCallback>,
+    close_callback: Option<SegmentClickCallback>,
 }
 
 struct LabelLayers {
@@ -122,18 +159,43 @@ objc2::define_class!(
 
             let state = self.ivars().borrow();
             let Some(group_data) = &state.group_data else { return };
+            let bounds = self.bounds();
             let Some(segment_index) = Self::segment_at_point_static(
                 location,
                 group_data,
-                &self.bounds(),
+                &bounds,
             ) else {
                 return
             };
-            let Some(callback) = state.click_callback.clone() else { return };
+            let on_close_button = shows_labels(&state.config, group_data)
+                && Self::close_button_frame(group_data, bounds, segment_index).contains(location);
+            let callback = if on_close_button {
+                state.close_callback.clone()
+            } else {
+                state.click_callback.clone()
+            };
+            let Some(callback) = callback else { return };
 
             // Drop the active borrow before invoking the callback.
             drop(state);
             callback(segment_index);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            let location = self.convertPoint_fromView(event.locationInWindow(), None);
+            let hovered_index = {
+                let state = self.ivars().borrow();
+                state.group_data.as_ref().and_then(|group_data| {
+                    Self::segment_at_point_static(location, group_data, &self.bounds())
+                })
+            };
+            self.set_hovered_index(hovered_index);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.set_hovered_index(None);
         }
     }
 );
@@ -214,6 +276,78 @@ fn corner_radius(config: &GroupBars, bounds: CGRect) -> f64 {
 }
 
 impl ClickableIndicatorView {
+    fn set_hovered_index(&self, hovered_index: Option<usize>) {
+        let mut state = self.ivars().borrow_mut();
+        if state.hovered_index != hovered_index {
+            state.hovered_index = hovered_index;
+            drop(state);
+            self.update_close_layer();
+        }
+    }
+
+    fn close_button_frame(group_data: &GroupDisplayData, bounds: CGRect, index: usize) -> CGRect {
+        let segment = GroupIndicatorNSView::calculate_segment_frame(group_data, bounds, index);
+        let side = LabelMetrics::new(bounds).side;
+        CGRect::new(
+            CGPoint::new(
+                segment.max().x - LABEL_PADDING - side,
+                segment.mid().y - side / 2.0,
+            ),
+            CGSize::new(side, side),
+        )
+    }
+
+    /// Shows the close button on the hovered tab of a labeled bar.
+    fn update_close_layer(&self) {
+        let bounds = self.bounds();
+        let scale = self.window().map_or(2.0, |w| w.backingScaleFactor());
+        let Some(parent_layer) = self.layer() else { return };
+        let mut state = self.ivars().borrow_mut();
+        let state = &mut *state;
+        let hovered =
+            state
+                .group_data
+                .as_ref()
+                .zip(state.hovered_index)
+                .filter(|(group_data, index)| {
+                    shows_labels(&state.config, group_data) && *index < group_data.total_count
+                });
+        let Some((group_data, index)) = hovered else {
+            if let Some(layer) = &state.close_layer {
+                layer.setHidden(true);
+            }
+            return;
+        };
+
+        let layer = state.close_layer.get_or_insert_with(|| {
+            let layer = CATextLayer::layer();
+            layer.setAlignmentMode(unsafe { kCAAlignmentCenter });
+            // SAFETY: NSString is toll-free bridged with CFString, which this
+            // property accepts.
+            unsafe { layer.setString(Some(&NSString::from_str("✕"))) };
+            parent_layer.addSublayer(&layer);
+            layer
+        });
+        let metrics = LabelMetrics::new(bounds);
+        let frame = Self::close_button_frame(group_data, bounds, index);
+        // Center the glyph's line box on the button.
+        layer.setFrame(CGRect::new(
+            CGPoint::new(frame.origin.x, frame.mid().y - metrics.line_height / 2.0),
+            CGSize::new(frame.size.width, metrics.line_height),
+        ));
+        let font_size = (metrics.font_size - 2.0).max(7.0);
+        set_font(layer, &NSFont::boldSystemFontOfSize(font_size));
+        layer.setFontSize(font_size);
+        let color = state.config.text_color;
+        let color = Color {
+            a: (f64::from(color.a) * 0.8) as u8,
+            ..color
+        };
+        layer.setForegroundColor(Some(&color.to_nscolor().CGColor()));
+        layer.setContentsScale(scale);
+        layer.setHidden(false);
+    }
+
     fn segment_at_point_static(
         point: CGPoint,
         group_data: &GroupDisplayData,
@@ -246,7 +380,10 @@ impl GroupIndicatorNSView {
             separator_layers: Vec::new(),
             selected_layer: None,
             label_layers: Vec::new(),
+            close_layer: None,
+            hovered_index: None,
             click_callback: None,
+            close_callback: None,
         };
         let view = ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(state));
         // The view fills `root`, which takes `frame`.
@@ -259,6 +396,21 @@ impl GroupIndicatorNSView {
 
         // SAFETY: The mask must not have a superlayer; we use a brand new layer.
         unsafe { parent_layer.setMask(Some(&CALayer::layer())) };
+
+        // Glide is rarely the active app, so track the mouse regardless.
+        let tracking_area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                CGRect::ZERO,
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&view),
+                None,
+            )
+        };
+        view.addTrackingArea(&tracking_area);
 
         let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
         fill_superview(&view);
@@ -330,6 +482,11 @@ impl GroupIndicatorNSView {
 
     pub fn set_click_callback(&mut self, callback: SegmentClickCallback) {
         self.view.ivars().borrow_mut().click_callback = Some(callback);
+    }
+
+    /// Called when the close button of a tab is clicked.
+    pub fn set_close_callback(&mut self, callback: SegmentClickCallback) {
+        self.view.ivars().borrow_mut().close_callback = Some(callback);
     }
 
     pub fn group_data(&self) -> Option<GroupDisplayData> {
@@ -404,6 +561,7 @@ impl GroupIndicatorNSView {
         state.separator_layers.clear();
         state.selected_layer = None;
         state.label_layers.clear();
+        state.close_layer = None;
     }
 
     /// Update the layer structure to match current group data
@@ -430,6 +588,7 @@ impl GroupIndicatorNSView {
         self.update_separator_layers(&parent_layer, &group_data, bounds);
         self.update_selected_layer(&parent_layer, &group_data, bounds);
         self.update_label_layers(&parent_layer, &group_data, bounds);
+        self.view.update_close_layer();
     }
 
     /// Lays out the icon and title of each tab. Only tabbed groups are labeled.
@@ -439,19 +598,15 @@ impl GroupIndicatorNSView {
         group_data: &GroupDisplayData,
         bounds: CGRect,
     ) {
-        const PADDING: f64 = 8.0;
-        const ICON_SPACING: f64 = 5.0;
-
         let scale = self.view.window().map_or(2.0, |w| w.backingScaleFactor());
         let mut state = self.view.ivars().borrow_mut();
         let show_titles = state.config.show_titles;
         let show_icons = state.config.show_icons;
-        let wanted =
-            if (show_titles || show_icons) && group_data.group_kind == GroupKind::Horizontal {
-                group_data.tabs.len().min(group_data.total_count)
-            } else {
-                0
-            };
+        let wanted = if shows_labels(&state.config, group_data) {
+            group_data.tabs.len().min(group_data.total_count)
+        } else {
+            0
+        };
         while state.label_layers.len() > wanted {
             state.label_layers.pop().unwrap().remove();
         }
@@ -459,9 +614,7 @@ impl GroupIndicatorNSView {
             state.label_layers.push(LabelLayers::new(parent_layer));
         }
 
-        let font_size = (bounds.size.height * 0.5).clamp(8.0, 14.0);
-        let icon_side = (font_size + 3.0).min(bounds.size.height);
-        let line_height = (font_size * 1.3).min(bounds.size.height);
+        let LabelMetrics { font_size, side, line_height } = LabelMetrics::new(bounds);
         let regular = NSFont::systemFontOfSize(font_size);
         let bold = NSFont::boldSystemFontOfSize(font_size);
         let text_color = state.config.text_color;
@@ -473,40 +626,37 @@ impl GroupIndicatorNSView {
         for (index, (layers, tab)) in state.label_layers.iter().zip(&group_data.tabs).enumerate() {
             let is_active = index == group_data.selected_index;
             let segment = Self::calculate_segment_frame(group_data, bounds, index);
-            let mut x = segment.origin.x + PADDING;
-            let max_x = segment.max().x - PADDING;
+            let min_x = segment.origin.x + LABEL_PADDING;
+            let max_x = segment.max().x - LABEL_PADDING;
 
             let icon = tab.icon.as_ref().filter(|_| show_icons);
             layers.icon.setHidden(icon.is_none());
             if let Some(icon) = icon {
                 layers.icon.setFrame(CGRect::new(
-                    CGPoint::new(x, segment.mid().y - icon_side / 2.0),
-                    CGSize::new(icon_side, icon_side),
+                    CGPoint::new(min_x, segment.mid().y - side / 2.0),
+                    CGSize::new(side, side),
                 ));
                 // SAFETY: CALayer accepts an NSImage as its contents.
                 unsafe { layers.icon.setContents(Some(icon.as_ref() as &AnyObject)) };
                 layers.icon.setOpacity(if is_active { 1.0 } else { 0.7 });
-                x += icon_side + ICON_SPACING;
             }
 
             layers.title.setHidden(!show_titles);
             if show_titles {
-                // Leave the same room on the right as the icon takes on the
-                // left, so the title stays centered in the segment.
-                let right_inset = x - (segment.origin.x + PADDING);
-                let width = (max_x - right_inset - x).max(0.0);
+                // The icon sits to the left of the title and the close button
+                // to its right; reserving the same room on both sides keeps the
+                // title centered in the segment.
+                let reserved = side + LABEL_SPACING;
+                let width = (max_x - min_x - 2.0 * reserved).max(0.0);
                 layers.title.setFrame(CGRect::new(
-                    CGPoint::new(x, segment.mid().y - line_height / 2.0),
+                    CGPoint::new(min_x + reserved, segment.mid().y - line_height / 2.0),
                     CGSize::new(width, line_height),
                 ));
                 let title = NSString::from_str(tab.title.expose_secret());
-                let font = if is_active { &bold } else { &regular };
-                // SAFETY: NSString and NSFont are toll-free bridged with
-                // CFString and CTFont, which these properties accept.
-                unsafe {
-                    layers.title.setString(Some(&title));
-                    layers.title.setFont(Some(&*(Retained::as_ptr(font) as *const CFType)));
-                }
+                // SAFETY: NSString is toll-free bridged with CFString, which
+                // this property accepts.
+                unsafe { layers.title.setString(Some(&title)) };
+                set_font(&layers.title, if is_active { &bold } else { &regular });
                 layers.title.setFontSize(font_size);
                 let color = if is_active {
                     text_color

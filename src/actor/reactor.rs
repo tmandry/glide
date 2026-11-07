@@ -187,6 +187,8 @@ pub enum Event {
 
     /// A tab in a group bar was clicked. The window is the one the tab shows.
     GroupBarTabClicked(WindowId),
+    /// The close button of a group bar tab was clicked.
+    GroupBarTabCloseClicked(WindowId),
 
     /// A raise request completed. Used by the raise manager to track when
     /// all raise requests in a sequence have finished.
@@ -949,6 +951,13 @@ impl Reactor {
                         ..Default::default()
                     },
                 );
+            }
+            Event::GroupBarTabCloseClicked(wid) => {
+                if self.windows.contains_key(&wid)
+                    && let Some(app) = self.apps.get(&wid.pid)
+                {
+                    _ = app.handle.send(Request::CloseWindow(wid));
+                }
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 let msg = raise::Event::RaiseCompleted { window_id, sequence_id };
@@ -3610,6 +3619,35 @@ pub mod tests {
             raise_manager_rx.try_recv().is_err(),
             "clicking a tab for an unknown window should do nothing"
         );
+    }
+
+    #[test]
+    fn it_closes_the_window_of_a_group_bar_tab() {
+        use Event::*;
+
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.handle_event(ScreenParametersChanged {
+            frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            spaces: vec![Some(SpaceId::new(1))],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_events(apps.make_app(1, make_windows(2)));
+        reactor.handle_events(apps.simulate_events());
+
+        reactor.handle_event(GroupBarTabCloseClicked(WindowId::new(1, 2)));
+        reactor.handle_event(GroupBarTabCloseClicked(WindowId::new(1, 3)));
+        let closed = apps
+            .requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::CloseWindow(wid) => Some(wid),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(closed, [WindowId::new(1, 2)]);
     }
 
     #[test]

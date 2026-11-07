@@ -287,6 +287,11 @@ impl Apps {
                         None,
                     ));
                 }
+                Request::CloseWindow(wid) => {
+                    if self.windows.remove(&wid).is_some() {
+                        events.push(Event::WindowDestroyed(wid));
+                    }
+                }
                 Request::Raise(..) => todo!(),
                 Request::WindowDestroyed(..) => todo!(),
             }

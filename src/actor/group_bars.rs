@@ -29,7 +29,9 @@ use crate::model::{ContainerKind, GroupBarInfo, NodeId};
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::WindowId;
-use crate::ui::group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind, TabLabel};
+use crate::ui::group_bar::{
+    GroupDisplayData, GroupIndicatorNSView, GroupKind, SegmentClickCallback, TabLabel,
+};
 
 #[derive(Debug)]
 pub enum Event {
@@ -220,18 +222,22 @@ impl GroupBars {
             let mut view =
                 GroupIndicatorNSView::new(CGRect::ZERO, &self.config.settings.group_bars, self.mtm);
             let windows = Rc::new(RefCell::new(Vec::new()));
-            let events_tx = self.events_tx.clone();
             let node_id = group.node_id;
-            view.set_click_callback(Rc::new({
+            // Sends `event` with the window of the clicked tab.
+            let tab_callback = |event: fn(WindowId) -> reactor::Event| -> SegmentClickCallback {
                 let windows = windows.clone();
-                move |segment_index| {
+                let events_tx = self.events_tx.clone();
+                Rc::new(move |segment_index| {
                     let Some(&wid) = windows.borrow().get(segment_index) else {
                         return;
                     };
-                    debug!(?node_id, segment_index, ?wid, "Group bar tab clicked");
-                    events_tx.send(reactor::Event::GroupBarTabClicked(wid));
-                }
-            }));
+                    let event = event(wid);
+                    debug!(?node_id, segment_index, ?event, "Group bar tab clicked");
+                    events_tx.send(event);
+                })
+            };
+            view.set_click_callback(tab_callback(reactor::Event::GroupBarTabClicked));
+            view.set_close_callback(tab_callback(reactor::Event::GroupBarTabCloseClicked));
             let window = make_indicator_window(self.mtm);
             window.setContentView(Some(view.view()));
             Indicator { view, window, windows }

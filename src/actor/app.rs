@@ -116,6 +116,9 @@ pub enum Request {
     /// marked `Quiet::Yes` automatically.
     Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
 
+    /// Close the window by pressing its close button, as if the user clicked it.
+    CloseWindow(WindowId),
+
     /// Sent by WindowServer actor when a window is destroyed.
     /// See [`actor::window_server::Event::RegisterWindow`].
     WindowDestroyed(WindowId),
@@ -663,6 +666,10 @@ impl State {
                         RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet),
                     ))
                     .unwrap();
+            }
+            &mut Request::CloseWindow(wid) => {
+                let window = self.window(wid)?;
+                trace("close_button", &window.elem, || window.elem.close_button())?.press()?;
             }
             &mut Request::WindowDestroyed(wid) => {
                 self.on_window_destroyed(wid);
