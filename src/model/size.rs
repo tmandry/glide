@@ -105,8 +105,9 @@ impl Direction {
 pub struct GroupBarInfo {
     pub node_id: NodeId,
     pub container_kind: ContainerKind,
-    /// Total number of windows in the group
-    pub total_count: usize,
+    /// The window each child shows: the child itself, or the window most
+    /// recently selected within it.
+    pub windows: Vec<WindowId>,
     /// Index of the currently selected window
     pub selected_index: usize,
     /// Whether this group should be visible
@@ -419,6 +420,20 @@ impl<'a, 'out> Visitor<'a, 'out> {
         self.target_rect
     }
 
+    /// The window shown for `node`: its own, or that of its last selected
+    /// descendant.
+    fn shown_window(&self, mut node: NodeId) -> Option<WindowId> {
+        loop {
+            if let Some(wid) = self.window.at(node) {
+                return Some(wid);
+            }
+            node = self
+                .selection
+                .last_selection(self.map, node)
+                .or_else(|| node.first_child(self.map))?;
+        }
+    }
+
     fn visit_node(
         &mut self,
         node: NodeId,
@@ -463,13 +478,13 @@ impl<'a, 'out> Visitor<'a, 'out> {
 
                 let selected_child = self.selection.last_selection(self.map, node);
                 let mut selected_index = 0;
-                let mut num_children = 0;
+                let mut windows = Vec::new();
                 for (index, child) in node.children(self.map).enumerate() {
                     let selected = selected_child == Some(child);
                     if selected {
                         selected_index = index;
                     }
-                    num_children += 1;
+                    windows.extend(self.shown_window(child));
 
                     self.visit_node(
                         child,
@@ -480,7 +495,7 @@ impl<'a, 'out> Visitor<'a, 'out> {
                     );
                 }
 
-                debug_assert!(num_children > 0, "empty group {node:?}");
+                debug_assert!(!windows.is_empty(), "empty group {node:?}");
                 if let Some(groups) = self.groups.as_deref_mut()
                     && let Some(indicator_frame) = indicator_frame
                 {
@@ -488,7 +503,7 @@ impl<'a, 'out> Visitor<'a, 'out> {
                         node_id: node,
                         container_kind: info.kind,
                         indicator_frame,
-                        total_count: num_children,
+                        windows,
                         selected_index,
                         is_visible,
                         is_selected,
@@ -725,7 +740,14 @@ mod tests {
         let group = &groups[0];
         assert_eq!(group.node_id, tabbed_group);
         assert_eq!(group.container_kind, ContainerKind::Tabbed);
-        assert_eq!(group.total_count, 3);
+        assert_eq!(
+            group.windows,
+            [
+                WindowId::new(2, 1),
+                WindowId::new(2, 2),
+                WindowId::new(2, 3)
+            ]
+        );
         assert_eq!(group.selected_index, 0); // First child selected by default
         assert_eq!(group.is_visible, true); // Root level group is visible
     }
@@ -752,7 +774,7 @@ mod tests {
         let group = &groups[0];
         assert_eq!(group.node_id, stacked_group);
         assert_eq!(group.container_kind, ContainerKind::Stacked);
-        assert_eq!(group.total_count, 2);
+        assert_eq!(group.windows, [WindowId::new(1, 1), WindowId::new(1, 2)]);
         assert_eq!(group.selected_index, 1);
         assert_eq!(group.is_visible, true);
     }
@@ -785,12 +807,13 @@ mod tests {
 
         // Outer group should be visible
         assert_eq!(outer.is_visible, true);
-        assert_eq!(outer.total_count, 2); // window + inner group
+        // The inner group's tab shows its first window, since none was selected.
+        assert_eq!(outer.windows, [WindowId::new(1, 1), WindowId::new(2, 1)]);
         assert_eq!(outer.selected_index, 0); // First tab selected
 
         // Inner group should not be visible (not the selected tab)
         assert_eq!(inner.is_visible, false);
-        assert_eq!(inner.total_count, 2);
+        assert_eq!(inner.windows, [WindowId::new(2, 1), WindowId::new(2, 2)]);
     }
 
     #[test]

@@ -182,7 +182,7 @@ impl GroupBars {
         }
         indicator.view.update(GroupDisplayData {
             group_kind,
-            total_count: group.total_count,
+            total_count: group.windows.len(),
             selected_index: group.selected_index,
             frame: group.indicator_frame,
             is_selected: group.is_selected,
