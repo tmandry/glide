@@ -36,6 +36,10 @@ default_layout_kind = "tree"
 
 # Visual bars for window groups (tabbed/stacked containers).
 group_bars.enable = true
+# "solid" paints the colors below. "glass" draws the bar with the system's
+# Liquid Glass material (a translucent blur on macOS before 26), tinted by the
+# colors below; colors with some transparency work best.
+group_bars.style = "solid"
 group_bars.thickness = 6
 group_bars.horizontal_placement = "top"
 group_bars.vertical_placement = "right"

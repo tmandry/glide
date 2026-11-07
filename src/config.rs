@@ -313,6 +313,7 @@ pub struct StatusIconExperimental {
 #[serde(deny_unknown_fields)]
 pub struct GroupBars {
     pub enable: bool,
+    pub style: GroupBarStyle,
     pub thickness: f64,
     pub horizontal_placement: HorizontalPlacement,
     pub vertical_placement: VerticalPlacement,
@@ -352,6 +353,13 @@ impl std::fmt::Display for Color {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#{}", hex::encode_upper([self.r, self.g, self.b, self.a]))
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupBarStyle {
+    Solid,
+    Glass,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
