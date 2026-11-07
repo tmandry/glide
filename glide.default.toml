@@ -56,6 +56,9 @@ group_bars.inactive_background_color = "#B3B3B3"
 group_bars.border_color = "#4D4D4D"
 # Width of the bar's border (in points).
 group_bars.border_width = 0.5
+# Radius of the bar's rounded ends (in points). Bars are never rounded beyond
+# half their thickness.
+group_bars.corner_radius = 4
 
 # Enables the status icon.
 status_icon.enable = true

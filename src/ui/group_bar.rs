@@ -162,10 +162,11 @@ fn fill_superview(view: &NSView) {
     );
 }
 
-/// This seems to look the best for a range of sizes.
-fn corner_radius(bounds: CGRect) -> f64 {
-    const RADIUS_RATIO: f64 = 2.0 / 3.0;
-    RADIUS_RATIO * f64::min(bounds.size.width, bounds.size.height)
+/// The configured radius, limited to what the bar's shape allows.
+fn corner_radius(config: &GroupBars, bounds: CGRect) -> f64 {
+    config
+        .corner_radius
+        .clamp(0.0, f64::min(bounds.size.width, bounds.size.height) / 2.0)
 }
 
 impl ClickableIndicatorView {
@@ -436,7 +437,9 @@ impl GroupIndicatorNSView {
             state.config.inactive_background_color
         };
         let paint_background = match &self.backdrop {
-            Some(backdrop) => backdrop.set_appearance(corner_radius(bounds), &bg_color),
+            Some(backdrop) => {
+                backdrop.set_appearance(corner_radius(&state.config, bounds), &bg_color)
+            }
             None => true,
         };
         let border_color = state.config.border_color.to_nscolor();
@@ -449,7 +452,7 @@ impl GroupIndicatorNSView {
         // Also update the mask here.
         if let Some(mask) = parent_layer.mask() {
             mask.setFrame(bounds);
-            mask.setCornerRadius(corner_radius(bounds));
+            mask.setCornerRadius(corner_radius(&state.config, bounds));
             mask.setBackgroundColor(Some(&NSColor::whiteColor().CGColor()));
         }
     }
