@@ -73,6 +73,12 @@ objc2::define_class!(
     pub struct ClickableIndicatorView;
 
     impl ClickableIndicatorView {
+        // Take the click that activates the window too, so one click selects a tab.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
