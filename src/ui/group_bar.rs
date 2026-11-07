@@ -20,7 +20,7 @@ use objc2_app_kit::{
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
 };
-use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFType, CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_quartz_core::{
     CALayer, CATextLayer, CATransaction, kCAAlignmentCenter, kCAGravityResizeAspect,
@@ -125,7 +125,7 @@ pub struct IndicatorState {
     separator_layers: Vec<Retained<CALayer>>,
     selected_layer: Option<Retained<CALayer>>,
     label_layers: Vec<LabelLayers>,
-    close_layer: Option<Retained<CATextLayer>>,
+    close_button: Option<CloseButton>,
     /// The segment under the mouse.
     hovered_index: Option<usize>,
     drag: Option<TabDrag>,
@@ -147,6 +147,56 @@ impl IndicatorState {
 
     fn is_dragging(&self) -> bool {
         self.drag.as_ref().is_some_and(|drag| drag.offset.is_some())
+    }
+}
+
+/// A square with an ✕ drawn from two crossed strokes.
+struct CloseButton {
+    square: Retained<CALayer>,
+    strokes: [Retained<CALayer>; 2],
+}
+
+impl CloseButton {
+    fn new(parent_layer: &CALayer) -> Self {
+        let square = CALayer::layer();
+        let strokes = [CALayer::layer(), CALayer::layer()];
+        for (stroke, angle) in strokes.iter().zip([1.0, -1.0f64]) {
+            let (sin, cos) = (angle * std::f64::consts::FRAC_PI_4).sin_cos();
+            stroke.setAffineTransform(CGAffineTransform {
+                a: cos,
+                b: sin,
+                c: -sin,
+                d: cos,
+                tx: 0.0,
+                ty: 0.0,
+            });
+            square.addSublayer(stroke);
+        }
+        parent_layer.addSublayer(&square);
+        Self { square, strokes }
+    }
+
+    fn update(&self, frame: CGRect, color: Color) {
+        let side = frame.size.width;
+        self.square.setFrame(frame);
+        self.square.setCornerRadius(side * 0.25);
+        let background = Color {
+            a: (f64::from(color.a) * 0.15) as u8,
+            ..color
+        };
+        self.square.setBackgroundColor(Some(&background.to_nscolor().CGColor()));
+        let stroke_color = Color {
+            a: (f64::from(color.a) * 0.8) as u8,
+            ..color
+        };
+        const STROKE_WIDTH: f64 = 1.5;
+        for stroke in &self.strokes {
+            stroke.setBounds(CGRect::new(CGPoint::ZERO, CGSize::new(side * 0.5, STROKE_WIDTH)));
+            stroke.setPosition(CGPoint::new(side / 2.0, side / 2.0));
+            stroke.setCornerRadius(STROKE_WIDTH / 2.0);
+            stroke.setBackgroundColor(Some(&stroke_color.to_nscolor().CGColor()));
+        }
+        self.square.setHidden(false);
     }
 }
 
@@ -380,7 +430,6 @@ impl ClickableIndicatorView {
     /// Shows the close button on the hovered tab of a labeled bar.
     fn update_close_layer(&self) {
         let bounds = self.bounds();
-        let scale = self.window().map_or(2.0, |w| w.backingScaleFactor());
         let Some(parent_layer) = self.layer() else { return };
         let mut state = self.ivars().borrow_mut();
         let state = &mut *state;
@@ -394,40 +443,24 @@ impl ClickableIndicatorView {
                         && *index < group_data.total_count
                         && !state.is_dragging()
                 });
-        let Some((group_data, index)) = hovered else {
-            if let Some(layer) = &state.close_layer {
-                layer.setHidden(true);
+        // Jump straight to the hovered tab rather than sliding between tabs.
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        match hovered {
+            Some((group_data, index)) => {
+                let frame = Self::close_button_frame(group_data, bounds, index);
+                state
+                    .close_button
+                    .get_or_insert_with(|| CloseButton::new(&parent_layer))
+                    .update(frame, state.config.text_color);
             }
-            return;
-        };
-
-        let layer = state.close_layer.get_or_insert_with(|| {
-            let layer = CATextLayer::layer();
-            layer.setAlignmentMode(unsafe { kCAAlignmentCenter });
-            // SAFETY: NSString is toll-free bridged with CFString, which this
-            // property accepts.
-            unsafe { layer.setString(Some(&NSString::from_str("✕"))) };
-            parent_layer.addSublayer(&layer);
-            layer
-        });
-        let metrics = LabelMetrics::new(bounds);
-        let frame = Self::close_button_frame(group_data, bounds, index);
-        // Center the glyph's line box on the button.
-        layer.setFrame(CGRect::new(
-            CGPoint::new(frame.origin.x, frame.mid().y - metrics.line_height / 2.0),
-            CGSize::new(frame.size.width, metrics.line_height),
-        ));
-        let font_size = (metrics.font_size - 2.0).max(7.0);
-        set_font(layer, &NSFont::boldSystemFontOfSize(font_size));
-        layer.setFontSize(font_size);
-        let color = state.config.text_color;
-        let color = Color {
-            a: (f64::from(color.a) * 0.8) as u8,
-            ..color
-        };
-        layer.setForegroundColor(Some(&color.to_nscolor().CGColor()));
-        layer.setContentsScale(scale);
-        layer.setHidden(false);
+            None => {
+                if let Some(button) = &state.close_button {
+                    button.square.setHidden(true);
+                }
+            }
+        }
+        CATransaction::commit();
     }
 
     fn segment_at_point_static(
@@ -463,7 +496,7 @@ impl GroupIndicatorNSView {
             separator_layers: Vec::new(),
             selected_layer: None,
             label_layers: Vec::new(),
-            close_layer: None,
+            close_button: None,
             hovered_index: None,
             click_callback: None,
             close_callback: None,
@@ -651,7 +684,7 @@ impl ClickableIndicatorView {
         state.separator_layers.clear();
         state.selected_layer = None;
         state.label_layers.clear();
-        state.close_layer = None;
+        state.close_button = None;
     }
 
     /// Update the layer structure to match current group data
