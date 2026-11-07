@@ -14,20 +14,22 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSNormalWindowLevel, NSWindow,
-    NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSNormalWindowLevel, NSRunningApplication,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGRect;
 use objc2_foundation::NSZeroRect;
+use redact::Secret;
 use tracing::debug;
 
 use crate::actor::{self, reactor};
 use crate::collections::HashMap;
 use crate::config::Config;
 use crate::model::{ContainerKind, GroupBarInfo, NodeId};
+use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::WindowId;
-use crate::ui::group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind};
+use crate::ui::group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind, TabLabel};
 
 #[derive(Debug)]
 pub enum Event {
@@ -35,7 +37,10 @@ pub enum Event {
     GroupsUpdated {
         space_id: SpaceId,
         groups: Vec<GroupBarInfo>,
+        /// Titles of the windows in `groups`.
+        titles: HashMap<WindowId, Secret<String>>,
     },
+    WindowTitleChanged(WindowId, Secret<String>),
     /// Selection changed within a specific group
     GroupSelectionChanged {
         space_id: SpaceId,
@@ -104,8 +109,11 @@ impl GroupBars {
     fn handle_event(&mut self, event: Event) {
         debug!(?event);
         match event {
-            Event::GroupsUpdated { space_id, groups } => {
-                self.handle_groups_updated(space_id, groups);
+            Event::GroupsUpdated { space_id, groups, titles } => {
+                self.handle_groups_updated(space_id, groups, &titles);
+            }
+            Event::WindowTitleChanged(wid, title) => {
+                self.handle_title_changed(wid, title);
             }
             Event::GroupSelectionChanged {
                 space_id,
@@ -138,14 +146,34 @@ impl GroupBars {
         }
     }
 
-    fn handle_groups_updated(&mut self, space_id: SpaceId, groups: Vec<GroupBarInfo>) {
+    fn handle_groups_updated(
+        &mut self,
+        space_id: SpaceId,
+        groups: Vec<GroupBarInfo>,
+        titles: &HashMap<WindowId, Secret<String>>,
+    ) {
         let group_nodes: crate::collections::HashSet<NodeId> =
             groups.iter().map(|g| g.node_id).collect();
         let space_indicators = self.indicators.entry(space_id).or_default();
         space_indicators.retain(|&node_id, _| group_nodes.contains(&node_id));
 
         for group in groups {
-            self.update_or_create_indicator(space_id, group);
+            self.update_or_create_indicator(space_id, group, titles);
+        }
+    }
+
+    fn handle_title_changed(&mut self, wid: WindowId, title: Secret<String>) {
+        for indicator in self.indicators.values_mut().flat_map(|i| i.values_mut()) {
+            let Some(index) = indicator.windows.borrow().iter().position(|&w| w == wid) else {
+                continue;
+            };
+            let Some(mut group_data) = indicator.view.group_data() else {
+                continue;
+            };
+            if let Some(tab) = group_data.tabs.get_mut(index) {
+                tab.title = title.clone();
+                indicator.view.update(group_data);
+            }
         }
     }
 
@@ -163,7 +191,12 @@ impl GroupBars {
         }
     }
 
-    fn update_or_create_indicator(&mut self, space_id: SpaceId, group: GroupBarInfo) {
+    fn update_or_create_indicator(
+        &mut self,
+        space_id: SpaceId,
+        group: GroupBarInfo,
+        titles: &HashMap<WindowId, Secret<String>>,
+    ) {
         let group_kind = match group.container_kind {
             ContainerKind::Tabbed => GroupKind::Horizontal,
             ContainerKind::Stacked => GroupKind::Vertical,
@@ -172,6 +205,15 @@ impl GroupBars {
                 return;
             }
         };
+
+        let tabs = group
+            .windows
+            .iter()
+            .map(|wid| TabLabel {
+                title: titles.get(wid).cloned().unwrap_or_default(),
+                icon: NSRunningApplication::with_process_id(wid.pid).and_then(|app| app.icon()),
+            })
+            .collect();
 
         let space_indicators = self.indicators.entry(space_id).or_default();
         let indicator = space_indicators.entry(group.node_id).or_insert_with(|| {
@@ -203,6 +245,7 @@ impl GroupBars {
             selected_index: group.selected_index,
             frame: group.indicator_frame,
             is_selected: group.is_selected,
+            tabs,
         });
         *indicator.windows.borrow_mut() = group.windows;
         indicator.window.setIsVisible(group.is_visible);

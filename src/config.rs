@@ -325,6 +325,9 @@ pub struct GroupBars {
     pub border_color: Color,
     pub border_width: f64,
     pub corner_radius: f64,
+    pub show_titles: bool,
+    pub show_icons: bool,
+    pub text_color: Color,
 }
 
 #[derive(

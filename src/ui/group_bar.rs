@@ -13,16 +13,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyClass;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSEvent, NSGlassEffectView, NSView,
+    NSAutoresizingMaskOptions, NSColor, NSEvent, NSFont, NSGlassEffectView, NSImage, NSView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindowOrderingMode,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::MainThreadMarker;
-use objc2_quartz_core::CALayer;
+use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
+use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_quartz_core::{
+    CALayer, CATextLayer, kCAAlignmentCenter, kCAGravityResizeAspect, kCATruncationEnd,
+};
+use redact::Secret;
 
 use crate::config::{Color, GroupBarStyle, GroupBars};
 use crate::sys::geometry::CGRectExt;
@@ -53,6 +56,15 @@ pub struct GroupDisplayData {
     pub selected_index: usize,
     pub frame: CGRect,
     pub is_selected: bool,
+    /// Labels for each segment. May be shorter than `total_count` if some are
+    /// unknown.
+    pub tabs: Vec<TabLabel>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TabLabel {
+    pub title: Secret<String>,
+    pub icon: Option<Retained<NSImage>>,
 }
 
 pub type SegmentClickCallback = Rc<dyn Fn(usize)>;
@@ -64,7 +76,32 @@ pub struct IndicatorState {
     background_layer: Option<Retained<CALayer>>,
     separator_layers: Vec<Retained<CALayer>>,
     selected_layer: Option<Retained<CALayer>>,
+    label_layers: Vec<LabelLayers>,
     click_callback: Option<SegmentClickCallback>,
+}
+
+struct LabelLayers {
+    icon: Retained<CALayer>,
+    title: Retained<CATextLayer>,
+}
+
+impl LabelLayers {
+    fn new(parent_layer: &CALayer) -> Self {
+        let icon = CALayer::layer();
+        // SAFETY: The gravity constant is a valid value for this property.
+        icon.setContentsGravity(unsafe { kCAGravityResizeAspect });
+        let title = CATextLayer::layer();
+        title.setTruncationMode(unsafe { kCATruncationEnd });
+        title.setAlignmentMode(unsafe { kCAAlignmentCenter });
+        parent_layer.addSublayer(&icon);
+        parent_layer.addSublayer(&title);
+        Self { icon, title }
+    }
+
+    fn remove(&self) {
+        self.icon.removeFromSuperlayer();
+        self.title.removeFromSuperlayer();
+    }
 }
 
 objc2::define_class!(
@@ -208,6 +245,7 @@ impl GroupIndicatorNSView {
             background_layer: None,
             separator_layers: Vec::new(),
             selected_layer: None,
+            label_layers: Vec::new(),
             click_callback: None,
         };
         let view = ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(state));
@@ -365,6 +403,7 @@ impl GroupIndicatorNSView {
         state.background_layer = None;
         state.separator_layers.clear();
         state.selected_layer = None;
+        state.label_layers.clear();
     }
 
     /// Update the layer structure to match current group data
@@ -390,6 +429,94 @@ impl GroupIndicatorNSView {
         self.update_background_layer(&parent_layer, &group_data, bounds);
         self.update_separator_layers(&parent_layer, &group_data, bounds);
         self.update_selected_layer(&parent_layer, &group_data, bounds);
+        self.update_label_layers(&parent_layer, &group_data, bounds);
+    }
+
+    /// Lays out the icon and title of each tab. Only tabbed groups are labeled.
+    fn update_label_layers(
+        &mut self,
+        parent_layer: &CALayer,
+        group_data: &GroupDisplayData,
+        bounds: CGRect,
+    ) {
+        const PADDING: f64 = 8.0;
+        const ICON_SPACING: f64 = 5.0;
+
+        let scale = self.view.window().map_or(2.0, |w| w.backingScaleFactor());
+        let mut state = self.view.ivars().borrow_mut();
+        let show_titles = state.config.show_titles;
+        let show_icons = state.config.show_icons;
+        let wanted =
+            if (show_titles || show_icons) && group_data.group_kind == GroupKind::Horizontal {
+                group_data.tabs.len().min(group_data.total_count)
+            } else {
+                0
+            };
+        while state.label_layers.len() > wanted {
+            state.label_layers.pop().unwrap().remove();
+        }
+        while state.label_layers.len() < wanted {
+            state.label_layers.push(LabelLayers::new(parent_layer));
+        }
+
+        let font_size = (bounds.size.height * 0.5).clamp(8.0, 14.0);
+        let icon_side = (font_size + 3.0).min(bounds.size.height);
+        let line_height = (font_size * 1.3).min(bounds.size.height);
+        let regular = NSFont::systemFontOfSize(font_size);
+        let bold = NSFont::boldSystemFontOfSize(font_size);
+        let text_color = state.config.text_color;
+        let dimmed_text_color = Color {
+            a: (f64::from(text_color.a) * 0.7) as u8,
+            ..text_color
+        };
+
+        for (index, (layers, tab)) in state.label_layers.iter().zip(&group_data.tabs).enumerate() {
+            let is_active = index == group_data.selected_index;
+            let segment = Self::calculate_segment_frame(group_data, bounds, index);
+            let mut x = segment.origin.x + PADDING;
+            let max_x = segment.max().x - PADDING;
+
+            let icon = tab.icon.as_ref().filter(|_| show_icons);
+            layers.icon.setHidden(icon.is_none());
+            if let Some(icon) = icon {
+                layers.icon.setFrame(CGRect::new(
+                    CGPoint::new(x, segment.mid().y - icon_side / 2.0),
+                    CGSize::new(icon_side, icon_side),
+                ));
+                // SAFETY: CALayer accepts an NSImage as its contents.
+                unsafe { layers.icon.setContents(Some(icon.as_ref() as &AnyObject)) };
+                layers.icon.setOpacity(if is_active { 1.0 } else { 0.7 });
+                x += icon_side + ICON_SPACING;
+            }
+
+            layers.title.setHidden(!show_titles);
+            if show_titles {
+                // Leave the same room on the right as the icon takes on the
+                // left, so the title stays centered in the segment.
+                let right_inset = x - (segment.origin.x + PADDING);
+                let width = (max_x - right_inset - x).max(0.0);
+                layers.title.setFrame(CGRect::new(
+                    CGPoint::new(x, segment.mid().y - line_height / 2.0),
+                    CGSize::new(width, line_height),
+                ));
+                let title = NSString::from_str(tab.title.expose_secret());
+                let font = if is_active { &bold } else { &regular };
+                // SAFETY: NSString and NSFont are toll-free bridged with
+                // CFString and CTFont, which these properties accept.
+                unsafe {
+                    layers.title.setString(Some(&title));
+                    layers.title.setFont(Some(&*(Retained::as_ptr(font) as *const CFType)));
+                }
+                layers.title.setFontSize(font_size);
+                let color = if is_active {
+                    text_color
+                } else {
+                    dimmed_text_color
+                };
+                layers.title.setForegroundColor(Some(&color.to_nscolor().CGColor()));
+                layers.title.setContentsScale(scale);
+            }
+        }
     }
 
     /// Ensure we have the correct number of separator layers
@@ -611,6 +738,7 @@ mod tests {
             selected_index: 1,
             frame: bounds,
             is_selected: true,
+            tabs: vec![],
         };
 
         // Test horizontal segments (each segment is 100px wide)
@@ -640,6 +768,7 @@ mod tests {
             selected_index: 2,
             frame: bounds,
             is_selected: true,
+            tabs: vec![],
         };
 
         // Test vertical segments (each segment is 25px tall), which run from

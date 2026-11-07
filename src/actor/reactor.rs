@@ -645,8 +645,12 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             }
             Event::WindowTitleChanged(wid, title) => {
-                if let Some(window) = self.windows.get_mut(&wid) {
-                    window.title = title;
+                if let Some(window) = self.windows.get_mut(&wid)
+                    && window.title.expose_secret() != title.expose_secret()
+                {
+                    window.title = title.clone();
+                    self.group_indicators_tx
+                        .send(group_bars::Event::WindowTitleChanged(wid, title));
                 }
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
@@ -1422,8 +1426,16 @@ impl Reactor {
             let (result, groups) =
                 self.layout.calculate_layout_and_groups(space, screen.frame, &self.config, now);
 
-            self.group_indicators_tx
-                .send(group_bars::Event::GroupsUpdated { space_id: space, groups });
+            let titles = groups
+                .iter()
+                .flat_map(|group| &group.windows)
+                .filter_map(|wid| Some((*wid, self.windows.get(wid)?.title.clone())))
+                .collect();
+            self.group_indicators_tx.send(group_bars::Event::GroupsUpdated {
+                space_id: space,
+                groups,
+                titles,
+            });
 
             targets
                 .extend(result.into_iter().map(|(wid, frame)| (wid, (frame, screen.scale_factor))));
