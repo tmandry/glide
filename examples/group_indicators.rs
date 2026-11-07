@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use glide_wm::config::GroupBarStyle;
+use glide_wm::ui::group_bar::ColorExt;
 use glide_wm::ui::{GroupDisplayData, GroupIndicatorNSView, GroupKind, TabLabel};
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
@@ -163,6 +164,31 @@ fn create_content_view(mtm: MainThreadMarker) -> (Retained<NSView>, IndicatorDem
     config.style = GroupBarStyle::Glass;
     config.show_titles = true;
     config.show_icons = true;
+    // Translucent colors let the glass show, and light text reads on the
+    // dark demo window.
+    let color = |c: &str| c.parse().unwrap();
+    config.background_color = color("#FFFFFF33");
+    config.selected_color = color("#0080FF99");
+    config.text_color = color("#FFFFFF");
+    config.inactive_text_color = color("#FFFFFFB3");
+    config.close_color = color("#FFFFFFCC");
+    config.close_background_color = color("#FFFFFF26");
+    // Colored stripes behind the bar give the glass something to show.
+    for (i, hex) in ["#FF5F57", "#FEBC2E", "#28C840", "#0A84FF", "#BF5AF2"].iter().enumerate() {
+        let stripe = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(50.0 + i as f64 * 140.0, indicator_rect.origin.y - 8.0),
+                NSSize::new(70.0, thickness + 16.0),
+            ),
+        );
+        stripe.setWantsLayer(true);
+        let hex: glide_wm::config::Color = color(hex);
+        if let Some(layer) = stripe.layer() {
+            layer.setBackgroundColor(Some(&hex.to_nscolor().CGColor()));
+        }
+        content_view.addSubview(&stripe);
+    }
     let icon = NSRunningApplication::currentApplication().icon();
     let tabs = [
         "README.md — glide",
