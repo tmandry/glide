@@ -1,22 +1,35 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::fs::File;
 use std::io::{Stderr, stderr};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tracing::info;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_timing::{Histogram, group};
 use tracing_tree::time::UtcDateTime;
 
+fn log_dir() -> PathBuf {
+    dirs::home_dir().unwrap().join("Library/Logs/Glide")
+}
+
 pub fn init_logging() {
-    let pid = std::process::id();
-    // let logfile = tracing_appender::rolling::never("/tmp", format!("glide.{pid}.log"));
-    let logfile = File::create(format!("/tmp/glide.{pid}.log")).unwrap();
+    let log_dir = log_dir();
+    // The appender lists the directory to prune old logs before creating it.
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let logfile = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("glide")
+        .filename_suffix("log")
+        .max_log_files(7)
+        .build(&log_dir)
+        .unwrap();
     let (file_appender, file_appender_guard) = tracing_appender::non_blocking(logfile);
     let (err_appender, err_appender_guard) = tracing_appender::non_blocking(stderr());
     let original_hook = std::panic::take_hook();
@@ -30,6 +43,11 @@ pub fn init_logging() {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(file_appender).with_ansi(false))
         .init();
+    info!(
+        "Glide {} started with pid {}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
 
     let appender_guards = Mutex::new(Some((file_appender_guard, err_appender_guard)));
     std::panic::set_hook(Box::new(move |info| {

@@ -92,16 +92,14 @@ fn guest(zip: &Path) -> anyhow::Result<()> {
     let glide = app.join("Contents/MacOS/glide");
     let home = dirs::home_dir().context("no home directory")?;
     let data_dir = home.join(".glide");
+    let log_dir = home.join("Library/Logs/Glide");
 
     step("Installing the bundle");
     _ = Command::new("pkill").args(["-x", "glide_server"]).status();
     wait_for("the old server to exit", || {
         Ok(server_pid()?.is_none().then_some(()))
     })?;
-    match fs::remove_dir_all(app) {
-        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
+    remove_dir_all(app)?;
     run(Command::new("ditto").args(["-x", "-k"]).arg(zip).arg("/Applications"))?;
     let version = output(Command::new(&glide).arg("--version"))?
         .trim()
@@ -110,6 +108,7 @@ fn guest(zip: &Path) -> anyhow::Result<()> {
     for file in ["state.ron", "update.log"] {
         remove_file(&data_dir.join(file))?;
     }
+    remove_dir_all(&log_dir)?;
     // Updates restore the saved state even with this off.
     let config_dir = home.join(".config/glide");
     fs::create_dir_all(&config_dir)?;
@@ -160,10 +159,12 @@ fn guest(zip: &Path) -> anyhow::Result<()> {
         let out = String::from_utf8_lossy(&out.stdout);
         Ok(out.contains(&format!("server: {version}")).then_some(()))
     })?;
-    let server_log = PathBuf::from(format!("/tmp/glide.{new_pid}.log"));
+    let started = format!("started with pid {new_pid}\n");
     wait_for("the new version to restore its state", || {
-        let log = fs::read_to_string(&server_log).unwrap_or_default();
-        Ok(log.contains("Restoring state saved by version").then_some(()))
+        let restored = read_logs(&log_dir)?
+            .split_once(&started)
+            .is_some_and(|(_, log)| log.contains("Restoring state saved by version"));
+        Ok(restored.then_some(()))
     })?;
     let restored = fs::read_to_string(data_dir.join("state.ron"))?;
     ensure!(
@@ -249,6 +250,21 @@ fn remove_file(path: &Path) -> anyhow::Result<()> {
         Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+fn remove_dir_all(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// The contents of the server logs in `dir`, oldest first.
+fn read_logs(dir: &Path) -> anyhow::Result<String> {
+    let mut paths =
+        fs::read_dir(dir)?.map(|e| Ok(e?.path())).collect::<anyhow::Result<Vec<_>>>()?;
+    paths.sort();
+    Ok(paths.iter().map(fs::read_to_string).collect::<Result<_, _>>()?)
 }
 
 fn step(what: &str) {
