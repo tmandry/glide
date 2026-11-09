@@ -1,7 +1,9 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::io::{Stderr, stderr};
+use std::backtrace::Backtrace;
+use std::io::{Stderr, Write, stderr};
+use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -31,6 +33,7 @@ pub fn init_logging() {
         .build(&log_dir)
         .unwrap();
     let (file_appender, file_appender_guard) = tracing_appender::non_blocking(logfile);
+    let panic_writer = file_appender.clone();
     let (err_appender, err_appender_guard) = tracing_appender::non_blocking(stderr());
     let original_hook = std::panic::take_hook();
     tracing_subscriber::registry()
@@ -51,6 +54,10 @@ pub fn init_logging() {
 
     let appender_guards = Mutex::new(Some((file_appender_guard, err_appender_guard)));
     std::panic::set_hook(Box::new(move |info| {
+        // Bypass the subscriber, which may be what panicked.
+        if let Err(e) = panic_writer.clone().write_all(panic_report(info).as_bytes()) {
+            eprintln!("Failed to write panic report to the log: {e}");
+        }
         // Because we abort and don't unwind on panic, make sure to flush the
         // appenders before that happens.
         if let Ok(mut guards) = appender_guards.try_lock() {
@@ -58,6 +65,27 @@ pub fn init_logging() {
         }
         original_hook(info);
     }));
+}
+
+fn panic_report(info: &PanicHookInfo) -> String {
+    let payload = info
+        .payload()
+        .downcast_ref::<String>()
+        .map(|s| &**s)
+        .or(info.payload().downcast_ref::<&str>().map(|s| &**s))
+        .unwrap_or("Unknown error");
+    let location = info
+        .location()
+        .map(|l| format!(" at {}:{}", l.file(), l.line()))
+        .unwrap_or_default();
+    let thread = std::thread::current();
+    let thread_id = thread.id();
+    let thread_info = match thread.name() {
+        Some(name) => format!("'{name}' {thread_id:?}"),
+        None => format!("{thread_id:?}"),
+    };
+    let backtrace = Backtrace::force_capture();
+    format!("thread {thread_info} panicked{location}:\n{payload}\nstack backtrace:\n{backtrace}\n")
 }
 
 pub fn tree_layer() -> tracing_tree::HierarchicalLayer<fn() -> Stderr, UtcDateTime> {

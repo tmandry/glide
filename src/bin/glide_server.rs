@@ -1,10 +1,6 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::backtrace::Backtrace;
-use std::fs::File;
-use std::io::Write;
-use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -253,44 +249,10 @@ fn restore(opt: &Cli, config: &Arc<Config>) -> (LayoutManager, Option<SpaceState
 fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        write_panic_log(&info);
         original_hook(info);
         // Abort on panic instead of propagating panics to the main thread.
         // See Cargo.toml for why we don't use panic=abort everywhere.
         #[cfg(panic = "unwind")]
         std::process::abort();
     }));
-}
-
-fn write_panic_log(info: &PanicHookInfo) {
-    let pid = std::process::id();
-    let filename = format!("/tmp/glide.{pid}.panic.log");
-    let mut file = File::options().append(true).create(true).write(true).open(&filename).unwrap();
-
-    let payload = info
-        .payload()
-        .downcast_ref::<String>()
-        .map(|s| &**s)
-        .or(info.payload().downcast_ref::<&str>().map(|s| &**s))
-        .unwrap_or("Unknown error");
-    let location = info
-        .location()
-        .map(|l| format!(" at {}:{}", l.file(), l.line()))
-        .unwrap_or_default();
-    let thread = std::thread::current();
-    let thread_id = thread.id();
-    let thread_info = match thread.name() {
-        Some(name) => format!("'{name}' {thread_id:?}"),
-        None => format!("{thread_id:?}"),
-    };
-
-    let backtrace = Backtrace::force_capture();
-    let log_message = format!(
-        "thread {thread_info} panicked{location}:\n{payload}\nstack backtrace:\n{backtrace}"
-    );
-
-    if let Err(e) = writeln!(&mut file, "{}", log_message) {
-        eprintln!("Failed to write panic message to file: {}", e);
-    }
-    eprintln!("wrote panic info to {filename}");
 }
