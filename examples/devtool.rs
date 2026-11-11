@@ -310,29 +310,21 @@ async fn main() -> anyhow::Result<()> {
             })?;
         }
         Command::Mouse(Mouse::Clicks) => {
-            use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-            use core_graphics::event::{
-                CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+            use glide_wm::sys::event_tap::EventTap;
+            use objc2_core_foundation::CFRunLoop;
+            use objc2_core_graphics::{
+                CGEvent, CGEventTapLocation, CGEventTapPlacement, CGEventType,
             };
-            let current = CFRunLoop::get_current();
-            match CGEventTap::new(
-                CGEventTapLocation::HID,
+
+            let tap = EventTap::new(
+                CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions::Default,
-                vec![CGEventType::LeftMouseUp],
-                |_a, _b, d| {
-                    println!("{:?}", d.location());
-                    core_graphics::event::CallbackResult::Keep
-                },
-            ) {
-                Ok(tap) => unsafe {
-                    let loop_source = tap.mach_port().create_runloop_source(0).unwrap();
-                    current.add_source(&loop_source, kCFRunLoopCommonModes);
-                    tap.enable();
-                    CFRunLoop::run_current();
-                },
-                Err(_) => assert!(false),
-            }
+                &[CGEventType::LeftMouseUp],
+                |_event_type, event| println!("{:?}", CGEvent::location(Some(event))),
+            )
+            .context("could not create event tap")?;
+            tap.enable();
+            CFRunLoop::run();
         }
         Command::Mouse(Mouse::Hide) => {
             window_server::allow_hide_mouse().unwrap();
