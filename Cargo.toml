@@ -98,6 +98,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFArray",
     "CFCGTypes",
     "CFDictionary",
+    "CFMachPort",
     "CFMessagePort",
     "CFNumber",
     "CFRunLoop",
@@ -108,6 +109,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "CGDirectDisplay",
     "CGError",
+    "CGEvent",
+    "CGEventTypes",
     "CGGeometry",
     "CGRemoteOperation",
     "CGSession",

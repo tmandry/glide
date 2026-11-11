@@ -6,6 +6,7 @@
 pub mod app;
 pub mod bundle;
 pub mod event;
+pub mod event_tap;
 pub mod executor;
 pub mod geometry;
 pub mod message_port;
