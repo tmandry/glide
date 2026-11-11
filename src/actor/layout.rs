@@ -1432,20 +1432,13 @@ impl LayoutManager {
         None
     }
 
-    /// Call this when a user resize of a tiled window ends, to scroll the
-    /// selected column back into view if the resize pushed it out.
-    pub fn end_user_resize(
-        &mut self,
-        space: SpaceId,
-        screen: CGRect,
-        config: &Config,
-        now: Instant,
-    ) {
+    /// Call this when a user resize of a tiled window ends, so the viewport
+    /// is free to follow the selected column again.
+    pub fn end_user_resize(&mut self, space: SpaceId) {
         if !self.scroll_enabled {
             return;
         }
         self.clear_user_scrolling(space);
-        self.update_viewport_for_focus(space, screen, config, now);
     }
 
     pub fn begin_interactive_move(
@@ -1659,6 +1652,12 @@ fn is_in_resize_band(point: CGPoint, frame: CGRect) -> bool {
 impl LayoutManager {
     pub(crate) fn new_for_test() -> Self {
         Self::new(default_config())
+    }
+
+    /// Where the space's viewport is scrolled to, for tests outside this
+    /// module that can't name a `LayoutId`.
+    pub(crate) fn viewport_offset_for_test(&self, space: SpaceId) -> Option<f64> {
+        Some(self.viewport(self.try_layout(space)?)?.target_offset())
     }
 }
 

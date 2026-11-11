@@ -639,10 +639,11 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
-                if mouse_state == Some(MouseState::Up) {
-                    // The button is up, so any resize we were holding
-                    // off on is over, even if we never saw the MouseUp event.
-                    self.end_user_resize(now);
+                // The button is up, so any resize we were holding off on is
+                // over, even if we never saw the MouseUp event.
+                let resize_ended = mouse_state == Some(MouseState::Up);
+                if resize_ended {
+                    self.end_user_resize();
                 }
                 let window = self.windows.get_mut(&wid).unwrap();
                 if last_seen != window.last_sent_txid {
@@ -703,7 +704,11 @@ impl Reactor {
                     if mouse_state == Some(MouseState::Down) {
                         self.resizing_window = Some(wid);
                     }
-                    is_resize = true;
+                    // A resize still under the mouse suppresses the viewport
+                    // update, since following the selection mid-drag fights
+                    // the user. The last frame of the drag has to get one, or
+                    // the column it grew past the screen edge stays there.
+                    is_resize = !resize_ended;
                 } else if mouse_state == Some(MouseState::Down) {
                     self.in_drag = true;
                 }
@@ -859,7 +864,7 @@ impl Reactor {
                     self.layout.end_interactive_move(space, screen.frame, &self.config, now);
                 }
                 self.in_drag = false;
-                self.end_user_resize(now);
+                self.end_user_resize();
                 // Now re-check the layout.
             }
             Event::MouseMovedOverWindow(wsid, key_focus_pid) => {
@@ -1360,22 +1365,17 @@ impl Reactor {
 
     /// Finishes a user resize of a tiled window, if one was in progress.
     ///
-    /// `update_layout` leaves the viewport alone while a resize is in
-    /// progress, so a column the user grew past the edge of the screen stays
-    /// out of view until the resize ends.
-    fn end_user_resize(&mut self, now: Instant) {
+    /// This only drops the state that held layout writes off the window. The
+    /// viewport is left to the next layout update, which runs once the last
+    /// frame of the drag has reached the tree.
+    fn end_user_resize(&mut self) {
         if self.resizing_window.take().is_none() {
-            return;
-        }
-        if self.expose_active {
-            // Expose holds off layout updates, so leave the viewport alone
-            // too. The resize state is cleared either way.
             return;
         }
         if let Some(&screen) = self.active_screen()
             && let Some(space) = screen.space
         {
-            self.layout.end_user_resize(space, screen.frame, &self.config, now);
+            self.layout.end_user_resize(space);
         }
     }
 
@@ -3659,6 +3659,82 @@ pub mod tests {
                 WindowId::new(1, 2),
                 WindowId::new(3, 1),
             ]
+        );
+    }
+
+    /// Widening a column can push its far edge off the screen. Frames that
+    /// arrive mid-drag leave the viewport alone, so the frame that ends the
+    /// drag is the one that has to scroll the column back into view.
+    #[test]
+    fn it_scrolls_the_viewport_when_a_resize_ends() {
+        let mut config = Config::default();
+        config.settings.default_disable = false;
+        config.settings.animate = false;
+        config.settings.experimental.scroll.enable = true;
+        config.settings.default_layout_kind = crate::model::LayoutKind::Scroll;
+        let config = Arc::new(config);
+
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.handle_event(Event::ConfigChanged(config));
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+
+        // Select a column that starts on screen and has a neighbor to its
+        // right, so growing its right edge pushes its far edge out of view.
+        let resized = WindowId::new(1, 3);
+        let mut apps = Apps::new();
+        reactor.handle_events(apps.make_app(1, make_windows(3)));
+        reactor.handle_event(Event::StartupComplete);
+        _ = reactor.layout.handle_event(LayoutEvent::WindowFocused(vec![space], resized));
+        apps.simulate_until_quiet(&mut reactor);
+
+        let offset_before = reactor
+            .layout
+            .viewport_offset_for_test(space)
+            .expect("scroll layout has a viewport");
+
+        // Columns are laid out in insertion order, which puts this one in the
+        // middle of the three. Pinned down because the resize below needs a
+        // right neighbor to take space from.
+        let old_frame = apps.windows[&resized].frame;
+        assert_eq!(
+            CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 1000.)),
+            old_frame
+        );
+
+        // Report the end of a drag that widened the selected window. Only the
+        // final frame is reported, which is also what happens when the first
+        // notification of a drag lands after the button is released.
+        let new_frame = CGRect::new(
+            old_frame.origin,
+            CGSize::new(old_frame.size.width + 300., old_frame.size.height),
+        );
+        apps.windows.get_mut(&resized).unwrap().frame = new_frame;
+        reactor.handle_event(Event::WindowFrameChanged(
+            resized,
+            new_frame,
+            apps.windows[&resized].last_seen_txid,
+            Requested(false),
+            Some(MouseState::Up),
+        ));
+
+        let offset_after = reactor
+            .layout
+            .viewport_offset_for_test(space)
+            .expect("scroll layout has a viewport");
+        assert_eq!(0., offset_before, "the column starts on screen");
+        // The column now runs from 500 to 1300 on a screen 1000 wide, so the
+        // viewport has to scroll 300 to bring its far edge back into view.
+        assert_eq!(
+            300., offset_after,
+            "the end of the drag should scroll the widened column back on screen"
         );
     }
 
