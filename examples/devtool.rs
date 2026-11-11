@@ -365,7 +365,7 @@ fn watch_notifications(
         let (connection, requested) = (connection.clone(), requested.clone());
         move |wsid: WindowServerId| match connection.borrow_mut().add_window(wsid) {
             Ok(()) => requested.set(requested.get() + 1),
-            Err(e) => println!("Could not request notifications for {wsid:?}: {e}"),
+            Err(e) => println!("Could not request notifications for {wsid:?}: {e:?}"),
         }
     };
 
