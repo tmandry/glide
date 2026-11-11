@@ -74,12 +74,9 @@ objc2::define_class!(
 
             let state = self.ivars().borrow();
             let Some(group_data) = &state.group_data else { return };
-            let Some(segment_index) = Self::segment_at_point_static(
-                location,
-                group_data,
-                &self.bounds(),
-            ) else {
-                return
+            let Some(segment_index) = segment_at_point(location, group_data, self.bounds())
+            else {
+                return;
             };
             let Some(callback) = state.click_callback.clone() else { return };
 
@@ -95,32 +92,29 @@ pub struct GroupIndicatorNSView {
     view: Retained<ClickableIndicatorView>,
 }
 
-impl ClickableIndicatorView {
-    fn segment_at_point_static(
-        point: CGPoint,
-        group_data: &GroupDisplayData,
-        bounds: &CGRect,
-    ) -> Option<usize> {
-        if !bounds.contains(point) {
-            return None;
-        }
-
-        if group_data.total_count == 0 {
-            return None;
-        }
-
-        let pct = match group_data.group_kind {
-            GroupKind::Horizontal => point.x / bounds.size.width,
-            GroupKind::Vertical => point.y / bounds.size.height,
-        };
-        let segment_index = (pct * group_data.total_count as f64).floor() as usize;
-
-        if segment_index < group_data.total_count {
-            Some(segment_index)
-        } else {
-            None
-        }
+/// Returns the index of the segment containing `point`, given in the view's
+/// (non-flipped) coordinate space.
+///
+/// This must agree with [`GroupIndicatorNSView::calculate_segment_frame`]:
+/// horizontal segments are ordered left to right, and vertical segments are
+/// ordered top to bottom (so segment 0 is at the highest y coordinate).
+fn segment_at_point(
+    point: CGPoint,
+    group_data: &GroupDisplayData,
+    bounds: CGRect,
+) -> Option<usize> {
+    let count = group_data.total_count;
+    if count == 0 || !bounds.contains(point) {
+        return None;
     }
+
+    let pct = match group_data.group_kind {
+        GroupKind::Horizontal => (point.x - bounds.min().x) / bounds.size.width,
+        GroupKind::Vertical => (bounds.max().y - point.y) / bounds.size.height,
+    };
+    // `contains` includes the far edge, which would otherwise map to `count`.
+    let segment_index = (pct * count as f64).floor() as usize;
+    Some(segment_index.min(count - 1))
 }
 
 impl GroupIndicatorNSView {
@@ -151,20 +145,10 @@ impl GroupIndicatorNSView {
     }
 
     pub fn update(&mut self, group_data: GroupDisplayData) {
-        let old_selected = {
-            let state = self.view.ivars().borrow();
-            state.group_data.as_ref().map(|d| d.selected_index)
-        };
-
-        self.view.ivars().borrow_mut().group_data = Some(group_data.clone());
+        self.view.ivars().borrow_mut().group_data = Some(group_data);
+        // Changing the selected layer's frame here is implicitly animated by
+        // Core Animation.
         self.update_layers();
-
-        // Animate if selection changed
-        if let Some(old_index) = old_selected {
-            if old_index != group_data.selected_index {
-                self.animate_selection_change(old_index, group_data.selected_index);
-            }
-        }
     }
 
     pub fn set_config(&mut self, config: &GroupBars) {
@@ -194,45 +178,6 @@ impl GroupIndicatorNSView {
                 self.update(updated_data);
             }
         }
-    }
-
-    /// Handle mouse down events for segment clicking
-    pub fn handle_mouse_down(&self, event: &NSEvent) {
-        let state = self.view.ivars().borrow();
-        let Some(group_data) = &state.group_data else {
-            return;
-        };
-
-        let Some(callback) = &state.click_callback else {
-            return;
-        };
-
-        // Convert event location to view coordinates
-        let location = self.view.convertPoint_fromView(event.locationInWindow(), None);
-
-        // Determine which segment was clicked
-        if let Some(segment_index) = self.segment_at_point(location, group_data) {
-            callback(segment_index);
-        }
-    }
-
-    /// Check if a point is inside this view and return the segment index if clicked
-    pub fn check_click(&self, window_point: CGPoint) -> Option<usize> {
-        let state = self.view.ivars().borrow();
-        let Some(group_data) = &state.group_data else {
-            return None;
-        };
-
-        // Convert window point to view coordinates
-        let view_point = self.view.convertPoint_fromView(window_point, None);
-
-        self.segment_at_point(view_point, group_data)
-    }
-
-    /// Determine which segment contains the given point
-    pub fn segment_at_point(&self, point: CGPoint, group_data: &GroupDisplayData) -> Option<usize> {
-        let bounds = self.view.bounds();
-        ClickableIndicatorView::segment_at_point_static(point, group_data, &bounds)
     }
 
     /// Clear all layers
@@ -454,99 +399,69 @@ impl GroupIndicatorNSView {
 
         CGRect::new(CGPoint::new(seg_x, seg_y), CGSize::new(seg_width, seg_height))
     }
-
-    fn animate_selection_change(&self, _from_index: usize, to_index: usize) {
-        let (selected_layer, group_data, bounds) = {
-            let state = self.view.ivars().borrow();
-            let Some(selected_layer) = state.selected_layer.clone() else {
-                return;
-            };
-            let Some(group_data) = state.group_data.clone() else {
-                return;
-            };
-            let bounds = self.view.bounds();
-            (selected_layer, group_data, bounds)
-        };
-
-        let to_frame = Self::calculate_segment_frame(&group_data, bounds, to_index);
-
-        selected_layer.setFrame(to_frame);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn group(group_kind: GroupKind, total_count: usize, bounds: CGRect) -> GroupDisplayData {
+        GroupDisplayData {
+            group_kind,
+            total_count,
+            selected_index: 0,
+            frame: bounds,
+            is_selected: true,
+        }
+    }
+
     #[test]
     fn test_segment_click_detection() {
         let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 100.0));
-        let mtm =
-            MainThreadMarker::new().unwrap_or_else(|| unsafe { MainThreadMarker::new_unchecked() });
-        let config = crate::config::Config::default();
-        let view = GroupIndicatorNSView::new(bounds, &config.settings.group_bars, mtm);
 
-        let horizontal_group = GroupDisplayData {
-            group_kind: GroupKind::Horizontal,
-            total_count: 3,
-            selected_index: 1,
-            frame: bounds,
-            is_selected: true,
-        };
+        // Horizontal segments are 100px wide, ordered left to right.
+        let horizontal = group(GroupKind::Horizontal, 3, bounds);
+        let hit = |x, y| segment_at_point(CGPoint::new(x, y), &horizontal, bounds);
+        assert_eq!(hit(50.0, 98.0), Some(0));
+        assert_eq!(hit(150.0, 98.0), Some(1));
+        assert_eq!(hit(250.0, 98.0), Some(2));
+        assert_eq!(hit(300.0, 98.0), Some(2)); // far edge
+        assert_eq!(hit(50.0, -10.0), None);
 
-        // Test horizontal segments (each segment is 100px wide)
-        // Segment 0: x 0-100, Segment 1: x 100-200, Segment 2: x 200-300
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(50.0, 98.0), &horizontal_group),
-            Some(0)
-        );
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(150.0, 98.0), &horizontal_group),
-            Some(1)
-        );
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(250.0, 98.0), &horizontal_group),
-            Some(2)
-        );
+        // Vertical segments are 25px tall, ordered top to bottom (y is up).
+        let vertical = group(GroupKind::Vertical, 4, bounds);
+        let hit = |x, y| segment_at_point(CGPoint::new(x, y), &vertical, bounds);
+        assert_eq!(hit(298.0, 87.0), Some(0));
+        assert_eq!(hit(298.0, 62.0), Some(1));
+        assert_eq!(hit(298.0, 37.0), Some(2));
+        assert_eq!(hit(298.0, 12.0), Some(3));
+        assert_eq!(hit(298.0, 0.0), Some(3)); // far edge
+        assert_eq!(hit(-10.0, 50.0), None);
 
-        // Test outside view bounds
         assert_eq!(
-            view.segment_at_point(CGPoint::new(50.0, -10.0), &horizontal_group),
+            segment_at_point(
+                CGPoint::new(10.0, 10.0),
+                &group(GroupKind::Horizontal, 0, bounds),
+                bounds
+            ),
             None
         );
+    }
 
-        let vertical_group = GroupDisplayData {
-            group_kind: GroupKind::Vertical,
-            total_count: 4,
-            selected_index: 2,
-            frame: bounds,
-            is_selected: true,
-        };
-
-        // Test vertical segments (each segment is 25px tall)
-        // Segment 0: y 0-25, Segment 1: y 25-50, etc.
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 12.0), &vertical_group),
-            Some(0)
-        );
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 37.0), &vertical_group),
-            Some(1)
-        );
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 62.0), &vertical_group),
-            Some(2)
-        );
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 87.0), &vertical_group),
-            Some(3)
-        );
-
-        // Test outside bar area
-        // Test outside view bounds
-        assert_eq!(
-            view.segment_at_point(CGPoint::new(-10.0, 50.0), &vertical_group),
-            None
-        );
+    /// Clicking the middle of a drawn segment must select that segment.
+    #[test]
+    fn test_hit_testing_matches_drawn_segments() {
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(40.0, 120.0));
+        for kind in [GroupKind::Horizontal, GroupKind::Vertical] {
+            let data = group(kind, 5, bounds);
+            for index in 0..5 {
+                let frame = GroupIndicatorNSView::calculate_segment_frame(&data, bounds, index);
+                assert_eq!(
+                    segment_at_point(frame.mid(), &data, bounds),
+                    Some(index),
+                    "{kind:?} segment {index}"
+                );
+            }
+        }
     }
 }
