@@ -24,7 +24,7 @@ use std::{mem, thread};
 
 use animation::{Animation, AnimationManager, Message as AnimationMessage};
 use main_window::MainWindowTracker;
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 use redact::Secret;
 pub use replay::{Record, replay};
 use saved_state::Saver;
@@ -826,16 +826,7 @@ impl Reactor {
             Event::LeftMouseDown(point) => {
                 if let Some(&screen) = self.active_screen()
                     && let Some(space) = screen.space
-                    // A press on a window edge starts the app's own resize,
-                    // which the layout picks up as a WindowResized event. Only
-                    // a press inside the window begins a drag.
-                    && !self.layout.is_on_scroll_resize_edge(
-                        space,
-                        point,
-                        screen.frame,
-                        &self.config,
-                        now,
-                    )
+                    && !self.press_starts_app_resize(space, point, screen.frame, now)
                     && let Some((wid, node)) = self.layout.hit_test_scroll_window(
                         space,
                         point,
@@ -1361,6 +1352,26 @@ impl Reactor {
         {
             error!("Animation manager exited unexpectedly");
         }
+    }
+
+    /// Whether a press at `point` starts the app's own resize of the window
+    /// under it, in which case it must not also begin a drag.
+    ///
+    /// A window the app refuses to resize has no such border, however close
+    /// the press lands to its edge.
+    fn press_starts_app_resize(
+        &self,
+        space: SpaceId,
+        point: CGPoint,
+        screen: CGRect,
+        now: Instant,
+    ) -> bool {
+        let Some(wid) =
+            self.layout.hit_test_scroll_resize_edge(space, point, screen, &self.config, now)
+        else {
+            return false;
+        };
+        self.windows.get(&wid).is_some_and(|window| window.is_resizable)
     }
 
     /// Finishes a user resize of a tiled window, if one was in progress.
@@ -3735,6 +3746,62 @@ pub mod tests {
         assert_eq!(
             300., offset_after,
             "the end of the drag should scroll the widened column back on screen"
+        );
+    }
+
+    /// macOS starts a resize when a window's border is clicked, so glide
+    /// leaves those clicks alone. A window the app won't resize gets no such
+    /// resize, so the click has to still begin a drag.
+    #[test]
+    fn it_drags_a_non_resizable_window_from_its_border() {
+        let mut config = Config::default();
+        config.settings.default_disable = false;
+        config.settings.animate = false;
+        config.settings.experimental.scroll.enable = true;
+        config.settings.default_layout_kind = crate::model::LayoutKind::Scroll;
+        // Tile the window even though the app won't resize it, which is the
+        // only way it ends up in the layout at all.
+        config.window_rules = vec![crate::config::WindowRule {
+            conditions: crate::config::WindowRuleConditions::default(),
+            float: false,
+        }];
+
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.handle_event(Event::ConfigChanged(Arc::new(config)));
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        reactor.handle_event(Event::ScreenParametersChanged {
+            frames: vec![screen],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+
+        let mut windows = make_windows(1);
+        windows[0].is_resizable = false;
+        let mut apps = Apps::new();
+        reactor.handle_events(apps.make_app(1, windows));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+
+        let wid = WindowId::new(1, 1);
+        let frame = apps.windows[&wid].frame;
+        let on_border = CGPoint::new(frame.origin.x + 2., frame.mid().y);
+
+        reactor.handle_event(Event::LeftMouseDown(on_border));
+        assert!(
+            reactor.layout.has_interactive_state(),
+            "a border click should drag a window the app won't resize"
+        );
+        reactor.handle_event(Event::MouseUp);
+
+        // The same click on a window the app will resize belongs to the app.
+        reactor.windows.get_mut(&wid).unwrap().is_resizable = true;
+        reactor.handle_event(Event::LeftMouseDown(on_border));
+        assert!(
+            !reactor.layout.has_interactive_state(),
+            "a border click should leave a resizable window to the app"
         );
     }
 

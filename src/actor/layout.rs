@@ -1382,29 +1382,32 @@ impl LayoutManager {
         }
     }
 
-    /// Whether the app under `point` would start a resize once clicked.
+    /// The window whose border `point` is on, if any. Clicking there would
+    /// start a resize, as long as the app allows the window to be resized,
+    /// which the caller checks.
     ///
     /// The resize itself is performed by the app; we get updates through
     /// [`LayoutEvent::WindowResized`].
-    pub(crate) fn is_on_scroll_resize_edge(
+    pub(crate) fn hit_test_scroll_resize_edge(
         &self,
         space: SpaceId,
         point: CGPoint,
         screen: CGRect,
         config: &Config,
         now: Instant,
-    ) -> bool {
+    ) -> Option<WindowId> {
         if !self.scroll_enabled {
-            return false;
+            return None;
         }
-        let Some(layout) = self.try_layout(space) else {
-            return false;
-        };
+        let layout = self.try_layout(space)?;
         if !self.tree.is_scroll_layout(layout) {
-            return false;
+            return None;
         }
         let frames = self.calculate_layout(space, screen, config, now);
-        frames.iter().any(|(_, frame)| is_in_resize_band(point, *frame))
+        frames
+            .iter()
+            .find(|(_, frame)| is_in_resize_band(point, *frame))
+            .map(|(wid, _)| *wid)
     }
 
     pub fn hit_test_scroll_window(
