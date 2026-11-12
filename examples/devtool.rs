@@ -441,7 +441,7 @@ fn notification_window(data: &[u8]) -> Option<WindowServerId> {
 /// Polls each source of "what has keyboard focus" and prints them when any of
 /// them changes.
 fn watch_focus(interval: Duration) {
-    use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
 
     let system_wide = AXUIElement::system_wide();
     // A hung app must not stall the probe.
@@ -478,7 +478,7 @@ fn watch_focus(interval: Duration) {
             last_summary = Instant::now();
         }
         // NSWorkspace learns about activation from the run loop.
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, interval, false);
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, interval.as_secs_f64(), false);
     }
 }
 
