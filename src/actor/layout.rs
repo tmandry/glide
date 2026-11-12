@@ -162,35 +162,6 @@ impl LayoutCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ResizeEdge(u8);
-
-impl ResizeEdge {
-    const LEFT: u8 = 0b0001;
-    const RIGHT: u8 = 0b0010;
-    const TOP: u8 = 0b0100;
-    const BOTTOM: u8 = 0b1000;
-
-    fn has_horizontal(self) -> bool {
-        self.0 & (Self::LEFT | Self::RIGHT) != 0
-    }
-
-    fn has_vertical(self) -> bool {
-        self.0 & (Self::TOP | Self::BOTTOM) != 0
-    }
-
-    fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-struct InteractiveScrollResize {
-    column_node: NodeId,
-    window_node: NodeId,
-    edges: ResizeEdge,
-    last_mouse: CGPoint,
-}
-
 struct InteractiveScrollMove {
     layout_id: LayoutId,
     window_id: WindowId,
@@ -251,8 +222,6 @@ pub struct LayoutManager {
     scroll_enabled: bool,
     #[serde(skip)]
     window_rules: Vec<WindowRule>,
-    #[serde(skip)]
-    interactive_resize: Option<InteractiveScrollResize>,
     #[serde(skip)]
     interactive_move: Option<InteractiveScrollMove>,
     #[serde(skip, default = "default_config")]
@@ -376,7 +345,6 @@ impl LayoutManager {
             scroll_cfg: Config::default().settings.experimental.scroll.validated(),
             scroll_enabled: false,
             window_rules: Vec::new(),
-            interactive_resize: None,
             interactive_move: None,
             generation: 0,
             config,
@@ -1414,31 +1382,29 @@ impl LayoutManager {
         }
     }
 
-    pub(crate) fn hit_test_scroll_edges(
+    /// Whether the app under `point` would start a resize once clicked.
+    ///
+    /// The resize itself is performed by the app; we get updates through
+    /// [`LayoutEvent::WindowResized`].
+    pub(crate) fn is_on_scroll_resize_edge(
         &self,
         space: SpaceId,
         point: CGPoint,
         screen: CGRect,
         config: &Config,
         now: Instant,
-    ) -> Option<(NodeId, NodeId, ResizeEdge)> {
+    ) -> bool {
         if !self.scroll_enabled {
-            return None;
+            return false;
         }
-        let layout = self.try_layout(space)?;
+        let Some(layout) = self.try_layout(space) else {
+            return false;
+        };
         if !self.tree.is_scroll_layout(layout) {
-            return None;
+            return false;
         }
         let frames = self.calculate_layout(space, screen, config, now);
-        for (wid, frame) in &frames {
-            let edges = detect_edges(point, *frame);
-            if !edges.is_empty() {
-                let window_node = self.tree.window_node(layout, *wid)?;
-                let column_node = self.tree.column_of(layout, window_node)?;
-                return Some((column_node, window_node, edges));
-            }
-        }
-        None
+        frames.iter().any(|(_, frame)| is_in_resize_band(point, *frame))
     }
 
     pub fn hit_test_scroll_window(
@@ -1466,76 +1432,13 @@ impl LayoutManager {
         None
     }
 
-    pub(crate) fn begin_interactive_resize(
-        &mut self,
-        column: NodeId,
-        window: NodeId,
-        edges: ResizeEdge,
-        mouse: CGPoint,
-    ) -> bool {
-        if self.interactive_resize.is_some() {
-            return false;
+    /// Call this when a user resize of a tiled window ends, so the viewport
+    /// is free to follow the selected column again.
+    pub fn end_user_resize(&mut self, space: SpaceId) {
+        if !self.scroll_enabled {
+            return;
         }
-        self.interactive_resize = Some(InteractiveScrollResize {
-            column_node: column,
-            window_node: window,
-            edges,
-            last_mouse: mouse,
-        });
-        true
-    }
-
-    pub fn update_interactive_resize(&mut self, mouse: CGPoint, screen: CGRect) -> bool {
-        self.drop_stale_interactive_state();
-        let Some(state) = self.interactive_resize.as_mut() else {
-            return false;
-        };
-        let dx = mouse.x - state.last_mouse.x;
-        let dy = mouse.y - state.last_mouse.y;
-        state.last_mouse = mouse;
-
-        let mut changed = false;
-        if state.edges.has_horizontal() {
-            let ratio = dx / screen.size.width;
-            let direction = if state.edges.0 & ResizeEdge::LEFT != 0 {
-                Direction::Left
-            } else {
-                Direction::Right
-            };
-            let col = state.column_node;
-            if self.tree.resize(col, ratio, direction) {
-                changed = true;
-            }
-        }
-        if state.edges.has_vertical() {
-            let ratio = dy / screen.size.height;
-            let direction = if state.edges.0 & ResizeEdge::TOP != 0 {
-                Direction::Up
-            } else {
-                Direction::Down
-            };
-            let win = state.window_node;
-            if self.tree.resize(win, ratio, direction) {
-                changed = true;
-            }
-        }
-        if changed {
-            self.generation += 1;
-        }
-        changed
-    }
-
-    pub fn end_interactive_resize(
-        &mut self,
-        space: SpaceId,
-        screen: CGRect,
-        config: &Config,
-        now: Instant,
-    ) {
-        if self.interactive_resize.take().is_some() {
-            self.clear_user_scrolling(space);
-            self.update_viewport_for_focus(space, screen, config, now);
-        }
+        self.clear_user_scrolling(space);
     }
 
     pub fn begin_interactive_move(
@@ -1545,7 +1448,7 @@ impl LayoutManager {
         node: NodeId,
         mouse: CGPoint,
     ) -> bool {
-        if self.interactive_resize.is_some() || self.interactive_move.is_some() {
+        if self.interactive_move.is_some() {
             return false;
         }
         let layout_id = self.layout(space);
@@ -1627,20 +1530,11 @@ impl LayoutManager {
     }
 
     pub fn cancel_interactive_state(&mut self) {
-        self.interactive_resize = None;
         self.interactive_move = None;
     }
 
     /// Drops interactive state that refers to a node the tree no longer has.
-    /// Removing a window can cull its column, so a resize of the window that
-    /// stays is left holding a node that was deleted.
     fn drop_stale_interactive_state(&mut self) {
-        if let Some(state) = &self.interactive_resize
-            && !(self.tree.map().contains(state.column_node)
-                && self.tree.map().contains(state.window_node))
-        {
-            self.interactive_resize = None;
-        }
         if let Some(state) = &self.interactive_move
             && !self.tree.map().contains(state.window_node)
         {
@@ -1652,17 +1546,10 @@ impl LayoutManager {
         if self.interactive_move.as_ref().is_some_and(|state| state.window_id == wid) {
             self.interactive_move = None;
         }
-        if self
-            .interactive_resize
-            .as_ref()
-            .is_some_and(|state| self.tree.window_at(state.window_node) == Some(wid))
-        {
-            self.interactive_resize = None;
-        }
     }
 
     pub fn has_interactive_state(&self) -> bool {
-        self.interactive_resize.is_some() || self.interactive_move.is_some()
+        self.interactive_move.is_some()
     }
 }
 
@@ -1737,9 +1624,12 @@ impl LayoutManager {
     }
 }
 
-// TODO: detect_edges does not account for screen boundaries.
-// A window flush against a screen edge should not offer resize on that edge.
-fn detect_edges(point: CGPoint, frame: CGRect) -> ResizeEdge {
+/// Whether `point` is in the band along `frame`'s border where a press starts
+/// the app's own resize rather than landing inside the window.
+///
+/// A window narrower than the band is all border, so it can't be dragged by
+/// its middle.
+fn is_in_resize_band(point: CGPoint, frame: CGRect) -> bool {
     let threshold = RESIZE_EDGE_THRESHOLD;
     let expanded = CGRect::new(
         CGPoint::new(frame.origin.x - threshold, frame.origin.y - threshold),
@@ -1749,46 +1639,25 @@ fn detect_edges(point: CGPoint, frame: CGRect) -> ResizeEdge {
         ),
     );
     if !expanded.contains(point) {
-        return ResizeEdge(0);
+        return false;
     }
-    let inner = CGRect::new(
-        CGPoint::new(frame.origin.x + threshold, frame.origin.y + threshold),
-        CGSize::new(
-            (frame.size.width - threshold * 2.0).max(0.0),
-            (frame.size.height - threshold * 2.0).max(0.0),
-        ),
-    );
-    if inner.contains(point) {
-        return ResizeEdge(0);
-    }
-    let mut edges = 0u8;
-    if point.x < frame.origin.x + threshold {
-        edges |= ResizeEdge::LEFT;
-    }
-    if point.x > frame.origin.x + frame.size.width - threshold {
-        edges |= ResizeEdge::RIGHT;
-    }
-    if point.y < frame.origin.y + threshold {
-        edges |= ResizeEdge::TOP;
-    }
-    if point.y > frame.origin.y + frame.size.height - threshold {
-        edges |= ResizeEdge::BOTTOM;
-    }
-    // If both opposing edges are set (window too small for edge detection),
-    // disable that axis to avoid conflicting resize directions.
-    if edges & ResizeEdge::LEFT != 0 && edges & ResizeEdge::RIGHT != 0 {
-        edges &= !(ResizeEdge::LEFT | ResizeEdge::RIGHT);
-    }
-    if edges & ResizeEdge::TOP != 0 && edges & ResizeEdge::BOTTOM != 0 {
-        edges &= !(ResizeEdge::TOP | ResizeEdge::BOTTOM);
-    }
-    ResizeEdge(edges)
+    let near_vertical_edge = point.x < frame.origin.x + threshold
+        || point.x > frame.origin.x + frame.size.width - threshold;
+    let near_horizontal_edge = point.y < frame.origin.y + threshold
+        || point.y > frame.origin.y + frame.size.height - threshold;
+    near_vertical_edge || near_horizontal_edge
 }
 
 #[cfg(test)]
 impl LayoutManager {
     pub(crate) fn new_for_test() -> Self {
         Self::new(default_config())
+    }
+
+    /// Where the space's viewport is scrolled to, for tests outside this
+    /// module that can't name a `LayoutId`.
+    pub(crate) fn viewport_offset_for_test(&self, space: SpaceId) -> Option<f64> {
+        Some(self.viewport(self.try_layout(space)?)?.target_offset())
     }
 }
 
@@ -2798,47 +2667,75 @@ mod tests {
         assert!(!tiled.contains(&nonstandard));
     }
 
-    /// Removing a window culls its column once one window is left, so a
-    /// resize of the window that stays holds a node that no longer exists.
     #[test]
-    fn interactive_resize_is_dropped_when_its_column_is_culled() {
+    fn resize_band_covers_the_border_and_not_the_interior() {
+        // The band is RESIZE_EDGE_THRESHOLD (8) wide on each side of the
+        // border, so it reaches 92..108 around a left edge at x = 100.
+        let frame = rect(100, 100, 200, 100);
+        let cases = [
+            ((200.0, 150.0), false, "the middle"),
+            ((103.0, 150.0), true, "inside the left edge"),
+            ((95.0, 150.0), true, "outside the left edge"),
+            ((85.0, 150.0), false, "too far outside the left edge"),
+            ((295.0, 150.0), true, "inside the right edge"),
+            ((285.0, 150.0), false, "inside, past the right band"),
+            ((200.0, 103.0), true, "inside the top edge"),
+            ((200.0, 195.0), true, "inside the bottom edge"),
+            ((103.0, 103.0), true, "the top left corner"),
+        ];
+        for ((x, y), expected, desc) in cases {
+            assert_eq!(
+                expected,
+                is_in_resize_band(CGPoint::new(x, y), frame),
+                "({x}, {y}) is {desc}"
+            );
+        }
+
+        // A window narrower than the band has no interior to drag by.
+        let sliver = rect(100, 100, 10, 100);
+        assert!(is_in_resize_band(CGPoint::new(105.0, 150.0), sliver));
+    }
+
+    /// A resize comes back from the app as a new frame, so a scroll layout has
+    /// to widen the column from the reported frame rather than the mouse.
+    #[test]
+    fn window_resized_widens_the_column_in_a_scroll_layout() {
         use LayoutEvent::*;
         let mut mgr = LayoutManager::new_for_test();
-        let mut config = Config::default();
-        config.settings.experimental.scroll.enable = true;
-        config.settings.experimental.scroll.new_window_in_column = NewWindowPlacement::SameColumn;
-        config.settings.default_layout_kind = LayoutKind::Scroll;
-        mgr.set_config(&Arc::new(config));
+        let config = config_with_scroll(true, LayoutKind::Scroll);
+        mgr.set_config(&config);
         let space = SpaceId::new(1);
         let pid = 1;
         let screen = rect(0, 0, 1000, 1000);
         _ = mgr.handle_event(SpaceExposed(space, screen.size));
-        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 1)));
-        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 2)));
 
-        let layout = mgr.layout(space);
-        let kept = WindowId::new(pid, 1);
-        let closed = WindowId::new(pid, 2);
-        let node = mgr.tree.window_node(layout, kept).unwrap();
-        let column = node.parent(mgr.tree.map()).unwrap();
-        assert_eq!(
-            Some(column),
-            mgr.tree.window_node(layout, closed).unwrap().parent(mgr.tree.map()),
-            "both windows should share a column"
+        let frames = |mgr: &LayoutManager| -> HashMap<WindowId, CGRect> {
+            mgr.calculate_layout(space, screen, &config, Instant::now())
+                .into_iter()
+                .collect()
+        };
+        let resized = WindowId::new(pid, 1);
+        let old_frame = frames(&mgr)[&resized];
+        let new_frame = CGRect::new(
+            old_frame.origin,
+            CGSize::new(old_frame.size.width + 100.0, old_frame.size.height),
         );
-        assert!(mgr.begin_interactive_resize(
-            column,
-            node,
-            ResizeEdge(ResizeEdge::RIGHT),
-            CGPoint::new(500., 500.),
-        ));
 
-        _ = mgr.handle_event(WindowRemoved(closed));
-        assert!(!mgr.tree.map().contains(column), "the column should be culled");
+        _ = mgr.handle_event(WindowResized {
+            wid: resized,
+            old_frame,
+            new_frame,
+            screens: vec![(space, screen)],
+        });
 
-        assert!(!mgr.update_interactive_resize(CGPoint::new(520., 500.), screen));
-        assert!(!mgr.has_interactive_state());
+        let width = frames(&mgr)[&resized].size.width;
+        assert!(
+            (width - new_frame.size.width).abs() <= 1.0,
+            "column should follow the resized frame, but was {width} \
+             instead of {}",
+            new_frame.size.width
+        );
     }
 
     #[test]
