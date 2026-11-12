@@ -49,9 +49,6 @@ anyhow = "1.0.83"
 ascii_tree = "0.1.1"
 bitflags = "2.4.1"
 clap = { version = "4.5.4", features = ["cargo", "derive"] }
-core-foundation = "0.10.1"
-core-graphics = "0.25.0"
-core-graphics-types = "0.2.0"
 dirs = "5.0.1"
 hex = "0.4.3"
 indexmap = { version = "2.10.0", features = ["serde"] }
