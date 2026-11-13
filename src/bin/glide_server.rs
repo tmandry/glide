@@ -186,7 +186,7 @@ fn main() {
         wm_controller_tx.clone(),
         updater.sender(),
     );
-    let group_bars = GroupBars::new(config.clone(), group_indicators_rx, mtm);
+    let group_bars = GroupBars::new(config.clone(), group_indicators_rx, events_tx.clone(), mtm);
     let dock = Dock::new(dock_sm_tx);
 
     // TODO: Run on another thread so we don't tie up the main thread.

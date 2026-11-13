@@ -63,6 +63,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSColor",
     "NSEvent",
     "NSFont",
+    "NSGlassEffectView",
     "NSGraphics",
     "NSImage",
     "NSMenu",
@@ -76,8 +77,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSStatusBarButton",
     "NSStatusItem",
     "NSText",
+    "NSTrackingArea",
     "NSTextField",
     "NSView",
+    "NSVisualEffectView",
     "NSWindow",
     "NSWindowScripting",
     "NSWorkspace",
@@ -87,6 +90,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "CALayer",
+    "CATextLayer",
+    "CATransaction",
     "objc2-core-foundation",
     "objc2-core-graphics",
 ] }

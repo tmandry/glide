@@ -259,6 +259,33 @@ impl LayoutTree {
         }
     }
 
+    /// Moves the child of `parent` at index `from` to index `to`, counting
+    /// children in their order after the move. Returns whether anything moved.
+    pub fn move_child(&mut self, parent: NodeId, from: usize, to: usize) -> bool {
+        let map = &self.tree.map;
+        if !map.contains(parent) {
+            return false;
+        }
+        let Some(node) = parent.children(map).nth(from) else {
+            return false;
+        };
+        let others: Vec<_> = parent.children(map).filter(|&c| c != node).collect();
+        let to = to.min(others.len());
+        if to == from {
+            return false;
+        }
+        let is_selection = self.tree.data.selection.local_selection(map, parent) == Some(node);
+        if to == 0 {
+            node.detach(&mut self.tree).insert_before(others[0]);
+        } else {
+            node.detach(&mut self.tree).insert_after(others[to - 1]);
+        }
+        if is_selection {
+            self.tree.data.selection.select_locally(&self.tree.map, node);
+        }
+        true
+    }
+
     #[allow(dead_code)]
     pub fn add_windows_if_missing(
         &mut self,
@@ -1502,6 +1529,38 @@ mod tests {
         assert_eq!(Some(b1), tree.window_node(layout, WindowId::new(2, 1)));
 
         assert!(!tree.move_node(layout, root, Direction::Right));
+    }
+
+    #[test]
+    fn move_child() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let group = tree.add_container(root, ContainerKind::Tabbed);
+        let a = tree.add_window_under(layout, group, WindowId::new(1, 1));
+        let b = tree.add_window_under(layout, group, WindowId::new(1, 2));
+        let c = tree.add_window_under(layout, group, WindowId::new(1, 3));
+        tree.select(b);
+
+        assert!(tree.move_child(group, 0, 2));
+        tree.assert_children_are([b, c, a], group);
+        assert_eq!(b, tree.selection(layout));
+
+        assert!(tree.move_child(group, 0, 1));
+        tree.assert_children_are([c, b, a], group);
+        assert_eq!(b, tree.selection(layout));
+
+        assert!(tree.move_child(group, 2, 0));
+        tree.assert_children_are([a, c, b], group);
+        assert_eq!(b, tree.selection(layout));
+
+        // Out of range indices.
+        assert!(tree.move_child(group, 0, 10));
+        tree.assert_children_are([c, b, a], group);
+        assert!(!tree.move_child(group, 3, 0));
+        assert!(!tree.move_child(group, 1, 1));
+        tree.assert_children_are([c, b, a], group);
+        assert_eq!(b, tree.selection(layout));
     }
 
     #[test]

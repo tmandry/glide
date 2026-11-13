@@ -116,6 +116,9 @@ pub enum Request {
     /// marked `Quiet::Yes` automatically.
     Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
 
+    /// Close the window by pressing its close button, as if the user clicked it.
+    CloseWindow(WindowId),
+
     /// Sent by WindowServer actor when a window is destroyed.
     /// See [`actor::window_server::Event::RegisterWindow`].
     WindowDestroyed(WindowId),
@@ -664,6 +667,10 @@ impl State {
                     ))
                     .unwrap();
             }
+            &mut Request::CloseWindow(wid) => {
+                let window = self.window(wid)?;
+                trace("close_button", &window.elem, || window.elem.close_button())?.press()?;
+            }
             &mut Request::WindowDestroyed(wid) => {
                 self.on_window_destroyed(wid);
             }
@@ -733,7 +740,9 @@ impl State {
                 }
             }
             kAXTitleChangedNotification => {
-                // TODO
+                let Ok(wid) = self.id(&elem) else { return };
+                let title = elem.title().map(|t| t.to_string()).unwrap_or_default();
+                self.send_event(Event::WindowTitleChanged(wid, title.into()));
             }
             _ => {
                 error!("Unhandled notification {notif:?} on {elem:#?}");
