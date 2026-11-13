@@ -1073,12 +1073,12 @@ impl Components {
         self.window.handle_event(map, event);
     }
 
-    /// Replaces the parent of `node` with `node`, if it's the only child.
+    /// Replace the parent of `node` with `node`, if it's the only child.
     /// Returns whether it was replaced.
     ///
     /// A root is only replaced by a non-empty container, and never in a scroll
-    /// layout, whose root holds the columns. A group replacing the root keeps
-    /// the root's orientation.
+    /// layout, whose root's children are its columns. A group replacing the
+    /// root keeps the root's orientation.
     fn promote(tree: &mut Tree<Self>, node: NodeId) -> bool {
         let Some(parent) = node.parent(&tree.map) else {
             return false;
@@ -1137,15 +1137,16 @@ impl tree::Observer for Components {
         self.dispatch_event(map, TreeEvent::RemovingFromParent(node))
     }
 
-    /// Culls `parent` after one of its children was removed.
+    /// Cull `parent` after one of its children was removed.
     ///
     /// An empty node is removed, which culls its own parent in turn. An empty
     /// root is reset instead, so there's no group bar.
     ///
-    /// A node left with one child is collapsed with [`Self::promote`]. While it's
-    /// the only child of its parent, it replaces that parent and is culled again
-    /// there, so it climbs as high as it can. Where it stops, its child replaces
-    /// it if `promote` allows.
+    /// A node left with one child is collapsed with [`Self::promote`]. Each
+    /// promotion of `parent` deletes one redundant single-child container above
+    /// it, so the loop collapses a whole chain of them, and it carries `parent`
+    /// up to the root, where the root can be replaced. Where `parent` stops,
+    /// its own child replaces it if `promote` allows.
     fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
         if parent.is_empty(&tree.map) {
             if parent.parent(&tree.map).is_none() {
@@ -1154,11 +1155,8 @@ impl tree::Observer for Components {
                 parent.detach(tree).remove();
             }
         } else if let Some(child) = parent.only_child(&tree.map) {
-            if Self::promote(tree, parent) {
-                Self::removed_child(tree, parent);
-            } else {
-                Self::promote(tree, child);
-            }
+            while Self::promote(tree, parent) {}
+            Self::promote(tree, child);
         }
     }
 
