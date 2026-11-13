@@ -22,7 +22,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::ffi::c_void;
 use std::fmt;
 use std::ptr::NonNull;
@@ -35,7 +35,7 @@ use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType,
 };
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Returned when the system refuses to create an event tap.
 ///
@@ -62,7 +62,7 @@ impl std::error::Error for CreateError {}
 pub struct EventTap {
     callback: *mut (),
     dtor: unsafe fn(*mut ()),
-    in_callback: Rc<Cell<bool>>,
+    shared: Rc<Shared>,
     mach_port: CFRetained<CFMachPort>,
     source: CFRetained<CFRunLoopSource>,
     run_loop: CFRetained<CFRunLoop>,
@@ -70,12 +70,27 @@ pub struct EventTap {
 
 static_assertions::assert_not_impl_any!(EventTap: Send);
 
+/// State reachable both from the tap and from the callback the system holds.
+struct Shared {
+    /// Whether the closure is on the stack. Check this before freeing the
+    /// closure, so that dropping the tap from inside its own callback doesn't
+    /// free a closure that is still running.
+    in_callback: Cell<bool>,
+
+    /// Whether the tap is meant to be delivering events. The system reports a
+    /// tap it disables through the callback, and it reports a call to
+    /// `CGEventTapEnable(.., false)` the same way, so check this to tell a
+    /// disable we asked for from one we didn't.
+    want_enabled: Cell<bool>,
+
+    /// The tap's mach port, filled in once `CGEventTapCreate` has returned it.
+    /// The callback needs it to re-enable a tap the system has disabled.
+    mach_port: OnceCell<CFRetained<CFMachPort>>,
+}
+
 /// The boxed closure handed to the system as the tap's `user_info`.
 struct Callback<F> {
-    /// Whether `func` is on the stack. Check this before freeing the closure,
-    /// so that dropping the tap from inside its own callback doesn't free a
-    /// closure that is still running.
-    in_callback: Rc<Cell<bool>>,
+    shared: Rc<Shared>,
     func: F,
 }
 
@@ -87,9 +102,9 @@ impl EventTap {
     /// modify or discard them.
     ///
     /// The returned tap is enabled, but nothing is delivered until the run loop
-    /// runs. Note that the system may disable a tap that takes too long to
-    /// respond, in which case the callback is called with
-    /// [`CGEventType::TapDisabledByTimeout`].
+    /// runs. The callback only sees the event types it subscribed to: if the
+    /// system disables the tap for taking too long to respond, the tap
+    /// re-enables itself and logs a warning instead of reporting it.
     pub fn new<F>(
         location: CGEventTapLocation,
         placement: CGEventTapPlacement,
@@ -106,9 +121,13 @@ impl EventTap {
             mask | bit
         });
 
-        let in_callback = Rc::new(Cell::new(false));
+        let shared = Rc::new(Shared {
+            in_callback: Cell::new(false),
+            want_enabled: Cell::new(true),
+            mach_port: OnceCell::new(),
+        });
         let callback = Box::into_raw(Box::new(Callback {
-            in_callback: Rc::clone(&in_callback),
+            shared: Rc::clone(&shared),
             func: callback,
         }));
 
@@ -133,6 +152,10 @@ impl EventTap {
             return Err(CreateError);
         };
 
+        // Publish the port before the run loop can dispatch anything, so the
+        // callback can always re-enable a tap the system disables.
+        let _ = shared.mach_port.set(mach_port.clone());
+
         let source = CFMachPort::new_run_loop_source(None, Some(&mach_port), 0)
             .expect("CFMachPortCreateRunLoopSource returned NULL");
         let run_loop = CFRunLoop::current().expect("no current run loop");
@@ -141,7 +164,7 @@ impl EventTap {
         Ok(EventTap {
             callback: callback as *mut (),
             dtor: destruct::<Callback<F>>,
-            in_callback,
+            shared,
             mach_port,
             source,
             run_loop,
@@ -150,18 +173,21 @@ impl EventTap {
 
     /// Start delivering events to the callback.
     pub fn enable(&self) {
+        self.shared.want_enabled.set(true);
         CGEvent::tap_enable(&self.mach_port, true);
     }
 
     /// Stop delivering events to the callback.
     pub fn disable(&self) {
+        self.shared.want_enabled.set(false);
         CGEvent::tap_enable(&self.mach_port, false);
     }
 
     /// Return whether the tap is currently enabled.
     ///
-    /// The system disables taps that take too long to respond, so this can
-    /// become false without [`EventTap::disable`] being called.
+    /// The system disables taps that take too long to respond, but the tap
+    /// re-enables itself when that happens, so this only stays false after a
+    /// call to [`EventTap::disable`].
     pub fn is_enabled(&self) -> bool {
         CGEvent::tap_is_enabled(&self.mach_port)
     }
@@ -175,9 +201,10 @@ impl Drop for EventTap {
         self.run_loop
             .remove_source(Some(&self.source), unsafe { kCFRunLoopCommonModes });
         self.mach_port.invalidate();
-        if self.in_callback.get() {
-            // We were dropped by our own callback, which is still on the stack.
-            // Leaking it is better than freeing it out from under itself.
+        if self.shared.in_callback.get() {
+            // We were dropped by our own callback, which is still on the
+            // stack. Leak the closure and the state it shares with us, rather
+            // than freeing memory the callback is about to touch again.
             warn!("Event tap dropped from inside its callback; leaking the callback");
             return;
         }
@@ -208,11 +235,37 @@ where
     // pointer to a `Callback<F>` that is kept alive for as long as this
     // function can run. Only shared references to it are ever created.
     let callback = unsafe { &*(info as *const Callback<F>) };
-    let was_in_callback = callback.in_callback.replace(true);
+
+    // The system disables a tap that it considers unresponsive, and reports it
+    // here instead of through the events the caller asked for. Turn the tap
+    // back on and keep the notification to ourselves, so that a caller's match
+    // on event types only ever sees events it subscribed to.
+    if matches!(
+        event_type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        if !callback.shared.want_enabled.get() {
+            // A tap disabled through `EventTap::disable` is reported here too.
+            // Leave it off.
+            return event.as_ptr();
+        }
+        match callback.shared.mach_port.get() {
+            Some(mach_port) => {
+                warn!("Event tap was disabled ({event_type:?}); re-enabling it");
+                CGEvent::tap_enable(mach_port, true);
+            }
+            // Unreachable: `new` publishes the port before the run loop can
+            // dispatch to this function.
+            None => error!("Event tap was disabled ({event_type:?}) before it was registered"),
+        }
+        return event.as_ptr();
+    }
+
+    let was_in_callback = callback.shared.in_callback.replace(true);
     // SAFETY: The system passes an event that is valid for the duration of the
     // callback. We do not hold on to the reference past this call.
     (callback.func)(event_type, unsafe { event.as_ref() });
-    callback.in_callback.set(was_in_callback);
+    callback.shared.in_callback.set(was_in_callback);
     // Return the event unchanged to pass it through without transferring
     // ownership. Listen-only taps ignore the return value.
     event.as_ptr()
