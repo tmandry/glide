@@ -192,15 +192,11 @@ impl ClickableIndicatorView {
 
         let pct = match group_data.group_kind {
             GroupKind::Horizontal => point.x / bounds.size.width,
-            GroupKind::Vertical => point.y / bounds.size.height,
+            // The first segment is at the top, and y increases upward.
+            GroupKind::Vertical => 1.0 - point.y / bounds.size.height,
         };
         let segment_index = (pct * group_data.total_count as f64).floor() as usize;
-
-        if segment_index < group_data.total_count {
-            Some(segment_index)
-        } else {
-            None
-        }
+        Some(segment_index.min(group_data.total_count - 1))
     }
 }
 
@@ -646,22 +642,27 @@ mod tests {
             is_selected: true,
         };
 
-        // Test vertical segments (each segment is 25px tall)
-        // Segment 0: y 0-25, Segment 1: y 25-50, etc.
+        // Test vertical segments (each segment is 25px tall), which run from
+        // the top of the bar down while y increases upward.
+        // Segment 0: y 75-100, Segment 1: y 50-75, etc.
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 12.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 87.0), &vertical_group),
             Some(0)
         );
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 37.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 62.0), &vertical_group),
             Some(1)
         );
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 62.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 37.0), &vertical_group),
             Some(2)
         );
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 87.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 12.0), &vertical_group),
+            Some(3)
+        );
+        assert_eq!(
+            view.segment_at_point(CGPoint::new(298.0, 0.0), &vertical_group),
             Some(3)
         );
 
