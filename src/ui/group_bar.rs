@@ -99,23 +99,23 @@ objc2::define_class!(
 pub struct GroupIndicatorNSView {
     /// Holds the backdrop (if any) and the indicator view on top of it.
     root: Retained<NSView>,
-    backdrop: Option<Backdrop>,
+    backdrop: Option<GlassBackdrop>,
     view: Retained<ClickableIndicatorView>,
     mtm: MainThreadMarker,
 }
 
 /// The material drawn behind the segments when `style = "glass"`.
-enum Backdrop {
+enum GlassBackdrop {
     /// Liquid Glass, macOS 26 and later.
     Glass(Retained<NSGlassEffectView>),
     /// A behind-window blur, for earlier versions of macOS.
     Blur(Retained<NSVisualEffectView>),
 }
 
-impl Backdrop {
+impl GlassBackdrop {
     fn new(frame: CGRect, mtm: MainThreadMarker) -> Self {
         if AnyClass::get(c"NSGlassEffectView").is_some() {
-            Backdrop::Glass(NSGlassEffectView::initWithFrame(
+            GlassBackdrop::Glass(NSGlassEffectView::initWithFrame(
                 NSGlassEffectView::alloc(mtm),
                 frame,
             ))
@@ -125,27 +125,28 @@ impl Backdrop {
             view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
             view.setState(NSVisualEffectState::Active);
             view.setWantsLayer(true);
-            Backdrop::Blur(view)
+            GlassBackdrop::Blur(view)
         }
     }
 
     fn view(&self) -> &NSView {
         match self {
-            Backdrop::Glass(v) => v,
-            Backdrop::Blur(v) => v,
+            GlassBackdrop::Glass(v) => v,
+            GlassBackdrop::Blur(v) => v,
         }
     }
 
     /// Glass takes the tint directly. The blur has no tint, so the background
     /// layer paints over it instead; returns whether that is needed.
+    #[must_use]
     fn set_appearance(&self, corner_radius: f64, tint: &Color) -> bool {
         match self {
-            Backdrop::Glass(v) => {
+            GlassBackdrop::Glass(v) => {
                 v.setCornerRadius(corner_radius);
                 v.setTintColor(Some(&tint.to_nscolor()));
                 false
             }
-            Backdrop::Blur(v) => {
+            GlassBackdrop::Blur(v) => {
                 if let Some(layer) = v.layer() {
                     layer.setCornerRadius(corner_radius);
                     layer.setMasksToBounds(true);
@@ -242,7 +243,7 @@ impl GroupIndicatorNSView {
         let style = self.view.ivars().borrow().config.style;
         match (style, &self.backdrop) {
             (GroupBarStyle::Glass, None) => {
-                let backdrop = Backdrop::new(self.root.bounds(), self.mtm);
+                let backdrop = GlassBackdrop::new(self.root.bounds(), self.mtm);
                 fill_superview(backdrop.view());
                 self.root.addSubview_positioned_relativeTo(
                     backdrop.view(),
