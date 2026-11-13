@@ -181,6 +181,9 @@ pub enum Event {
     /// mouse actor so it describes the same moment as the mouse position.
     MouseMovedOverWindow(WindowServerId, #[serde(default)] Option<pid_t>),
 
+    /// A tab in a group bar was clicked. The window is the one the tab shows.
+    GroupBarTabClicked(WindowId),
+
     /// A raise request completed. Used by the raise manager to track when
     /// all raise requests in a sequence have finished.
     RaiseCompleted {
@@ -898,6 +901,21 @@ impl Reactor {
                         // than main, to avoid stealing focus from a panel (of
                         // the main app; otherwise we would have returned above).
                         current_main,
+                    },
+                    ResponseContext {
+                        from_mouse: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            Event::GroupBarTabClicked(wid) => {
+                if !self.windows.contains_key(&wid) {
+                    return;
+                }
+                self.handle_layout_response_with_context(
+                    layout::EventResponse {
+                        focus_window: Some(wid),
+                        ..Default::default()
                     },
                     ResponseContext {
                         from_mouse: true,
@@ -3527,6 +3545,52 @@ pub mod tests {
             panic!("unexpected raise event: {event:?}");
         };
         assert_eq!(focus_window.map(|(wid, _)| wid), Some(WindowId::new(1, 2)));
+    }
+
+    #[test]
+    fn it_focuses_the_window_of_a_clicked_group_bar_tab() {
+        use Event::*;
+
+        let mut apps = Apps::new();
+        let space = SpaceId::new(1);
+        let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.handle_event(ScreenParametersChanged {
+            frames: vec![full_screen],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_event(ApplicationGloballyActivated(1));
+        reactor.handle_events(apps.make_app_with_opts(
+            1,
+            make_windows(2),
+            Some(WindowId::new(1, 1)),
+            true,
+        ));
+        reactor.handle_events(apps.simulate_events());
+        reactor.handle_event(Command(super::Command::Layout(LayoutCommand::Group(
+            crate::model::Orientation::Horizontal,
+        ))));
+        reactor.handle_events(apps.simulate_events());
+
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        reactor.raise_manager_tx = raise_manager_tx;
+
+        reactor.handle_event(GroupBarTabClicked(WindowId::new(1, 2)));
+        let event =
+            raise_manager_rx.try_recv().expect("tab click should produce a raise request").1;
+        let raise::Event::RaiseRequest(RaiseRequest { focus_window, .. }) = event else {
+            panic!("unexpected raise event: {event:?}");
+        };
+        assert_eq!(focus_window.map(|(wid, _)| wid), Some(WindowId::new(1, 2)));
+
+        reactor.handle_event(GroupBarTabClicked(WindowId::new(1, 3)));
+        assert!(
+            raise_manager_rx.try_recv().is_err(),
+            "clicking a tab for an unknown window should do nothing"
+        );
     }
 
     #[test]
