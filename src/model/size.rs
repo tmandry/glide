@@ -193,6 +193,13 @@ impl Size {
         self.info[new].size = mem::replace(&mut self.info[old].size, 0.0);
     }
 
+    /// Gives a group the orientation `old` would return to when ungrouped.
+    pub(super) fn assume_orientation_of(&mut self, new: NodeId, old: NodeId) {
+        if self.info[new].kind.is_group() {
+            self.info[new].last_ungrouped_kind = self.info[old].last_ungrouped_kind;
+        }
+    }
+
     pub(super) fn set_kind(&mut self, node: NodeId, kind: ContainerKind) {
         self.info[node].kind = kind;
         if !kind.is_group() {
@@ -200,7 +207,7 @@ impl Size {
         }
     }
 
-    pub(super) fn reset_root(&mut self, node: NodeId) {
+    pub(super) fn reset_layout(&mut self, node: NodeId) {
         let info = &mut self.info[node];
         info.kind = info.last_ungrouped_kind;
         info.is_fullscreen = false;
