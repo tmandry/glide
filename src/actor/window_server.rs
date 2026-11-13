@@ -397,7 +397,7 @@ impl SkylightWatcherState {
                 debug!("Window registered: {wsid:?}");
                 self.registered_windows.insert(wsid, (wid, tx));
                 if let Err(e) = self.connection.add_window(wsid) {
-                    warn!("Failed to update SkylightConnection window list: {e}");
+                    warn!("Failed to update SkylightConnection window list: {e:?}");
                 }
             }
         }

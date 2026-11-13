@@ -1,13 +1,13 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use core_graphics::base::CGError;
 use livesplit_hotkey::{ConsumePreference, Hook};
 pub use livesplit_hotkey::{Hotkey, KeyCode, Modifiers};
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGWarpMouseCursorPosition, kCGNullDirectDisplay,
+    CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGWarpMouseCursorPosition,
+    kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
@@ -66,20 +66,24 @@ pub fn get_mouse_pos(converter: CoordinateConverter) -> Option<CGPoint> {
 }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
-    cg_result(CGWarpMouseCursorPosition(point).0)
+    cg_result(CGWarpMouseCursorPosition(point))
 }
 
 /// Hide the mouse. Note that this will have no effect unless
 /// [`window_server::allow_hide_mouse`] was called or this application is
 /// focused.
 pub fn hide_mouse() -> Result<(), CGError> {
-    cg_result(CGDisplayHideCursor(kCGNullDirectDisplay).0)
+    cg_result(CGDisplayHideCursor(kCGNullDirectDisplay))
 }
 
 pub fn show_mouse() -> Result<(), CGError> {
-    cg_result(CGDisplayShowCursor(kCGNullDirectDisplay).0)
+    cg_result(CGDisplayShowCursor(kCGNullDirectDisplay))
 }
 
 fn cg_result(err: CGError) -> Result<(), CGError> {
-    if err == 0 { Ok(()) } else { Err(err) }
+    if err == CGError::Success {
+        Ok(())
+    } else {
+        Err(err)
+    }
 }

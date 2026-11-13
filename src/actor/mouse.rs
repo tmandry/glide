@@ -6,19 +6,18 @@ use std::mem::replace;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventType, CallbackResult, EventField,
-};
 use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_graphics::{
+    CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventTapPlacement, CGEventType,
+};
 use objc2_foundation::{MainThreadMarker, NSInteger};
 use tracing::{debug, error, warn};
 
 use super::reactor::{self, Event};
 use crate::config::Config;
 use crate::sys::event;
-use crate::sys::geometry::{CGRectExt, ToICrate};
+use crate::sys::event_tap::EventTap;
+use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::CoordinateConverter;
 use crate::sys::window_server::{self, WindowServerId, get_window};
 use crate::{actor, trace_call};
@@ -67,7 +66,7 @@ impl Mouse {
         let mut requests_rx = self.requests_rx.take().unwrap();
         let this = Rc::new(self);
 
-        let events = vec![
+        let events = [
             // Any event we want the mouse to be shown for, plus scroll events.
             CGEventType::LeftMouseDown,
             CGEventType::LeftMouseUp,
@@ -79,26 +78,14 @@ impl Mouse {
             CGEventType::ScrollWheel,
         ];
         let this_ = Rc::clone(&this);
-        let current = CFRunLoop::get_current();
         let mtm = MainThreadMarker::new().unwrap();
-        // SAFETY: tap is dropped before all captures, and the tap is installed
-        // on the current thread.
-        let tap = unsafe {
-            CGEventTap::new_unchecked(
-                CGEventTapLocation::Session,
-                CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions::ListenOnly,
-                events,
-                move |_, event_type, event| {
-                    this_.on_event(event_type, event, mtm);
-                    CallbackResult::Keep
-                },
-            )
-        }
+        let tap = EventTap::new(
+            CGEventTapLocation::SessionEventTap,
+            CGEventTapPlacement::HeadInsertEventTap,
+            &events,
+            move |event_type, event| this_.on_event(event_type, event, mtm),
+        )
         .expect("Could not create event tap");
-
-        let loop_source = tap.mach_port().create_runloop_source(0).unwrap();
-        current.add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
 
         // Callbacks will be dispatched by the run loop, which we assume is
         // running by the time this function is awaited.
@@ -164,35 +151,38 @@ impl Mouse {
         }
         match event_type {
             CGEventType::LeftMouseDown => {
-                let loc = event.location();
-                self.events_tx.send(Event::LeftMouseDown(loc.to_icrate()));
+                let loc = CGEvent::location(Some(event));
+                self.events_tx.send(Event::LeftMouseDown(loc));
             }
             CGEventType::LeftMouseUp => {
                 self.events_tx.send(Event::MouseUp);
             }
             CGEventType::LeftMouseDragged => {
-                let loc = event.location();
-                self.events_tx.send(Event::LeftMouseDragged(loc.to_icrate()));
+                let loc = CGEvent::location(Some(event));
+                self.events_tx.send(Event::LeftMouseDragged(loc));
             }
             CGEventType::MouseMoved if self.config.borrow().settings.focus_follows_mouse => {
-                let loc = event.location();
+                let loc = CGEvent::location(Some(event));
                 #[cfg(false)]
                 tracing::trace!("Mouse moved {loc:?}");
-                if let Some(wsid) = state.track_mouse_move(loc.to_icrate(), mtm) {
+                if let Some(wsid) = state.track_mouse_move(loc, mtm) {
                     let key_focus_pid = window_server::get_key_focus_pid();
                     self.events_tx.send(Event::MouseMovedOverWindow(wsid, key_focus_pid));
                 }
             }
             CGEventType::ScrollWheel => {
-                let delta_y = event
-                    .get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1)
-                    as f64;
-                let delta_x = event
-                    .get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2)
-                    as f64;
+                let delta_y = CGEvent::integer_value_field(
+                    Some(event),
+                    CGEventField::ScrollWheelEventDeltaAxis1,
+                ) as f64;
+                let delta_x = CGEvent::integer_value_field(
+                    Some(event),
+                    CGEventField::ScrollWheelEventDeltaAxis2,
+                ) as f64;
 
                 if delta_x != 0.0 || delta_y != 0.0 {
-                    let alt_held = event.get_flags().contains(CGEventFlags::CGEventFlagAlternate);
+                    let alt_held =
+                        CGEvent::flags(Some(event)).contains(CGEventFlags::MaskAlternate);
                     self.events_tx.send(Event::ScrollWheel { delta_x, delta_y, alt_held });
                 }
             }

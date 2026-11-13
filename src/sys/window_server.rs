@@ -8,14 +8,13 @@ use std::ptr;
 
 use accessibility::AXUIElement;
 use accessibility_sys::pid_t;
-use core_graphics::base::CGError;
 use objc2_app_kit::NSWindow;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType, CGPoint,
     CGRect, CGSize,
 };
 use objc2_core_graphics::{
-    CGRectMakeWithDictionaryRepresentation, CGWindowID, CGWindowListCopyWindowInfo,
+    CGError, CGRectMakeWithDictionaryRepresentation, CGWindowID, CGWindowListCopyWindowInfo,
     CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGNullWindowID, kCGWindowBounds,
     kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
 };
@@ -266,7 +265,7 @@ unsafe extern "C" {
 pub fn get_front_process_pid() -> Option<pid_t> {
     let mut psn = ProcessSerialNumber::default();
     // SAFETY: The out parameter is a valid pointer.
-    if unsafe { _SLPSGetFrontProcess(&mut psn) } != 0 {
+    if unsafe { _SLPSGetFrontProcess(&mut psn) } != CGError::Success {
         return None;
     }
     psn.pid().ok()
@@ -283,7 +282,7 @@ pub fn get_key_focus_pid() -> Option<pid_t> {
     let mut psn = ProcessSerialNumber::default();
     let mut is_front = 0;
     // SAFETY: Both out parameters are valid pointers.
-    if unsafe { SLPSGetKeyFocusProcess(&mut psn, &mut is_front) } != 0 {
+    if unsafe { SLPSGetKeyFocusProcess(&mut psn, &mut is_front) } != CGError::Success {
         return None;
     }
     psn.pid().ok()
@@ -306,7 +305,13 @@ pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), ()> {
     event2[0x08] = 0x02;
 
     let psn = ProcessSerialNumber::for_pid(pid)?;
-    let check = |err| if err == 0 { Ok(()) } else { Err(()) };
+    let check = |err| {
+        if err == CGError::Success {
+            Ok(())
+        } else {
+            Err(())
+        }
+    };
     unsafe {
         check(_SLPSSetFrontProcessWithOptions(&psn, wsid.0, kCPSUserGenerated))?;
         check(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
@@ -442,7 +447,11 @@ pub struct SkylightNotifier {
 }
 
 fn check(err: CGError) -> Result<(), CGError> {
-    if err == 0 { Ok(()) } else { Err(err) }
+    if err == CGError::Success {
+        Ok(())
+    } else {
+        Err(err)
+    }
 }
 
 /// Reads the payload of a window server notification.
@@ -509,9 +518,9 @@ impl Drop for SkylightNotifier {
             self.internal_callback,
             self.event,
             self.callback.cast(),
-        ) && e != 0
+        ) && e != CGError::Success
         {
-            warn!("Failed to release SLS connection {cid}: {e}", cid = self.cid);
+            warn!("Failed to release SLS connection {cid}: {e:?}", cid = self.cid);
             return; // so we don't free data referred to by the callback
         }
         // SAFETY: destruct<F> takes a pointer to F.
@@ -579,9 +588,9 @@ impl Drop for GlobalNotifier {
     fn drop(&mut self) {
         #[allow(irrefutable_let_patterns)]
         if let e = SLSRemoveNotifyProc(self.internal_callback, self.event, self.callback.cast())
-            && e != 0
+            && e != CGError::Success
         {
-            warn!("Failed to remove notify proc for event {}: {e}", self.event);
+            warn!("Failed to remove notify proc for event {}: {e:?}", self.event);
             return; // so we don't free data referred to by the callback
         }
         // SAFETY: destruct<F> takes a pointer to F.

@@ -310,29 +310,21 @@ async fn main() -> anyhow::Result<()> {
             })?;
         }
         Command::Mouse(Mouse::Clicks) => {
-            use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-            use core_graphics::event::{
-                CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+            use glide_wm::sys::event_tap::EventTap;
+            use objc2_core_foundation::CFRunLoop;
+            use objc2_core_graphics::{
+                CGEvent, CGEventTapLocation, CGEventTapPlacement, CGEventType,
             };
-            let current = CFRunLoop::get_current();
-            match CGEventTap::new(
-                CGEventTapLocation::HID,
+
+            let tap = EventTap::new(
+                CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions::Default,
-                vec![CGEventType::LeftMouseUp],
-                |_a, _b, d| {
-                    println!("{:?}", d.location());
-                    core_graphics::event::CallbackResult::Keep
-                },
-            ) {
-                Ok(tap) => unsafe {
-                    let loop_source = tap.mach_port().create_runloop_source(0).unwrap();
-                    current.add_source(&loop_source, kCFRunLoopCommonModes);
-                    tap.enable();
-                    CFRunLoop::run_current();
-                },
-                Err(_) => assert!(false),
-            }
+                &[CGEventType::LeftMouseUp],
+                |_event_type, event| println!("{:?}", CGEvent::location(Some(event))),
+            )
+            .context("could not create event tap")?;
+            tap.enable();
+            CFRunLoop::run();
         }
         Command::Mouse(Mouse::Hide) => {
             window_server::allow_hide_mouse().unwrap();
@@ -373,7 +365,7 @@ fn watch_notifications(
         let (connection, requested) = (connection.clone(), requested.clone());
         move |wsid: WindowServerId| match connection.borrow_mut().add_window(wsid) {
             Ok(()) => requested.set(requested.get() + 1),
-            Err(e) => println!("Could not request notifications for {wsid:?}: {e}"),
+            Err(e) => println!("Could not request notifications for {wsid:?}: {e:?}"),
         }
     };
 
@@ -449,7 +441,7 @@ fn notification_window(data: &[u8]) -> Option<WindowServerId> {
 /// Polls each source of "what has keyboard focus" and prints them when any of
 /// them changes.
 fn watch_focus(interval: Duration) {
-    use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
 
     let system_wide = AXUIElement::system_wide();
     // A hung app must not stall the probe.
@@ -486,7 +478,7 @@ fn watch_focus(interval: Duration) {
             last_summary = Instant::now();
         }
         // NSWorkspace learns about activation from the run loop.
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, interval, false);
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, interval.as_secs_f64(), false);
     }
 }
 

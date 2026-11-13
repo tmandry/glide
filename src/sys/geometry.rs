@@ -1,38 +1,9 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use core_graphics_types::geometry as cg;
 use objc2_core_foundation as ic;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{DeserializeAs, SerializeAs};
-
-pub trait ToICrate<T> {
-    fn to_icrate(&self) -> T;
-}
-
-impl ToICrate<ic::CGPoint> for cg::CGPoint {
-    fn to_icrate(&self) -> ic::CGPoint {
-        ic::CGPoint { x: self.x, y: self.y }
-    }
-}
-
-impl ToICrate<ic::CGSize> for cg::CGSize {
-    fn to_icrate(&self) -> ic::CGSize {
-        ic::CGSize {
-            width: self.width,
-            height: self.height,
-        }
-    }
-}
-
-impl ToICrate<ic::CGRect> for cg::CGRect {
-    fn to_icrate(&self) -> ic::CGRect {
-        ic::CGRect {
-            origin: self.origin.to_icrate(),
-            size: self.size.to_icrate(),
-        }
-    }
-}
 
 pub trait Round {
     fn round(&self) -> Self;
