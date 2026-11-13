@@ -9,12 +9,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use glide_wm::ui::{GroupDisplayData, GroupIndicatorNSView, GroupKind};
+use glide_wm::config::GroupBarStyle;
+use glide_wm::ui::{GroupDisplayData, GroupIndicatorNSView, GroupKind, TabLabel};
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSFont, NSTextField, NSView,
-    NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSFont, NSRunningApplication,
+    NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
@@ -148,6 +149,49 @@ fn create_content_view(mtm: MainThreadMarker) -> (Retained<NSView>, IndicatorDem
         }
     }
 
+    // A labeled glass bar, as configured with `style = "glass"`, `show_titles`
+    // and `show_icons`.
+    let label = create_label("Glass tab bar with titles and icons", y_position, mtm);
+    content_view.addSubview(&label);
+    y_position -= 35.0;
+    let thickness = 24.0;
+    let indicator_rect = NSRect::new(
+        NSPoint::new(50.0, y_position - thickness),
+        NSSize::new(700.0, thickness),
+    );
+    let mut config = glide_wm::config::Config::default().settings.group_bars;
+    config.style = GroupBarStyle::Glass;
+    config.show_titles = true;
+    config.show_icons = true;
+    let icon = NSRunningApplication::currentApplication().icon();
+    let tabs = [
+        "README.md — glide",
+        "Liquid Glass - Apple Developer",
+        "Terminal",
+    ]
+    .map(|title| TabLabel {
+        title: title.to_string().into(),
+        icon: icon.clone(),
+    })
+    .to_vec();
+    let mut indicator_view = GroupIndicatorNSView::new(indicator_rect, &config, mtm);
+    indicator_view.update(GroupDisplayData {
+        group_kind: GroupKind::Horizontal,
+        total_count: tabs.len(),
+        selected_index: 0,
+        frame: indicator_rect,
+        is_selected: true,
+        tabs,
+    });
+    let indicator_rc = Rc::new(RefCell::new(indicator_view));
+    let indicator_rc_clone = indicator_rc.clone();
+    indicator_rc.borrow_mut().set_click_callback(Rc::new(move |segment_index| {
+        indicator_rc_clone.borrow_mut().click_segment(segment_index);
+    }));
+    content_view.addSubview(indicator_rc.borrow().view());
+    demo.add_indicator(indicator_rc);
+    y_position -= 60.0;
+
     // Add instructions at the bottom
     let instructions = create_label(
         "Interactive Demo: Click on segments to change selection and see animation!",
@@ -187,6 +231,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 1,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
         (
@@ -197,6 +242,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 0,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
         (
@@ -207,6 +253,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 4,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
         (
@@ -217,6 +264,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 7,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
         (
@@ -227,6 +275,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 3,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
         (
@@ -237,6 +286,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 0,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
         (
@@ -247,6 +297,7 @@ fn create_demo_scenarios() -> Vec<(&'static str, GroupDisplayData)> {
                 selected_index: 1,
                 frame,
                 is_selected: true,
+                tabs: vec![],
             },
         ),
     ]

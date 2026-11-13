@@ -151,6 +151,10 @@ pub enum Event {
     // TODO: Consider replacing with WindowsOnScreenUpdated.
     WindowBecameVisible(WindowId),
     WindowDestroyed(WindowId),
+    WindowTitleChanged(
+        WindowId,
+        #[serde(serialize_with = "redact::expose_secret")] Secret<String>,
+    ),
     /// Window was moved or resized.
     ///
     /// We check if the mouse is held down to detect an entered drag. We can't
@@ -180,6 +184,9 @@ pub enum Event {
     /// events to when the mouse moved, if it could be read. It is read in the
     /// mouse actor so it describes the same moment as the mouse position.
     MouseMovedOverWindow(WindowServerId, #[serde(default)] Option<pid_t>),
+
+    /// A tab in a group bar was clicked. The window is the one the tab shows.
+    GroupBarTabClicked(WindowId),
 
     /// A raise request completed. Used by the raise manager to track when
     /// all raise requests in a sequence have finished.
@@ -339,7 +346,6 @@ pub struct TransactionId(u32);
 
 #[derive(Debug)]
 struct WindowState {
-    #[allow(unused)]
     title: Secret<String>,
     /// The last known frame of the window. Always includes the last write.
     ///
@@ -638,6 +644,15 @@ impl Reactor {
                 //animation_focus_wid = self.window_order.last().cloned();
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             }
+            Event::WindowTitleChanged(wid, title) => {
+                if let Some(window) = self.windows.get_mut(&wid)
+                    && window.title.expose_secret() != title.expose_secret()
+                {
+                    window.title = title.clone();
+                    self.group_indicators_tx
+                        .send(group_bars::Event::WindowTitleChanged(wid, title));
+                }
+            }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 // The button is up, so any resize we were holding off on is
                 // over, even if we never saw the MouseUp event.
@@ -898,6 +913,21 @@ impl Reactor {
                         // than main, to avoid stealing focus from a panel (of
                         // the main app; otherwise we would have returned above).
                         current_main,
+                    },
+                    ResponseContext {
+                        from_mouse: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            Event::GroupBarTabClicked(wid) => {
+                if !self.windows.contains_key(&wid) {
+                    return;
+                }
+                self.handle_layout_response_with_context(
+                    layout::EventResponse {
+                        focus_window: Some(wid),
+                        ..Default::default()
                     },
                     ResponseContext {
                         from_mouse: true,
@@ -1397,8 +1427,16 @@ impl Reactor {
             let (result, groups) =
                 self.layout.calculate_layout_and_groups(space, screen.frame, &self.config, now);
 
-            self.group_indicators_tx
-                .send(group_bars::Event::GroupsUpdated { space_id: space, groups });
+            let titles = groups
+                .iter()
+                .flat_map(|group| &group.windows)
+                .filter_map(|wid| Some((*wid, self.windows.get(wid)?.title.clone())))
+                .collect();
+            self.group_indicators_tx.send(group_bars::Event::GroupsUpdated {
+                space_id: space,
+                groups,
+                titles,
+            });
 
             targets
                 .extend(result.into_iter().map(|(wid, frame)| (wid, (frame, screen.scale_factor))));
@@ -3527,6 +3565,52 @@ pub mod tests {
             panic!("unexpected raise event: {event:?}");
         };
         assert_eq!(focus_window.map(|(wid, _)| wid), Some(WindowId::new(1, 2)));
+    }
+
+    #[test]
+    fn it_focuses_the_window_of_a_clicked_group_bar_tab() {
+        use Event::*;
+
+        let mut apps = Apps::new();
+        let space = SpaceId::new(1);
+        let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        reactor.handle_event(ScreenParametersChanged {
+            frames: vec![full_screen],
+            spaces: vec![Some(space)],
+            scale_factors: vec![2.0],
+            converter: CoordinateConverter::default(),
+            on_screen: Default::default(),
+        });
+        reactor.handle_event(ApplicationGloballyActivated(1));
+        reactor.handle_events(apps.make_app_with_opts(
+            1,
+            make_windows(2),
+            Some(WindowId::new(1, 1)),
+            true,
+        ));
+        reactor.handle_events(apps.simulate_events());
+        reactor.handle_event(Command(super::Command::Layout(LayoutCommand::Group(
+            crate::model::Orientation::Horizontal,
+        ))));
+        reactor.handle_events(apps.simulate_events());
+
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        reactor.raise_manager_tx = raise_manager_tx;
+
+        reactor.handle_event(GroupBarTabClicked(WindowId::new(1, 2)));
+        let event =
+            raise_manager_rx.try_recv().expect("tab click should produce a raise request").1;
+        let raise::Event::RaiseRequest(RaiseRequest { focus_window, .. }) = event else {
+            panic!("unexpected raise event: {event:?}");
+        };
+        assert_eq!(focus_window.map(|(wid, _)| wid), Some(WindowId::new(1, 2)));
+
+        reactor.handle_event(GroupBarTabClicked(WindowId::new(1, 3)));
+        assert!(
+            raise_manager_rx.try_recv().is_err(),
+            "clicking a tab for an unknown window should do nothing"
+        );
     }
 
     #[test]
