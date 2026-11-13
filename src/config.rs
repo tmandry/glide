@@ -405,8 +405,10 @@ impl ConfigPartial {
             };
             keys.push((key, cmd));
         }
+        let mut settings = self.settings.validate()?;
+        settings.group_bars.gap = settings.group_bars.gap.max(0.0);
         Ok(Config {
-            settings: self.settings.validate()?,
+            settings,
             window_rules: self.window_rules.unwrap_or_default(),
             keys,
         })
@@ -544,6 +546,12 @@ mod tests {
     #[test]
     fn default_settings_match_unspecified_setting_values() {
         assert_eq!(Config::default().settings, Config::parse("").unwrap().settings);
+    }
+
+    #[test]
+    fn negative_group_bar_gap_is_clamped() {
+        let config = Config::parse("settings.group_bars.gap = -5").unwrap();
+        assert_eq!(config.settings.group_bars.gap, 0.0);
     }
 
     #[test]

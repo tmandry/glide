@@ -614,9 +614,14 @@ fn size_with_group_indicator(
     }
 
     let thickness = config.thickness;
-    // The bar and the gap between it and the group's windows.
-    let reserved = thickness + config.gap;
     let CGRect { origin, size } = rect;
+    // The bar and the gap between it and the group's windows, limited to the
+    // space the group has along the bar's axis.
+    let available = match container_kind {
+        ContainerKind::Stacked => size.width,
+        _ => size.height,
+    };
+    let reserved = (thickness + config.gap).clamp(0.0, available.max(0.0));
     let rect = |x, y, width, height| CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
 
     match container_kind {
@@ -938,6 +943,30 @@ mod tests {
         assert_eq!(frame_of(&frames, WindowId::new(1, 1)), rect(0, 0, 1000, 970));
         assert_eq!(indicator_of(&groups, stacked), rect(1980, 0, 20, 1000));
         assert_eq!(frame_of(&frames, WindowId::new(2, 1)), rect(1000, 0, 970, 1000));
+    }
+
+    #[test]
+    fn it_limits_the_indicator_gap_to_the_group_size() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let tabbed = tree.add_container(root, ContainerKind::Tabbed);
+        tree.add_window_under(layout, tabbed, WindowId::new(1, 1));
+        let stacked = tree.add_container(root, ContainerKind::Stacked);
+        tree.add_window_under(layout, stacked, WindowId::new(2, 1));
+
+        let screen = rect(0, 0, 2000, 1000);
+        let mut config = Config::default();
+        config.settings.group_bars.thickness = 20.0;
+        config.settings.group_bars.gap = 5000.0;
+        let (frames, _) = tree.calculate_layout_and_groups(layout, screen, &config);
+        assert_eq!(
+            frames,
+            vec![
+                (WindowId::new(1, 1), rect(0, 1000, 1000, 0)),
+                (WindowId::new(2, 1), rect(1000, 0, 0, 1000)),
+            ]
+        );
     }
 
     #[test]
