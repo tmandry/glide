@@ -200,36 +200,43 @@ fn create_content_view(mtm: MainThreadMarker) -> (Retained<NSView>, IndicatorDem
         icon: icon.clone(),
     })
     .to_vec();
-    let mut indicator_view = GroupIndicatorNSView::new(indicator_rect, &config, mtm);
-    indicator_view.update(GroupDisplayData {
-        group_kind: GroupKind::Horizontal,
-        total_count: tabs.len(),
-        selected_index: 0,
-        frame: indicator_rect,
-        is_selected: true,
-        tabs,
-    });
-    let indicator_rc = Rc::new(RefCell::new(indicator_view));
-    let indicator_rc_clone = indicator_rc.clone();
-    indicator_rc.borrow_mut().set_click_callback(Rc::new(move |segment_index| {
-        indicator_rc_clone.borrow_mut().click_segment(segment_index);
-    }));
-    indicator_rc.borrow_mut().set_close_callback(Rc::new(move |segment_index| {
-        println!("Close button of tab {segment_index} clicked");
-    }));
-    let indicator_rc_clone = indicator_rc.clone();
-    indicator_rc.borrow_mut().set_move_callback(Rc::new(move |from, to| {
-        let mut indicator = indicator_rc_clone.borrow_mut();
-        let Some(mut group_data) = indicator.group_data() else {
-            return;
-        };
-        let tab = group_data.tabs.remove(from);
-        group_data.tabs.insert(to, tab);
-        group_data.selected_index = to;
-        indicator.update(group_data);
-    }));
-    content_view.addSubview(indicator_rc.borrow().view());
-    demo.add_indicator(indicator_rc);
+    // The same bar on its side, as a stacked group shows it.
+    let vertical_rect = NSRect::new(NSPoint::new(764.0, 420.0), NSSize::new(thickness, 540.0));
+    for (group_kind, indicator_rect) in [
+        (GroupKind::Horizontal, indicator_rect),
+        (GroupKind::Vertical, vertical_rect),
+    ] {
+        let mut indicator_view = GroupIndicatorNSView::new(indicator_rect, &config, mtm);
+        indicator_view.update(GroupDisplayData {
+            group_kind,
+            total_count: tabs.len(),
+            selected_index: 0,
+            frame: indicator_rect,
+            is_selected: true,
+            tabs: tabs.clone(),
+        });
+        let indicator_rc = Rc::new(RefCell::new(indicator_view));
+        let indicator_rc_clone = indicator_rc.clone();
+        indicator_rc.borrow_mut().set_click_callback(Rc::new(move |segment_index| {
+            indicator_rc_clone.borrow_mut().click_segment(segment_index);
+        }));
+        indicator_rc.borrow_mut().set_close_callback(Rc::new(move |segment_index| {
+            println!("Close button of tab {segment_index} clicked");
+        }));
+        let indicator_rc_clone = indicator_rc.clone();
+        indicator_rc.borrow_mut().set_move_callback(Rc::new(move |from, to| {
+            let mut indicator = indicator_rc_clone.borrow_mut();
+            let Some(mut group_data) = indicator.group_data() else {
+                return;
+            };
+            let tab = group_data.tabs.remove(from);
+            group_data.tabs.insert(to, tab);
+            group_data.selected_index = to;
+            indicator.update(group_data);
+        }));
+        content_view.addSubview(indicator_rc.borrow().view());
+        demo.add_indicator(indicator_rc);
+    }
     y_position -= 60.0;
 
     // Add instructions at the bottom

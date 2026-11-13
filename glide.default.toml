@@ -59,9 +59,10 @@ group_bars.border_width = 0.5
 # Radius of the bar's rounded ends (in points). Bars are never rounded beyond
 # half their thickness.
 group_bars.corner_radius = 4
-# Label each tab of a tabbed group with its window's title and app icon. Labels
-# need a thicker bar to be legible, e.g. thickness = 24. Stacked groups are not
-# labeled. Hovering over a labeled tab shows a button to close its window.
+# Label each tab of a group with its window's title and app icon. Labels need a
+# thicker bar to be legible, e.g. thickness = 24. On the vertical bar of a
+# stacked group, titles are rotated to read from top to bottom. Hovering over a
+# labeled tab shows a button to close its window.
 group_bars.show_titles = false
 group_bars.show_icons = false
 # Title colors of the selected tab and the other tabs.

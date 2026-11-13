@@ -8,6 +8,8 @@
 //! - Vertical groups (stacked): vertical bar on the side
 //! - Each segment represents one child in the group
 //! - Selected segment is highlighted
+//! - Segments can be labeled with their window's title and icon; on a vertical
+//!   bar the title is rotated to read from top to bottom
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -78,7 +80,8 @@ const DRAG_THRESHOLD: f64 = 8.0;
 /// A tab being pressed or dragged.
 struct TabDrag {
     index: usize,
-    start_x: f64,
+    /// Where along the bar the press began.
+    start: f64,
     /// How far the tab has been dragged, once past the threshold.
     offset: Option<f64>,
 }
@@ -95,18 +98,68 @@ struct LabelMetrics {
 }
 
 impl LabelMetrics {
-    fn new(bounds: CGRect) -> Self {
-        let font_size = (bounds.size.height * 0.5).clamp(8.0, 14.0);
+    fn new(group_kind: GroupKind, bounds: CGRect) -> Self {
+        let thickness = match group_kind {
+            GroupKind::Horizontal => bounds.size.height,
+            GroupKind::Vertical => bounds.size.width,
+        };
+        let font_size = (thickness * 0.5).clamp(8.0, 14.0);
         Self {
             font_size,
-            side: (font_size + 3.0).min(bounds.size.height),
-            line_height: (font_size * 1.3).min(bounds.size.height),
+            side: (font_size + 3.0).min(thickness),
+            line_height: (font_size * 1.3).min(thickness),
         }
     }
 }
 
-fn shows_labels(config: &GroupBars, group_data: &GroupDisplayData) -> bool {
-    (config.show_titles || config.show_icons) && group_data.group_kind == GroupKind::Horizontal
+/// Where the parts of a tab's label go within its segment.
+struct LabelLayout {
+    icon: CGRect,
+    close_button: CGRect,
+    /// Room for the title along the bar.
+    title_length: f64,
+}
+
+impl LabelLayout {
+    /// The icon leads the title and the close button follows it, running left
+    /// to right on a horizontal bar and top to bottom on a vertical one.
+    fn new(group_kind: GroupKind, segment: CGRect, side: f64) -> Self {
+        let square = |x, y| CGRect::new(CGPoint::new(x, y), CGSize::new(side, side));
+        // Reserving the same room at both ends keeps the title centered in the
+        // segment.
+        let reserved = LABEL_PADDING + side + LABEL_SPACING;
+        match group_kind {
+            GroupKind::Horizontal => {
+                let y = segment.mid().y - side / 2.0;
+                Self {
+                    icon: square(segment.origin.x + LABEL_PADDING, y),
+                    close_button: square(segment.max().x - LABEL_PADDING - side, y),
+                    title_length: (segment.size.width - 2.0 * reserved).max(0.0),
+                }
+            }
+            GroupKind::Vertical => {
+                let x = segment.mid().x - side / 2.0;
+                Self {
+                    icon: square(x, segment.max().y - LABEL_PADDING - side),
+                    close_button: square(x, segment.origin.y + LABEL_PADDING),
+                    title_length: (segment.size.height - 2.0 * reserved).max(0.0),
+                }
+            }
+        }
+    }
+}
+
+fn shows_labels(config: &GroupBars) -> bool {
+    config.show_titles || config.show_icons
+}
+
+/// Moves a segment's frame by `offset` along its bar.
+fn offset_along(mut frame: CGRect, group_kind: GroupKind, offset: f64) -> CGRect {
+    match group_kind {
+        GroupKind::Horizontal => frame.origin.x += offset,
+        GroupKind::Vertical => frame.origin.y += offset,
+    }
+    frame
 }
 
 /// Sets the font of a text layer.
@@ -245,21 +298,25 @@ objc2::define_class!(
             ) else {
                 return
             };
-            let on_close_button = shows_labels(&state.config, group_data)
+            let on_close_button = shows_labels(&state.config)
                 && Self::close_button_frame(group_data, bounds, segment_index).contains(location);
             let callback = if on_close_button {
                 state.close_callback.clone()
             } else {
                 state.click_callback.clone()
             };
-            let can_drag = !on_close_button && group_data.group_kind == GroupKind::Horizontal;
+            let can_drag = !on_close_button;
+            let start = match group_data.group_kind {
+                GroupKind::Horizontal => location.x,
+                GroupKind::Vertical => location.y,
+            };
 
             // Drop the active borrow before invoking the callback.
             drop(state);
             if can_drag {
                 self.ivars().borrow_mut().drag = Some(TabDrag {
                     index: segment_index,
-                    start_x: location.x,
+                    start,
                     offset: None,
                 });
             }
@@ -273,8 +330,12 @@ objc2::define_class!(
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
             {
                 let mut state = self.ivars().borrow_mut();
+                let along = match state.group_data.as_ref().map(|data| data.group_kind) {
+                    Some(GroupKind::Vertical) => location.y,
+                    _ => location.x,
+                };
                 let Some(drag) = &mut state.drag else { return };
-                let offset = location.x - drag.start_x;
+                let offset = along - drag.start;
                 if drag.offset.is_none() && offset.abs() < DRAG_THRESHOLD {
                     return;
                 }
@@ -293,11 +354,7 @@ objc2::define_class!(
             let mut state = self.ivars().borrow_mut();
             let Some(drag) = state.drag.take() else { return };
             let (Some(_), Some(group_data)) = (drag.offset, &state.group_data) else { return };
-            let count = group_data.total_count;
-            let bounds = self.bounds();
-            let to = ((location.x / bounds.size.width) * count as f64)
-                .floor()
-                .clamp(0.0, count.saturating_sub(1) as f64) as usize;
+            let to = Self::segment_along(location, group_data, &self.bounds());
             let callback = state.move_callback.clone();
             drop(state);
             self.update_layers();
@@ -412,14 +469,8 @@ impl ClickableIndicatorView {
 
     fn close_button_frame(group_data: &GroupDisplayData, bounds: CGRect, index: usize) -> CGRect {
         let segment = Self::calculate_segment_frame(group_data, bounds, index);
-        let side = LabelMetrics::new(bounds).side;
-        CGRect::new(
-            CGPoint::new(
-                segment.max().x - LABEL_PADDING - side,
-                segment.mid().y - side / 2.0,
-            ),
-            CGSize::new(side, side),
-        )
+        let side = LabelMetrics::new(group_data.group_kind, bounds).side;
+        LabelLayout::new(group_data.group_kind, segment, side).close_button
     }
 
     /// Highlights the hovered tab of a labeled bar and shows its close button.
@@ -434,7 +485,7 @@ impl ClickableIndicatorView {
                 .as_ref()
                 .zip(state.hovered_index)
                 .filter(|(group_data, index)| {
-                    shows_labels(&state.config, group_data)
+                    shows_labels(&state.config)
                         && *index < group_data.total_count
                         && !state.is_dragging()
                 });
@@ -487,13 +538,19 @@ impl ClickableIndicatorView {
             return None;
         }
 
+        Some(Self::segment_along(point, group_data, bounds))
+    }
+
+    /// The segment at the point's position along the bar. Points beyond the
+    /// ends of the bar map to the first and last segments.
+    fn segment_along(point: CGPoint, group_data: &GroupDisplayData, bounds: &CGRect) -> usize {
         let pct = match group_data.group_kind {
             GroupKind::Horizontal => point.x / bounds.size.width,
             // The first segment is at the top, and y increases upward.
             GroupKind::Vertical => 1.0 - point.y / bounds.size.height,
         };
-        let segment_index = (pct * group_data.total_count as f64).floor() as usize;
-        Some(segment_index.min(group_data.total_count - 1))
+        let count = group_data.total_count;
+        (pct * count as f64).floor().clamp(0.0, count.saturating_sub(1) as f64) as usize
     }
 }
 
@@ -727,7 +784,7 @@ impl ClickableIndicatorView {
         self.update_hover_layers();
     }
 
-    /// Lays out the icon and title of each tab. Only tabbed groups are labeled.
+    /// Lays out the icon and title of each tab.
     fn update_label_layers(
         &self,
         parent_layer: &CALayer,
@@ -738,7 +795,7 @@ impl ClickableIndicatorView {
         let mut state = self.ivars().borrow_mut();
         let show_titles = state.config.show_titles;
         let show_icons = state.config.show_icons;
-        let wanted = if shows_labels(&state.config, group_data) {
+        let wanted = if shows_labels(&state.config) {
             group_data.tabs.len().min(group_data.total_count)
         } else {
             0
@@ -750,7 +807,27 @@ impl ClickableIndicatorView {
             state.label_layers.push(LabelLayers::new(parent_layer));
         }
 
-        let LabelMetrics { font_size, side, line_height } = LabelMetrics::new(bounds);
+        let group_kind = group_data.group_kind;
+        let LabelMetrics { font_size, side, line_height } = LabelMetrics::new(group_kind, bounds);
+        let title_transform = match group_kind {
+            GroupKind::Horizontal => CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+            // A quarter turn clockwise, so the title reads from the top down.
+            GroupKind::Vertical => CGAffineTransform {
+                a: 0.0,
+                b: -1.0,
+                c: 1.0,
+                d: 0.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+        };
         let regular = NSFont::systemFontOfSize(font_size);
         let bold = NSFont::boldSystemFontOfSize(font_size);
         let text_color = state.config.text_color;
@@ -758,22 +835,21 @@ impl ClickableIndicatorView {
 
         for (index, (layers, tab)) in state.label_layers.iter().zip(&group_data.tabs).enumerate() {
             let is_active = index == group_data.selected_index;
-            let mut segment = Self::calculate_segment_frame(group_data, bounds, index);
             let offset = state.drag_offset(index);
-            segment.origin.x += offset;
+            let segment = offset_along(
+                Self::calculate_segment_frame(group_data, bounds, index),
+                group_kind,
+                offset,
+            );
             let z_position = if offset == 0.0 { 0.0 } else { 1.0 };
             layers.icon.setZPosition(z_position);
             layers.title.setZPosition(z_position);
-            let min_x = segment.origin.x + LABEL_PADDING;
-            let max_x = segment.max().x - LABEL_PADDING;
+            let layout = LabelLayout::new(group_kind, segment, side);
 
             let icon = tab.icon.as_ref().filter(|_| show_icons);
             layers.icon.setHidden(icon.is_none());
             if let Some(icon) = icon {
-                layers.icon.setFrame(CGRect::new(
-                    CGPoint::new(min_x, segment.mid().y - side / 2.0),
-                    CGSize::new(side, side),
-                ));
+                layers.icon.setFrame(layout.icon);
                 // SAFETY: CALayer accepts an NSImage as its contents.
                 unsafe { layers.icon.setContents(Some(icon.as_ref() as &AnyObject)) };
                 layers.icon.setOpacity(if is_active { 1.0 } else { 0.7 });
@@ -781,15 +857,12 @@ impl ClickableIndicatorView {
 
             layers.title.setHidden(!show_titles);
             if show_titles {
-                // The icon sits to the left of the title and the close button
-                // to its right; reserving the same room on both sides keeps the
-                // title centered in the segment.
-                let reserved = side + LABEL_SPACING;
-                let width = (max_x - min_x - 2.0 * reserved).max(0.0);
-                layers.title.setFrame(CGRect::new(
-                    CGPoint::new(min_x + reserved, segment.mid().y - line_height / 2.0),
-                    CGSize::new(width, line_height),
+                layers.title.setBounds(CGRect::new(
+                    CGPoint::ZERO,
+                    CGSize::new(layout.title_length, line_height),
                 ));
+                layers.title.setPosition(segment.mid());
+                layers.title.setAffineTransform(title_transform);
                 let title = NSString::from_str(tab.title.expose_secret());
                 // SAFETY: NSString is toll-free bridged with CFString, which
                 // this property accepts.
@@ -944,9 +1017,11 @@ impl ClickableIndicatorView {
             }
         };
 
-        let mut segment_frame =
-            Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
-        segment_frame.origin.x += self.ivars().borrow().drag_offset(group_data.selected_index);
+        let segment_frame = offset_along(
+            Self::calculate_segment_frame(group_data, bounds, group_data.selected_index),
+            group_data.group_kind,
+            self.ivars().borrow().drag_offset(group_data.selected_index),
+        );
 
         selected_layer.setFrame(segment_frame);
 
@@ -1003,8 +1078,11 @@ impl ClickableIndicatorView {
             (selected_layer, group_data, bounds)
         };
 
-        let mut to_frame = Self::calculate_segment_frame(&group_data, bounds, to_index);
-        to_frame.origin.x += self.ivars().borrow().drag_offset(to_index);
+        let to_frame = offset_along(
+            Self::calculate_segment_frame(&group_data, bounds, to_index),
+            group_data.group_kind,
+            self.ivars().borrow().drag_offset(to_index),
+        );
 
         selected_layer.setFrame(to_frame);
     }
@@ -1091,5 +1169,33 @@ mod tests {
             view.segment_at_point(CGPoint::new(-10.0, 50.0), &vertical_group),
             None
         );
+    }
+
+    #[test]
+    fn vertical_labels_run_from_the_top_of_the_segment() {
+        let segment = CGRect::new(CGPoint::new(0.0, 100.0), CGSize::new(24.0, 200.0));
+        let layout = LabelLayout::new(GroupKind::Vertical, segment, 16.0);
+        let square = |x, y| CGRect::new(CGPoint::new(x, y), CGSize::new(16.0, 16.0));
+        assert_eq!(layout.icon, square(4.0, 276.0));
+        assert_eq!(layout.close_button, square(4.0, 108.0));
+        assert_eq!(layout.title_length, 142.0);
+    }
+
+    #[test]
+    fn points_beyond_the_bar_map_to_its_end_segments() {
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(24.0, 300.0));
+        let group = GroupDisplayData {
+            group_kind: GroupKind::Vertical,
+            total_count: 3,
+            selected_index: 0,
+            frame: bounds,
+            is_selected: true,
+            tabs: vec![],
+        };
+        let segment =
+            |y| ClickableIndicatorView::segment_along(CGPoint::new(12.0, y), &group, &bounds);
+        assert_eq!(segment(350.0), 0);
+        assert_eq!(segment(150.0), 1);
+        assert_eq!(segment(-50.0), 2);
     }
 }
