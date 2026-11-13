@@ -13,13 +13,18 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
+use objc2::runtime::AnyClass;
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
-use objc2_app_kit::{NSColor, NSEvent, NSView};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSColor, NSEvent, NSGlassEffectView, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindowOrderingMode,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::CALayer;
 
-use crate::config::{Color, GroupBars};
+use crate::config::{Color, GroupBarStyle, GroupBars};
 use crate::sys::geometry::CGRectExt;
 
 pub trait ColorExt {
@@ -92,7 +97,77 @@ objc2::define_class!(
 
 /// NSView wrapper for displaying group indicators using CALayer
 pub struct GroupIndicatorNSView {
+    /// Holds the backdrop (if any) and the indicator view on top of it.
+    root: Retained<NSView>,
+    backdrop: Option<GlassBackdrop>,
     view: Retained<ClickableIndicatorView>,
+    mtm: MainThreadMarker,
+}
+
+/// The material drawn behind the segments when `style = "glass"`.
+enum GlassBackdrop {
+    /// Liquid Glass, macOS 26 and later.
+    Glass(Retained<NSGlassEffectView>),
+    /// A behind-window blur, for earlier versions of macOS.
+    Blur(Retained<NSVisualEffectView>),
+}
+
+impl GlassBackdrop {
+    fn new(frame: CGRect, mtm: MainThreadMarker) -> Self {
+        if AnyClass::get(c"NSGlassEffectView").is_some() {
+            GlassBackdrop::Glass(NSGlassEffectView::initWithFrame(
+                NSGlassEffectView::alloc(mtm),
+                frame,
+            ))
+        } else {
+            let view = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
+            view.setMaterial(NSVisualEffectMaterial::HUDWindow);
+            view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            view.setState(NSVisualEffectState::Active);
+            view.setWantsLayer(true);
+            GlassBackdrop::Blur(view)
+        }
+    }
+
+    fn view(&self) -> &NSView {
+        match self {
+            GlassBackdrop::Glass(v) => v,
+            GlassBackdrop::Blur(v) => v,
+        }
+    }
+
+    /// Glass takes the tint directly. The blur has no tint, so the background
+    /// layer paints over it instead; returns whether that is needed.
+    #[must_use]
+    fn set_appearance(&self, corner_radius: f64, tint: &Color) -> bool {
+        match self {
+            GlassBackdrop::Glass(v) => {
+                v.setCornerRadius(corner_radius);
+                v.setTintColor(Some(&tint.to_nscolor()));
+                false
+            }
+            GlassBackdrop::Blur(v) => {
+                if let Some(layer) = v.layer() {
+                    layer.setCornerRadius(corner_radius);
+                    layer.setMasksToBounds(true);
+                }
+                true
+            }
+        }
+    }
+}
+
+fn fill_superview(view: &NSView) {
+    view.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+}
+
+/// The configured radius, limited to what the bar's shape allows.
+fn corner_radius(config: &GroupBars, bounds: CGRect) -> f64 {
+    config
+        .corner_radius
+        .clamp(0.0, f64::min(bounds.size.width, bounds.size.height) / 2.0)
 }
 
 impl ClickableIndicatorView {
@@ -134,7 +209,9 @@ impl GroupIndicatorNSView {
             click_callback: None,
         };
         let view = ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(state));
-        let view: Retained<_> = unsafe { msg_send![super(view), initWithFrame: frame] };
+        // The view fills `root`, which takes `frame`.
+        let bounds = CGRect::new(CGPoint::ZERO, frame.size);
+        let view: Retained<_> = unsafe { msg_send![super(view), initWithFrame: bounds] };
 
         view.setWantsLayer(true);
         let parent_layer = view.makeBackingLayer();
@@ -143,11 +220,44 @@ impl GroupIndicatorNSView {
         // SAFETY: The mask must not have a superlayer; we use a brand new layer.
         unsafe { parent_layer.setMask(Some(&CALayer::layer())) };
 
-        Self { view }
+        let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        fill_superview(&view);
+        root.addSubview(&view);
+
+        let mut this = Self {
+            root,
+            backdrop: None,
+            view,
+            mtm,
+        };
+        this.update_backdrop();
+        this
     }
 
     pub fn view(&self) -> &NSView {
-        &*self.view
+        &self.root
+    }
+
+    /// Adds or removes the backdrop to match the configured style.
+    fn update_backdrop(&mut self) {
+        let style = self.view.ivars().borrow().config.style;
+        match (style, &self.backdrop) {
+            (GroupBarStyle::Glass, None) => {
+                let backdrop = GlassBackdrop::new(self.root.bounds(), self.mtm);
+                fill_superview(backdrop.view());
+                self.root.addSubview_positioned_relativeTo(
+                    backdrop.view(),
+                    NSWindowOrderingMode::Below,
+                    Some(&self.view),
+                );
+                self.backdrop = Some(backdrop);
+            }
+            (GroupBarStyle::Solid, Some(backdrop)) => {
+                backdrop.view().removeFromSuperview();
+                self.backdrop = None;
+            }
+            _ => {}
+        }
     }
 
     pub fn update(&mut self, group_data: GroupDisplayData) {
@@ -169,6 +279,7 @@ impl GroupIndicatorNSView {
 
     pub fn set_config(&mut self, config: &GroupBars) {
         self.view.ivars().borrow_mut().config = config.clone();
+        self.update_backdrop();
         self.update_layers();
     }
 
@@ -326,17 +437,23 @@ impl GroupIndicatorNSView {
         } else {
             state.config.inactive_background_color
         };
+        let paint_background = match &self.backdrop {
+            Some(backdrop) => {
+                backdrop.set_appearance(corner_radius(&state.config, bounds), &bg_color)
+            }
+            None => true,
+        };
         let border_color = state.config.border_color.to_nscolor();
-        background_layer.setBackgroundColor(Some(&bg_color.to_nscolor().CGColor()));
+        background_layer.setBackgroundColor(
+            paint_background.then(|| bg_color.to_nscolor().CGColor()).as_deref(),
+        );
         background_layer.setBorderColor(Some(&border_color.CGColor()));
         background_layer.setBorderWidth(state.config.border_width);
 
         // Also update the mask here.
         if let Some(mask) = parent_layer.mask() {
-            // This seems to look the best for a range of sizes.
-            const RADIUS_RATIO: f64 = 2.0 / 3.0;
             mask.setFrame(bounds);
-            mask.setCornerRadius(RADIUS_RATIO * f64::min(bounds.size.width, bounds.size.height));
+            mask.setCornerRadius(corner_radius(&state.config, bounds));
             mask.setBackgroundColor(Some(&NSColor::whiteColor().CGColor()));
         }
     }
