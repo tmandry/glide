@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "glide-wm"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "accessibility",
  "accessibility-sys",

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.19](https://github.com/tmandry/glide/compare/v0.2.18...v0.2.19) (2026-11-13)
+
+
+### Bug Fixes
+
+* Re-enable an event tap the system has disabled ([ce1593d](https://github.com/tmandry/glide/commit/ce1593d4eb3ef464fa90e582ae1d47b0cac93788))
+* Re-enable an event tap the system has disabled ([0236981](https://github.com/tmandry/glide/commit/02369817ac37f1b7f63dd58a45099e717be46d53))
+* Remove the leftover container when the root is left with only one child ([4b453bb](https://github.com/tmandry/glide/commit/4b453bb4d263b5c29e58e7b5dcb68eced691ba2b))
+* Scroll the viewport after the last frame of a resize ([43b7d90](https://github.com/tmandry/glide/commit/43b7d90604f6c2c8dd3a2c334a3b138d1506aa17))
+
 ## [0.2.18](https://github.com/tmandry/glide/compare/v0.2.17...v0.2.18) (2026-11-04)
 
 This release improves reliability when using Mission Control, moving windows
