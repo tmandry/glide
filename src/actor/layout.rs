@@ -2818,7 +2818,7 @@ mod tests {
         };
 
         _ = mgr.handle_command(Some(space), &[space], grow.clone());
-        mgr.scene(space, screen).assert("a1").width_ratio("a2", 1.5);
+        mgr.scene(space, screen).assert("a1").wider_than("a2", 20.0);
 
         _ = mgr.handle_command(Some(space), &[space], shrink.clone());
         mgr.scene(space, screen).assert("a1").same_size_as("a2");
@@ -2827,7 +2827,7 @@ mod tests {
         // take from the window before it rather than doing nothing.
         _ = mgr.handle_command(Some(space), &[space], MoveFocus(Direction::Right));
         _ = mgr.handle_command(Some(space), &[space], grow);
-        mgr.scene(space, screen).assert("a2").width_ratio("a1", 1.5);
+        mgr.scene(space, screen).assert("a2").wider_than("a1", 20.0);
 
         _ = mgr.handle_command(Some(space), &[space], shrink);
         mgr.scene(space, screen).assert("a1").same_size_as("a2");
@@ -3044,7 +3044,7 @@ mod tests {
                 percent: 20.0,
             },
         );
-        mgr.scene(space, screen).assert("a1").width_ratio("a2", 7.0 / 3.0);
+        mgr.scene(space, screen).assert("a1").wider_than("a2", 40.0);
 
         _ = mgr.handle_command(Some(space), &[space], Balance);
         mgr.scene(space, screen).assert("a1").left_of("a2").same_size_as("a2");

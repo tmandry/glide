@@ -1828,7 +1828,7 @@ mod tests {
         // The window can't be resized within its group, so its group grows.
         assert!(tree.resize_smart(b1, 0.2));
         let scene = scene(&tree, layout, screen);
-        scene.assert("b1").same_size_as("b2").width_ratio("a1", 7.0 / 3.0);
+        scene.assert("b1").same_size_as("b2").wider_than("a1", 400.0);
     }
 
     #[test]

@@ -410,6 +410,26 @@ impl Subject<'_> {
         )
     }
 
+    /// Check that the window is `pixels` wider than `other`.
+    #[track_caller]
+    pub fn wider_than(&self, other: impl Label, pixels: f64) -> &Self {
+        let (o, of) = self.other(other);
+        self.check(
+            (self.frame.size.width - of.size.width - pixels).abs() <= TOLERANCE,
+            format_args!("{pixels}px wider than {o}"),
+        )
+    }
+
+    /// Check that the window is `pixels` taller than `other`.
+    #[track_caller]
+    pub fn taller_than(&self, other: impl Label, pixels: f64) -> &Self {
+        let (o, of) = self.other(other);
+        self.check(
+            (self.frame.size.height - of.size.height - pixels).abs() <= TOLERANCE,
+            format_args!("{pixels}px taller than {o}"),
+        )
+    }
+
     /// Check that the window covers the whole screen.
     #[track_caller]
     pub fn fills_screen(&self) -> &Self {
@@ -433,6 +453,23 @@ impl Subject<'_> {
         self.check(
             matches!((depth, other_depth), (Some(a), Some(b)) if a < b),
             format_args!("in front of {o}"),
+        )
+    }
+
+    /// Check that the window hides all of `other`: it is in front of `other`
+    /// and no part of `other` extends past it.
+    #[track_caller]
+    pub fn covers(&self, other: impl Label) -> &Self {
+        let (o, of) = self.other(other);
+        let (depth, other_depth) = (self.scene.depth(&self.label), self.scene.depth(&o));
+        let (f, t) = (self.frame, TOLERANCE);
+        self.check(
+            matches!((depth, other_depth), (Some(a), Some(b)) if a < b)
+                && f.min().x <= of.min().x + t
+                && f.min().y <= of.min().y + t
+                && of.max().x <= f.max().x + t
+                && of.max().y <= f.max().y + t,
+            format_args!("covering {o}"),
         )
     }
 }
@@ -576,6 +613,14 @@ mod tests {
             .front_to_back(["a2", "a1"])
             .assert("a2")
             .in_front_of("a1");
+        let stacked = Scene::new(rect(0, 0, 10, 10))
+            .window("a1", rect(0, 0, 6, 10))
+            .window("a2", rect(0, 0, 6, 10))
+            .window("a3", rect(6, 0, 4, 10))
+            .front_to_back(["a2", "a1", "a3"]);
+        stacked.assert("a2").covers("a1").wider_than("a3", 2.0).taller_than("a3", 0.0);
+        assert!(std::panic::catch_unwind(|| _ = stacked.assert("a2").covers("a3")).is_err());
+        assert!(std::panic::catch_unwind(|| _ = stacked.assert("a1").covers("a2")).is_err());
     }
 
     #[test]
