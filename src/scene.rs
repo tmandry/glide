@@ -272,6 +272,14 @@ fn stroke(lines: &mut [u8], width: usize, [x0, y0, x1, y1]: [usize; 4]) {
     }
 }
 
+fn times(ratio: f64) -> String {
+    if ratio == 1.0 {
+        String::new()
+    } else {
+        format!("{ratio} times ")
+    }
+}
+
 fn fmt_rect(r: CGRect) -> String {
     format!(
         "({}, {}) {}×{}",
@@ -388,7 +396,7 @@ impl Subject<'_> {
         let (o, of) = self.other(other);
         self.check(
             (self.frame.size.width - ratio * of.size.width).abs() <= TOLERANCE,
-            format_args!("{ratio} times as wide as {o}"),
+            format_args!("{}as wide as {o}", times(ratio)),
         )
     }
 
@@ -398,7 +406,7 @@ impl Subject<'_> {
         let (o, of) = self.other(other);
         self.check(
             (self.frame.size.height - ratio * of.size.height).abs() <= TOLERANCE,
-            format_args!("{ratio} times as tall as {o}"),
+            format_args!("{}as tall as {o}", times(ratio)),
         )
     }
 
