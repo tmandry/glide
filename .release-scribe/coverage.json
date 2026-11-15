@@ -1,0 +1,120 @@
+[
+  {
+    "source": "3cb7ff2ef1a56496170bddd41d9f0853412082b1",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Packaging retries for transient notarization failures; release infrastructure maintenance."
+  },
+  {
+    "source": "2429ea5e546ca50658600f042328a5bb03308075",
+    "disposition": "included",
+    "bullets": [
+      "b3"
+    ],
+    "reason": "One scroll-resize outcome including native sizing constraints and final-frame viewport completion. The new end_user_resize Exposé check in 7bfce35 is superseded by 43b7d90; no separate Mission Control regression claim."
+  },
+  {
+    "source": "52c1e4cda55700db7ebead1d2b8e24dd39253653",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Resize-band regression tests; no independent behavior change."
+  },
+  {
+    "source": "7bfce350886cf2a335ba50cf4bc6b10c6ae90181",
+    "disposition": "included",
+    "bullets": [
+      "b3"
+    ],
+    "reason": "One scroll-resize outcome including native sizing constraints and final-frame viewport completion. The new end_user_resize Exposé check in 7bfce35 is superseded by 43b7d90; no separate Mission Control regression claim."
+  },
+  {
+    "source": "43b7d90604f6c2c8dd3a2c334a3b138d1506aa17",
+    "disposition": "included",
+    "bullets": [
+      "b3"
+    ],
+    "reason": "One scroll-resize outcome including native sizing constraints and final-frame viewport completion. The new end_user_resize Exposé check in 7bfce35 is superseded by 43b7d90; no separate Mission Control regression claim."
+  },
+  {
+    "source": "5c199547806c3dbc56613136fefcce297eda0e9b",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+  },
+  {
+    "source": "6ef4a0a4e9a9ae1ba16ab2d3cf7c8dc51ee74688",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
+  },
+  {
+    "source": "8ec08d6619ad2ec9310af3e99dbff54b591a1096",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Internal mouse-event API migration. The concrete listen-only change concerns the developer mouse-click diagnostic, and teardown concerns actor shutdown; neither adds a distinct everyday window-management outcome."
+  },
+  {
+    "source": "85a406e73b0f7e9017450311fac30ab934e2ff05",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
+  },
+  {
+    "source": "95bcd96eefba6b8d6b33b14c7709a56cd1bc042e",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
+  },
+  {
+    "source": "4b2008137cf5a9f5c9e64a78bf12164dd9354b88",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
+  },
+  {
+    "source": "31358462703962e7f21a0f3fcee811bc9f9453f8",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+  },
+  {
+    "source": "629727cb0215bd48f10b0bfa0f100095221aa017",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Move layout root ownership to enable the grouped root-container fix; serialized field layout is preserved and no separate user behavior is claimed."
+  },
+  {
+    "source": "8dd14ab3b9cbbf94da5b45ecc26dbff542bcebac",
+    "disposition": "included",
+    "bullets": [
+      "b2"
+    ],
+    "reason": "Fix leftover root containers/groups present in the base culling code; retain the surviving container and its selection/sizing."
+  },
+  {
+    "source": "9a32cabf44c4d270794b04f43e198845939c2e61",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Equivalent culling control-flow cleanup accompanying the root-container fix; no independent user outcome."
+  },
+  {
+    "source": "4b453bb4d263b5c29e58e7b5dcb68eced691ba2b",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+  },
+  {
+    "source": "02369817ac37f1b7f63dd58a45099e717be46d53",
+    "disposition": "included",
+    "bullets": [
+      "b1"
+    ],
+    "reason": "Restore user-visible mouse focus and scroll behavior after system-disabled event taps. PR #286 explicitly states this problem predates the migration, so it is not excluded as unreleased-only."
+  },
+  {
+    "source": "ce1593d4eb3ef464fa90e582ae1d47b0cac93788",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+  }
+]

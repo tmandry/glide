@@ -1,0 +1,12 @@
+{
+  "kind": "release-scribe-evaluation-v1",
+  "source": "ce1593d4eb3ef464fa90e582ae1d47b0cac93788",
+  "base": "200c95d4de229eeae83deedd076048122c6f4995",
+  "input_key": null,
+  "last_generated": "This release of Glide improves mouse handling, removes redundant group bars, and fixes resizing in experimental scrolling layouts.\n\n### Bug Fixes\n\n* Recover focus-follows-mouse and scrolling after macOS disables input monitoring, without restarting Glide ([#288](https://github.com/tmandry/glide/pull/288)).\n* Remove redundant group bars when closing the last window beside a group in a tree layout ([#259](https://github.com/tmandry/glide/pull/259)).\n\n### Experimental Features\n\n* Fix incorrect resizing and overlapping windows in the experimental scroll layout ([#279](https://github.com/tmandry/glide/pull/279)).\n",
+  "seed_provenance": {
+    "mode": "Reviewed direct Sol editorial draft",
+    "fresh_api_call": false,
+    "copilot_invoked": false
+  }
+}
