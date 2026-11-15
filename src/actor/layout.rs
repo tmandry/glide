@@ -1562,6 +1562,15 @@ impl LayoutManager {
         self.try_layout(space).unwrap()
     }
 
+    /// Return the windows tiled on `space`, or nothing if it has no layout.
+    #[cfg(test)]
+    pub(crate) fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
+        let Some(layout) = self.try_layout(space) else {
+            return Vec::new();
+        };
+        self.tree.visible_windows_under(self.tree.root(layout))
+    }
+
     fn top_layer_windows(&self, space: SpaceId) -> Vec<WindowId> {
         if self.is_floating() {
             // For now don't mess with window order if a floating window is focused.

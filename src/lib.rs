@@ -9,3 +9,5 @@ pub mod sys;
 pub mod ui;
 
 mod collections;
+#[cfg(test)]
+mod sim;
