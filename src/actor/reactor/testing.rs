@@ -15,6 +15,7 @@ use crate::actor::app::{AppThreadHandle, Request};
 use crate::actor::layout::LayoutManager;
 use crate::actor::reactor;
 use crate::config::Config;
+use crate::scene::Scene;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -238,6 +239,11 @@ impl Apps {
             visible_windows: (1..).map(|idx| WindowId::new(pid, idx)).zip(windows).collect(),
         });
         events
+    }
+
+    /// Return a [`Scene`] of `screen` with the frame of every window.
+    pub fn scene(&self, screen: CGRect) -> Scene {
+        Scene::of(screen, self.windows.iter().map(|(&wid, w)| (wid, w.frame)))
     }
 
     pub fn requests(&mut self) -> Vec<Request> {

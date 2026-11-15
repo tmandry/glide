@@ -1752,10 +1752,7 @@ pub mod tests {
         reactor.handle_event(Event::StartupComplete);
 
         let _events = apps.simulate_events();
-        assert_eq!(
-            SCREEN,
-            apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
-        );
+        apps.scene(SCREEN).assert("a1").fills_screen();
     }
 
     #[test]
@@ -2296,14 +2293,8 @@ pub mod tests {
         reactor.handle_events(apps.make_app(1, windows));
 
         let _events = apps.simulate_events();
-        assert_eq!(
-            screen1,
-            apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
-        );
-        assert_eq!(
-            screen2,
-            apps.windows.get(&WindowId::new(1, 2)).expect("Window was not resized").frame,
-        );
+        apps.scene(screen1).assert("a1").fills_screen();
+        apps.scene(screen2).assert("a2").fills_screen();
     }
 
     #[test]
@@ -3176,10 +3167,7 @@ pub mod tests {
         reactor.handle_event(Event::StartupComplete);
 
         let _events = apps.simulate_events();
-        assert_eq!(
-            SCREEN,
-            apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
-        );
+        apps.scene(SCREEN).assert("a1").fills_screen();
 
         // Simulate the system resizing a window after it recognizes an old
         // configurations. Resize events are not sent in this case.
@@ -3204,10 +3192,7 @@ pub mod tests {
         });
 
         let _events = apps.simulate_events();
-        assert_eq!(
-            SCREEN,
-            apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
-        );
+        apps.scene(SCREEN).assert("a1").fills_screen();
     }
 
     #[test]
