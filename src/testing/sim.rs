@@ -34,12 +34,12 @@ use crate::actor::space_manager::{self, SpaceManager};
 use crate::actor::window_server::{self, WindowServer, mock_window_server};
 use crate::actor::{self, group_bars, mouse, status, wm_controller};
 use crate::config::Config;
-use crate::scene::Scene;
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::event::MouseState;
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::{CoordinateConverter, ScreenId};
 use crate::sys::window_server::{WindowId, WindowServerId, WindowsOnScreen};
+use crate::testing::scene::Scene;
 
 /// Something with an inbox and its own event loop.
 ///
@@ -359,7 +359,7 @@ impl Sim {
 
     fn deliver(&mut self, process: Process, message: Message) {
         match (process, message) {
-            (Process::Reactor, Message::Reactor(event)) => self.reactor.step(event),
+            (Process::Reactor, Message::Reactor(event)) => self.reactor.handle_events(vec![event]),
             (Process::RaiseManager, Message::Raise(event)) => {
                 self.raise_manager.handle_message(event)
             }

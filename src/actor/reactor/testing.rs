@@ -15,11 +15,11 @@ use crate::actor::app::{AppThreadHandle, Request};
 use crate::actor::layout::LayoutManager;
 use crate::actor::reactor;
 use crate::config::Config;
-use crate::scene::Scene;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{WindowId, WindowServerId, WindowServerInfo, WindowsOnScreen};
+use crate::testing::scene::Scene;
 
 impl Reactor {
     pub fn new_for_test(layout: LayoutManager) -> Reactor {
@@ -50,6 +50,16 @@ impl Reactor {
         for event in events {
             self.handle_event(event);
         }
+    }
+
+    /// Send raise requests to `tx`.
+    pub fn set_raise_manager(&mut self, tx: crate::actor::raise::Sender) {
+        self.raise_manager_tx = tx;
+    }
+
+    /// Return the windows tiled on `space`.
+    pub fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
+        self.layout.tiled_windows(space)
     }
 }
 

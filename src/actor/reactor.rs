@@ -15,8 +15,6 @@ pub mod saved_state;
 #[cfg(test)]
 mod restore_snapshots;
 #[cfg(test)]
-mod sim_hooks;
-#[cfg(test)]
 mod testing;
 
 use std::collections::BTreeMap;

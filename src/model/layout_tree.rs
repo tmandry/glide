@@ -1175,8 +1175,8 @@ mod tests {
 
     use super::*;
     use crate::model::LayoutTree;
-    use crate::scene::Scene;
     use crate::sys::app::pid_t;
+    use crate::testing::scene::Scene;
 
     fn w(pid: pid_t, idx: u32) -> WindowId {
         WindowId::new(pid, idx)

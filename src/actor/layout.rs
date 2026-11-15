@@ -1679,7 +1679,7 @@ mod tests {
 
     use super::*;
     use crate::config::WindowRuleConditions;
-    use crate::scene::Scene;
+    use crate::testing::scene::Scene;
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> CGRect {
         CGRect::new(CGPoint::new(x as f64, y as f64), CGSize::new(w as f64, h as f64))

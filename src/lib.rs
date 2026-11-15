@@ -10,6 +10,4 @@ pub mod ui;
 
 mod collections;
 #[cfg(test)]
-mod scene;
-#[cfg(test)]
-mod sim;
+mod testing;
