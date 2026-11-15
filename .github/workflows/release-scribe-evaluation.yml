@@ -1,0 +1,55 @@
+name: Release notes evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Generate with Sol on a cache miss and update the isolated draft PR
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: release-scribe-evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the reviewed tool
+        uses: actions/checkout@v4
+        with:
+          repository: tmandry/release-scribe
+          ref: 0dc7d6729d040572317931dc10d18cddcc9a2852
+          path: .scribe-tool
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the tool
+        run: cargo build --release --locked --manifest-path .scribe-tool/Cargo.toml
+      - name: Collect, optionally generate, and update the evaluation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ inputs.apply && secrets.OPENAI_API_KEY || '' }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$APPLY" = true ]; then args+=(--apply); fi
+          .scribe-tool/target/release/release-scribe evaluate \
+            --repo "$GITHUB_WORKSPACE" \
+            --config .github/release-scribe/config.json \
+            --output "$RUNNER_TEMP/release-scribe" "${args[@]}"
