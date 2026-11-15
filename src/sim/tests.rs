@@ -1,6 +1,7 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use expect_test::expect;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use test_log::test;
 
@@ -9,10 +10,6 @@ use crate::sys::app::pid_t;
 
 fn screen() -> CGRect {
     CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))
-}
-
-fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
-    CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
 }
 
 const SCHEDULES: [Schedule; 2] = [Schedule::GlideFirst, Schedule::MacFirst];
@@ -48,15 +45,13 @@ fn windows_are_tiled_on_the_desktop_they_are_on() {
     for schedule in SCHEDULES {
         let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
         assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
-        assert_eq!(sim.frame("A1"), rect(0., 0., 500., 1000.));
-        assert_eq!(sim.frame("A2"), rect(500., 0., 500., 1000.));
+        sim.scene().assert("A1").left_of("A2").same_size_as("A2");
 
         sim.switch_desktop(2);
         sim.run();
         assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
         assert_eq!(sim.tiled(2), ["B1", "B2"], "{schedule:?}");
-        assert_eq!(sim.frame("B1"), rect(0., 0., 500., 1000.));
-        assert_eq!(sim.frame("B2"), rect(500., 0., 500., 1000.));
+        sim.scene().assert("B1").left_of("B2").same_size_as("B2");
     }
 }
 
@@ -69,13 +64,27 @@ fn a_new_window_is_tiled_next_to_the_others() {
         sim.run();
         sim.start_glide();
         sim.run();
-        assert_eq!(sim.frame("A1"), screen(), "{schedule:?}");
+        sim.scene().assert("A1").fills_screen();
 
         sim.open_window(a, "A2");
         sim.run();
-        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
-        assert_eq!(sim.frame("A1"), rect(0., 0., 500., 1000.), "{schedule:?}");
-        assert_eq!(sim.frame("A2"), rect(500., 0., 500., 1000.), "{schedule:?}");
+        expect![[r#"
+            ┌───────────┬───────────┐
+            │ A1        │ A2        │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            └───────────┴───────────┘
+            front to back: A2, A1
+        "#]]
+        .assert_eq(&sim.scene().draw());
     }
 }
 
@@ -96,7 +105,7 @@ fn glide_leaves_windows_alone_while_mission_control_is_open() {
         sim.close_mission_control();
         sim.run();
         assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
-        assert_eq!(sim.frame("A1"), screen(), "{schedule:?}");
+        sim.scene().assert("A1").fills_screen();
         assert_eq!(sim.current_desktop(), 1, "{schedule:?}");
     }
 }
@@ -124,7 +133,7 @@ fn leaving_mission_control_onto_another_desktop() {
         sim.switch_desktop(1);
         sim.run();
         assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
-        assert_eq!(sim.frame("A1"), screen(), "{schedule:?}");
+        sim.scene().assert("A1").fills_screen();
     }
 }
 
@@ -189,7 +198,7 @@ fn window_dragged_to_another_desktop_in_mission_control() {
         assert_eq!(sim.actions_during_mission_control(), [], "{schedule:?}");
         assert_eq!(sim.current_desktop(), 1, "{schedule:?}");
         assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
-        assert_eq!(sim.frame("A1"), screen(), "{schedule:?}");
+        sim.scene().assert("A1").fills_screen();
 
         sim.switch_desktop(2);
         sim.run();

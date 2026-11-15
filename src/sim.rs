@@ -34,6 +34,7 @@ use crate::actor::space_manager::{self, SpaceManager};
 use crate::actor::window_server::{self, WindowServer, mock_window_server};
 use crate::actor::{self, group_bars, mouse, status, wm_controller};
 use crate::config::Config;
+use crate::scene::Scene;
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::event::MouseState;
 use crate::sys::geometry::SameAs;
@@ -632,8 +633,15 @@ impl Sim {
         titles
     }
 
-    pub fn frame(&self, title: &str) -> CGRect {
-        self.mac.window(self.mac.window_titled(title)).unwrap().frame
+    /// The windows on screen as the window server has them, labelled by
+    /// title.
+    pub fn scene(&self) -> Scene {
+        let on_screen = self.mac.windows_on_screen();
+        let title = |wsid| self.mac.window(wsid).unwrap().title.clone();
+        let scene = on_screen.iter().fold(Scene::new(self.mac.screen), |scene, w| {
+            scene.window(title(w.id), w.frame)
+        });
+        scene.front_to_back(on_screen.iter().map(|w| title(w.id)))
     }
 
     /// The desktop being shown, counting from 1.
