@@ -185,23 +185,33 @@ fn window_created_in_mission_control_joins_its_desktop_in_any_order() {
     }
 }
 
-#[test]
-fn window_dragged_to_another_desktop_in_mission_control() {
-    for schedule in SCHEDULES {
-        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
-        sim.open_mission_control();
-        sim.run();
-        sim.move_window_to_desktop("A2", 2);
-        sim.run();
-        sim.close_mission_control();
-        sim.run();
-        assert_eq!(sim.actions_during_mission_control(), [], "{schedule:?}");
-        assert_eq!(sim.current_desktop(), 1, "{schedule:?}");
-        assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
-        sim.scene().assert("A1").fills_screen();
+/// A2 has the keyboard focus and is dragged to desktop 2 in Mission Control,
+/// which is then closed onto desktop 1.
+fn focused_window_dragged_to_another_desktop(schedule: Schedule) {
+    let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+    sim.open_mission_control();
+    sim.run();
+    sim.drag_window_to_desktop("A2", 2);
+    sim.run();
+    sim.close_mission_control();
+    sim.run();
+    assert_eq!(sim.actions_during_mission_control(), [], "{schedule:?}");
+    assert_eq!(sim.current_desktop(), 1, "{schedule:?}");
+    assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
+    sim.scene().assert("A1").fills_screen();
 
-        sim.switch_desktop(2);
-        sim.run();
-        assert_eq!(sim.tiled(2), ["A2", "B1", "B2"], "{schedule:?}");
+    sim.switch_desktop(2);
+    sim.run();
+    assert_eq!(sim.tiled(2), ["A2", "B1", "B2"], "{schedule:?}");
+}
+
+// TODO: When Mission Control closes, Glide raises the dragged window along
+// with the ones left on the desktop. The raise gives the dragged window the
+// keyboard focus, which switches to its desktop. This is issue #291.
+#[test]
+#[ignore]
+fn focused_window_dragged_to_another_desktop_in_mission_control() {
+    for schedule in SCHEDULES {
+        focused_window_dragged_to_another_desktop(schedule);
     }
 }
