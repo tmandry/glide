@@ -17,6 +17,7 @@ use crate::actor::reactor;
 use crate::config::Config;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
+use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{WindowId, WindowServerId, WindowServerInfo, WindowsOnScreen};
 
 impl Reactor {
@@ -67,6 +68,55 @@ impl Drop for Reactor {
                 println!("Persisting temp file: {:?}", persist_result);
                 panic!("replay failed: {e}");
             }
+        }
+    }
+}
+
+/// The screen that [`one_screen`] reports.
+pub const SCREEN: CGRect = CGRect {
+    origin: CGPoint { x: 0., y: 0. },
+    size: CGSize { width: 1000., height: 1000. },
+};
+
+/// Return a `ScreenParametersChanged` event for [`SCREEN`] showing `space`.
+pub fn one_screen(space: impl Into<Option<SpaceId>>) -> Event {
+    Screens::new().screen(SCREEN, space).event()
+}
+
+/// A builder for a `ScreenParametersChanged` event whose screens all have a
+/// scale factor of 2.
+#[derive(Default)]
+pub struct Screens {
+    frames: Vec<CGRect>,
+    spaces: Vec<Option<SpaceId>>,
+    on_screen: Vec<WindowServerInfo>,
+}
+
+impl Screens {
+    pub fn new() -> Screens {
+        Screens::default()
+    }
+
+    /// Add a screen showing `space`.
+    pub fn screen(mut self, frame: CGRect, space: impl Into<Option<SpaceId>>) -> Screens {
+        self.frames.push(frame);
+        self.spaces.push(space.into());
+        self
+    }
+
+    /// Set the windows the window server reports on screen, frontmost first.
+    pub fn on_screen(mut self, on_screen: Vec<WindowServerInfo>) -> Screens {
+        self.on_screen = on_screen;
+        self
+    }
+
+    pub fn event(self) -> Event {
+        Event::ScreenParametersChanged {
+            scale_factors: vec![2.0; self.frames.len()],
+            frames: self.frames,
+            spaces: self.spaces,
+            converter: CoordinateConverter::default(),
+            on_screen: WindowsOnScreen::new(self.on_screen),
         }
     }
 }
