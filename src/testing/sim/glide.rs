@@ -106,6 +106,7 @@ pub struct Glide {
     apps: BTreeMap<pid_t, AppActor>,
     /// The apps the WmController has started an actor for.
     known_apps: BTreeSet<pid_t>,
+    raise_lock: app::RaiseLock,
     /// Closes once every app that was running at startup has dropped its
     /// token.
     startup_rx: Option<UnboundedReceiver<()>>,
@@ -154,6 +155,7 @@ impl Glide {
             sm_tx,
             sm_rx,
             ws_tx,
+            raise_lock: app::RaiseLock::default(),
             ws_rx,
             _unread: (wm_rx, status_rx, group_bars_rx, mouse_rx, skylight_rx),
             apps: BTreeMap::new(),
@@ -303,7 +305,13 @@ impl Glide {
                 localized_name: Some(name.to_owned()),
             }
         };
-        let Some(task) = app::app_task(pid, info, self.ws_tx.clone(), startup) else {
+        let Some(task) = app::app_task(
+            pid,
+            info,
+            self.ws_tx.clone(),
+            startup,
+            Arc::clone(&self.raise_lock),
+        ) else {
             return;
         };
         self.apps.insert(

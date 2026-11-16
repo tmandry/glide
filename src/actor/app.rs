@@ -16,7 +16,7 @@
 use std::cell::{RefCell, RefMut};
 use std::fmt::Debug;
 use std::future::Future;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -162,6 +162,9 @@ pub fn spawn_app_thread(
         .unwrap();
 }
 
+/// Held by the one app actor that is raising windows, across all apps.
+pub(crate) type RaiseLock = Arc<tokio::sync::Mutex<()>>;
+
 struct State {
     pid: pid_t,
     bundle_id: Option<String>,
@@ -178,6 +181,7 @@ struct State {
     last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
     is_frontmost: bool,
     raises_tx: Sender<(Span, RaiseRequest)>,
+    raise_lock: RaiseLock,
     active_window_animations: u32,
     restore_enhanced_ui_on_last_end: bool,
     /// Latest animation frame per window, awaiting a flush. See
@@ -813,9 +817,8 @@ impl State {
         // the `raise` method is only effective when the app is actually
         // frontmost. The lock ensures that concurrent requests do not
         // steal focus from us until we complete the raise action.
-        static MUTEX: LazyLock<tokio::sync::Mutex<()>> =
-            LazyLock::new(|| tokio::sync::Mutex::new(()));
-        let mut mutex_guard = Some(MUTEX.lock().await);
+        let raise_lock = Arc::clone(&this_ref.borrow().raise_lock);
+        let mut mutex_guard = Some(raise_lock.lock_owned().await);
         // Check for cancellation again in case acquiring the mutex took too long.
         check_cancel()?;
         let mut this = this_ref.borrow_mut();
@@ -1216,7 +1219,8 @@ fn app_thread_main(
     ws_tx: window_server::Sender,
     startup: Option<wm_controller::StartupToken>,
 ) {
-    if let Some(task) = app_task(pid, info, ws_tx, startup) {
+    static RAISE_LOCK: LazyLock<RaiseLock> = LazyLock::new(RaiseLock::default);
+    if let Some(task) = app_task(pid, info, ws_tx, startup, Arc::clone(&RAISE_LOCK)) {
         Executor::run(task);
     }
 }
@@ -1230,6 +1234,7 @@ pub(crate) fn app_task(
     info: AppInfo,
     ws_tx: window_server::Sender,
     startup: Option<wm_controller::StartupToken>,
+    raise_lock: RaiseLock,
 ) -> Option<impl Future<Output = ()>> {
     let app = AXUIElement::application(pid);
     let Some(running_app) = ax::running_app(pid) else {
@@ -1277,6 +1282,7 @@ pub(crate) fn app_task(
         last_activated: None,
         is_frontmost: false,
         raises_tx,
+        raise_lock,
         active_window_animations: 0,
         restore_enhanced_ui_on_last_end: false,
         pending_frames: HashMap::default(),
