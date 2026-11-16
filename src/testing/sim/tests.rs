@@ -166,19 +166,12 @@ fn window_created_in_mission_control_joins_its_desktop_when_placed_first() {
     window_created_in_mission_control(Schedule::MacFirst);
 }
 
-// TODO: Glide tiles the window into the desktop Mission Control was opened
-// from, because the window server reports no desktop for it yet. Closing
-// Mission Control then raises it, which switches to its real desktop.
 #[test]
-#[ignore]
 fn window_created_in_mission_control_joins_its_desktop_when_seen_before_placed() {
     window_created_in_mission_control(Schedule::GlideFirst);
 }
 
-// TODO: Fails for the same reason as the test above, under the orders where
-// Glide sees the window before the window server places it.
 #[test]
-#[ignore]
 fn window_created_in_mission_control_joins_its_desktop_in_any_order() {
     for seed in 1..=200 {
         window_created_in_mission_control(Schedule::Seeded(seed));
