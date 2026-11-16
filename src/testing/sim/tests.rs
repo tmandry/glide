@@ -243,3 +243,92 @@ fn a_window_moved_with_no_drag_is_put_back() {
         assert_eq!(sim.scene().draw(), before, "{schedule:?}");
     });
 }
+
+#[test]
+fn another_app_launching_does_not_disturb_the_layout() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        sim.open_window(a, "A2");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+
+        let b = sim.launch_app("B");
+        sim.run();
+        sim.open_window(b, "B1");
+        sim.open_window(b, "B2");
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A1", "A2", "B1", "B2"], "{schedule:?}");
+        sim.scene()
+            .assert("A1")
+            .same_size_as("A2")
+            .same_size_as("B1")
+            .same_size_as("B2");
+    });
+}
+
+#[test]
+fn the_layout_returns_after_another_app_window_comes_and_goes() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        sim.open_window(a, "A2");
+        let b = sim.launch_app("B");
+        sim.run();
+        sim.click_window("A2");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+        let before = sim.scene().draw();
+
+        sim.open_window(b, "B1");
+        sim.run();
+        sim.close_window("B1");
+        sim.run();
+        sim.click_window("A2");
+        sim.run();
+        assert_eq!(sim.scene().draw(), before, "{schedule:?}");
+    });
+}
+
+#[test]
+fn switching_desktops_raises_nothing_when_the_order_already_matches() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        sim.switch_desktop(2);
+        sim.run();
+        sim.switch_desktop(1);
+        sim.run();
+        let raised = |a: &Action| matches!(a, Action::Raised(_));
+        assert!(
+            !sim.actions().iter().any(raised),
+            "{schedule:?}: {:?}",
+            sim.actions()
+        );
+    });
+}
+
+// TODO: Fails under GlideFirst. Glide reads B's window list before the window
+// server has put B1 on a desktop, and never lays B1 out. Check whether a real
+// app can list a window the window server hasn't placed, outside Mission
+// Control, before treating this as a bug.
+#[test]
+#[ignore]
+fn windows_of_an_app_launched_later_are_tiled() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+
+        let b = sim.launch_app("B");
+        sim.open_window(b, "B1");
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A1", "B1"], "{schedule:?}");
+    });
+}
