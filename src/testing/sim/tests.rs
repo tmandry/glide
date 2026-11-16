@@ -11,6 +11,7 @@ use crate::actor::layout::LayoutCommand;
 use crate::model::Direction;
 use crate::sys::app::pid_t;
 
+mod frames;
 mod harness;
 mod invariants;
 mod slow;
@@ -23,6 +24,7 @@ fn screen() -> CGRect {
 /// desktop 2. Desktop 1 is shown and Glide is running.
 struct TwoDesktops {
     sim: Harness,
+    a: pid_t,
     b: pid_t,
 }
 
@@ -41,7 +43,7 @@ impl TwoDesktops {
         sim.start_glide();
         sim.run();
         sim.clear_actions();
-        TwoDesktops { sim, b }
+        TwoDesktops { sim, a, b }
     }
 }
 
@@ -146,7 +148,7 @@ fn leaving_mission_control_onto_another_desktop() {
 /// Mission Control shows desktop 2 and app B opens B3 there. Mission Control
 /// is then closed onto desktop 1.
 fn window_created_in_mission_control(schedule: Schedule) {
-    let TwoDesktops { mut sim, b } = TwoDesktops::new(schedule);
+    let TwoDesktops { mut sim, b, .. } = TwoDesktops::new(schedule);
     sim.open_mission_control();
     sim.run();
     sim.switch_desktop(2);
