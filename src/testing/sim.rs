@@ -21,7 +21,10 @@ mod tests;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use objc2_core_foundation::CGRect;
 
@@ -49,6 +52,65 @@ pub enum Schedule {
     MacFirst,
     /// A pseudorandom order determined by the seed.
     Seeded(u64),
+}
+
+impl Schedule {
+    /// Run `scenario` under both fixed schedules and 16 seeded ones, on
+    /// several threads. Panic with the first schedule that failed.
+    ///
+    /// For a deeper sweep, set `GLIDE_SIM_SEED_FACTOR` to run that many times
+    /// as many seeds, and `GLIDE_SIM_FIRST_SEED` to start from a seed other
+    /// than 1.
+    pub fn each(scenario: impl Fn(Schedule) + Sync) {
+        Schedule::sweep(16, scenario);
+    }
+
+    fn sweep(seeds: u64, scenario: impl Fn(Schedule) + Sync) {
+        let first = env_u64("GLIDE_SIM_FIRST_SEED").unwrap_or(1);
+        // A zero state never changes under xorshift.
+        assert!(first > 0, "GLIDE_SIM_FIRST_SEED must be at least 1");
+        let seeds = seeds * env_u64("GLIDE_SIM_SEED_FACTOR").unwrap_or(1);
+        let schedules: Vec<Schedule> = [Schedule::GlideFirst, Schedule::MacFirst]
+            .into_iter()
+            .chain((first..first + seeds).map(Schedule::Seeded))
+            .collect();
+        let next = AtomicUsize::new(0);
+        let failed = AtomicUsize::new(usize::MAX);
+        let threads = thread::available_parallelism().map_or(1, |n| n.get());
+        let panics: Vec<_> = thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            if index >= schedules.len() || index > failed.load(Ordering::Relaxed) {
+                                return None;
+                            }
+                            let run = AssertUnwindSafe(|| scenario(schedules[index]));
+                            if let Err(panic) = catch_unwind(run) {
+                                failed.fetch_min(index, Ordering::Relaxed);
+                                return Some((index, panic));
+                            }
+                        }
+                    })
+                })
+                .collect();
+            workers.into_iter().filter_map(|worker| worker.join().unwrap()).collect()
+        });
+        if let Some((index, panic)) = panics.into_iter().min_by_key(|&(index, _)| index) {
+            eprintln!("failed under {:?}", schedules[index]);
+            resume_unwind(panic);
+        }
+    }
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    let value = std::env::var(name).ok()?;
+    Some(
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} must be a number, not {value:?}")),
+    )
 }
 
 pub struct Sim {

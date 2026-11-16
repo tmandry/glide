@@ -12,8 +12,6 @@ fn screen() -> CGRect {
     CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))
 }
 
-const SCHEDULES: [Schedule; 2] = [Schedule::GlideFirst, Schedule::MacFirst];
-
 /// App A has windows A1 and A2 on desktop 1, and app B has B1 and B2 on
 /// desktop 2. Desktop 1 is shown and Glide is running.
 struct TwoDesktops {
@@ -42,7 +40,7 @@ impl TwoDesktops {
 
 #[test]
 fn windows_are_tiled_on_the_desktop_they_are_on() {
-    for schedule in SCHEDULES {
+    Schedule::each(|schedule| {
         let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
         assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
         sim.scene().assert("A1").left_of("A2").same_size_as("A2");
@@ -53,12 +51,12 @@ fn windows_are_tiled_on_the_desktop_they_are_on() {
         assert_eq!(sim.tiled(2), ["B1", "B2"], "{schedule:?}");
         // Glide can discover B1 and B2 in either order.
         sim.scene().assert("B1").same_size_as("B2");
-    }
+    });
 }
 
 #[test]
 fn a_new_window_is_tiled_next_to_the_others() {
-    for schedule in SCHEDULES {
+    Schedule::each(|schedule| {
         let mut sim = Sim::new(schedule, screen(), 1);
         let a = sim.launch_app("A");
         sim.open_window(a, "A1");
@@ -86,12 +84,12 @@ fn a_new_window_is_tiled_next_to_the_others() {
             front to back: A2, A1
         "#]]
         .assert_eq(&sim.scene().draw());
-    }
+    });
 }
 
 #[test]
 fn glide_leaves_windows_alone_while_mission_control_is_open() {
-    for schedule in SCHEDULES {
+    Schedule::each(|schedule| {
         let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
         sim.open_mission_control();
         sim.run();
@@ -108,12 +106,12 @@ fn glide_leaves_windows_alone_while_mission_control_is_open() {
         assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
         sim.scene().assert("A1").fills_screen();
         assert_eq!(sim.current_desktop(), 1, "{schedule:?}");
-    }
+    });
 }
 
 #[test]
 fn leaving_mission_control_onto_another_desktop() {
-    for schedule in SCHEDULES {
+    Schedule::each(|schedule| {
         let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
         sim.open_mission_control();
         sim.run();
@@ -135,7 +133,7 @@ fn leaving_mission_control_onto_another_desktop() {
         sim.run();
         assert_eq!(sim.tiled(1), ["A1"], "{schedule:?}");
         sim.scene().assert("A1").fills_screen();
-    }
+    });
 }
 
 /// Mission Control shows desktop 2 and app B opens B3 there. Mission Control
@@ -174,9 +172,7 @@ fn window_created_in_mission_control_joins_its_desktop_when_seen_before_placed()
 
 #[test]
 fn window_created_in_mission_control_joins_its_desktop_in_any_order() {
-    for seed in 1..=200 {
-        window_created_in_mission_control(Schedule::Seeded(seed));
-    }
+    Schedule::each(window_created_in_mission_control);
 }
 
 /// A2 has the keyboard focus and is dragged to desktop 2 in Mission Control,
@@ -201,7 +197,5 @@ fn focused_window_dragged_to_another_desktop(schedule: Schedule) {
 
 #[test]
 fn focused_window_dragged_to_another_desktop_in_mission_control() {
-    for schedule in SCHEDULES {
-        focused_window_dragged_to_another_desktop(schedule);
-    }
+    Schedule::each(focused_window_dragged_to_another_desktop);
 }
