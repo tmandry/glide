@@ -15,11 +15,12 @@
 
 use std::cell::{RefCell, RefMut};
 use std::fmt::Debug;
+use std::future::Future;
 use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use accessibility::{AXError, AXUIElement, AXUIElementActions, AXUIElementAttributes};
+use accessibility::AXError;
 use accessibility_sys::{
     kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
     kAXMainWindowChangedNotification, kAXStandardWindowSubrole, kAXTitleChangedNotification,
@@ -27,9 +28,7 @@ use accessibility_sys::{
     kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
     kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole,
 };
-use objc2::rc::Retained;
-use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::{CFRetained, CFRunLoop, CFString, CGRect};
+use objc2_core_foundation::{CFRunLoop, CFString, CGRect};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{
     UnboundedReceiver as Receiver, UnboundedSender as Sender, WeakUnboundedSender,
@@ -43,12 +42,14 @@ use tracing::{Instrument, Span, debug, error, info, info_span, instrument, trace
 use crate::actor::reactor::{Event, Requested, TransactionId};
 use crate::actor::{window_server, wm_controller};
 use crate::collections::{HashMap, HashSet};
-use crate::sys::app::{AXUIElementExt, NSRunningApplicationExt, ProcessInfo, pid_t};
+use crate::sys::app::pid_t;
 pub use crate::sys::app::{AppInfo, WindowInfo};
-use crate::sys::event;
+use crate::sys::ax::{
+    self, AXUIElement, AXUIElementActions as _, AXUIElementAttributes as _, AXUIElementExt as _,
+    Element, Observer, RunningApp,
+};
 use crate::sys::executor::Executor;
 use crate::sys::geometry::SameAs;
-use crate::sys::observer::Observer;
 use crate::sys::window_server::{WindowId, WindowServerId};
 
 #[derive(Clone)]
@@ -164,8 +165,8 @@ pub fn spawn_app_thread(
 struct State {
     pid: pid_t,
     bundle_id: Option<String>,
-    running_app: Retained<NSRunningApplication>,
-    app: CFRetained<AXUIElement>,
+    running_app: RunningApp,
+    app: Element,
     observer: Observer,
     ws_tx: window_server::Sender,
     requests_tx: WeakUnboundedSender<(Span, Request)>,
@@ -185,7 +186,7 @@ struct State {
 }
 
 struct WindowState {
-    elem: CFRetained<AXUIElement>,
+    elem: Element,
     is_standard: bool,
     last_seen_txid: TransactionId,
     /// The last frame requested via [`Request::AnimationFrame`] with `set_size`.
@@ -227,7 +228,7 @@ impl State {
         info: AppInfo,
         requests_tx: Sender<(Span, Request)>,
         requests_rx: Receiver<(Span, Request)>,
-        notifications_rx: Receiver<(CFRetained<AXUIElement>, String)>,
+        notifications_rx: Receiver<(Element, String)>,
         raises_rx: Receiver<(Span, RaiseRequest)>,
         startup: Option<wm_controller::StartupToken>,
     ) {
@@ -246,7 +247,7 @@ impl State {
     async fn handle_incoming(
         this: &RefCell<Self>,
         mut requests_rx: Receiver<(Span, Request)>,
-        mut notifications_rx: Receiver<(CFRetained<AXUIElement>, String)>,
+        mut notifications_rx: Receiver<(Element, String)>,
     ) {
         loop {
             // Process requests in batches so we can coalesce stale animation
@@ -462,7 +463,7 @@ impl State {
             "com.microsoft.teams",
             "org.gnu.Emacs",
         ];
-        let timeout = Instant::now()
+        let timeout = ax::now()
             + match info.bundle_id.as_deref() {
                 Some(id)
                     if EXTENDED_TIMEOUT_PREFIXES.iter().any(|prefix| id.starts_with(prefix)) =>
@@ -474,11 +475,12 @@ impl State {
             };
         let mut sleep_dur = Duration::from_millis(20);
         let mut sleep = || {
-            let now = Instant::now();
-            let Some(remaining) = timeout.checked_duration_since(now) else {
+            let now = ax::now();
+            let Some(remaining) = timeout.checked_duration_since(now).filter(|d| !d.is_zero())
+            else {
                 return false;
             };
-            thread::sleep(Duration::min(sleep_dur, remaining));
+            ax::sleep(Duration::min(sleep_dur, remaining));
             sleep_dur = Duration::min(sleep_dur * 2, Duration::from_secs(1));
             true
         };
@@ -682,7 +684,7 @@ impl State {
     }
 
     #[instrument(skip_all, fields(app = ?self.app, ?notif))]
-    fn handle_notification(&mut self, elem: CFRetained<AXUIElement>, notif: &str) {
+    fn handle_notification(&mut self, elem: Element, notif: &str) {
         trace!(?notif, ?elem, "Got notification");
         #[allow(non_upper_case_globals)]
         #[forbid(non_snake_case)]
@@ -708,7 +710,7 @@ impl State {
                 self.send_ws_request(window_server::Event::WindowCreated(
                     wid,
                     window,
-                    event::get_mouse_state(),
+                    ax::get_mouse_state(),
                 ));
             }
             kAXUIElementDestroyedNotification => {
@@ -734,7 +736,7 @@ impl State {
                     frame,
                     last_seen,
                     Requested(false),
-                    Some(event::get_mouse_state()),
+                    Some(ax::get_mouse_state()),
                 ));
             }
             kAXWindowMiniaturizedNotification | kAXWindowDeminiaturizedNotification => {
@@ -846,10 +848,8 @@ impl State {
         // make_key_window, but try to avoid that because we would not have the
         // same guarantees with NSRunningApplication, which dispatches a request
         // to the application and does not wait for it to complete.
-        let make_key_result = crate::sys::window_server::make_key_window(
-            this.pid,
-            WindowServerId::try_from(&*this.window(first)?.elem)?,
-        );
+        let make_key_result =
+            ax::make_key_window(this.pid, WindowServerId::try_from(&*this.window(first)?.elem)?);
         if make_key_result.is_err() {
             warn!(?this.pid, "Failed to activate app");
         }
@@ -939,7 +939,7 @@ impl State {
     /// focus the same window before it ages out.
     fn take_pending_quiet_window_change(&mut self) -> Option<WindowId> {
         let (deadline, _, quiet_window_change, _) = self.last_activated.as_mut()?;
-        if Instant::now() >= *deadline {
+        if ax::now() >= *deadline {
             return None;
         }
         quiet_window_change.take()
@@ -955,7 +955,7 @@ impl State {
         let Some((deadline, ..)) = self.last_activated.as_mut() else {
             return;
         };
-        *deadline = (*deadline).min(Instant::now() + CANCELLED_ACTIVATION_GRACE);
+        *deadline = (*deadline).min(ax::now() + CANCELLED_ACTIVATION_GRACE);
     }
 
     fn on_main_window_changed(&mut self, quiet_if: Option<WindowId>) -> Option<WindowId> {
@@ -983,7 +983,7 @@ impl State {
                 self.send_ws_request(window_server::Event::WindowCreated(
                     wid,
                     info,
-                    event::get_mouse_state(),
+                    ax::get_mouse_state(),
                 ));
                 wid
             }
@@ -1039,7 +1039,7 @@ impl State {
                 // activation event, so we still want to mark it as quiet if
                 // applicable.
                 Some((deadline, quiet_activation, quiet_window_change, tx))
-                    if Instant::now() < deadline =>
+                    if ax::now() < deadline =>
                 {
                     // Initiated by us.
                     trace!("by us");
@@ -1075,7 +1075,7 @@ impl State {
     ) -> Result<(), RaiseError> {
         let (tx, rx) = oneshot::channel();
         this.last_activated = Some((
-            Instant::now() + ACTIVATION_TIMEOUT,
+            ax::now() + ACTIVATION_TIMEOUT,
             quiet_activation,
             quiet_window_change,
             tx,
@@ -1094,7 +1094,7 @@ impl State {
     }
 
     #[must_use]
-    fn register_window(&mut self, elem: CFRetained<AXUIElement>) -> Option<(WindowInfo, WindowId)> {
+    fn register_window(&mut self, elem: Element) -> Option<(WindowInfo, WindowId)> {
         let Ok(info) = WindowInfo::try_from(&*elem) else {
             return None;
         };
@@ -1216,30 +1216,45 @@ fn app_thread_main(
     ws_tx: window_server::Sender,
     startup: Option<wm_controller::StartupToken>,
 ) {
+    if let Some(task) = app_task(pid, info, ws_tx, startup) {
+        Executor::run(task);
+    }
+}
+
+/// Set up the actor for an app. Return the task that runs it, or `None` if
+/// the app can't be managed.
+///
+/// The task must run on the thread this is called on.
+pub(crate) fn app_task(
+    pid: pid_t,
+    info: AppInfo,
+    ws_tx: window_server::Sender,
+    startup: Option<wm_controller::StartupToken>,
+) -> Option<impl Future<Output = ()>> {
     let app = AXUIElement::application(pid);
-    let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
+    let Some(running_app) = ax::running_app(pid) else {
         info!(?pid, "Making NSRunningApplication failed; exiting app thread");
-        return;
+        return None;
     };
     let bundle_id = running_app.bundleIdentifier();
 
-    let Ok(process_info) = ProcessInfo::for_pid(pid) else {
+    let Ok(is_xpc) = ax::is_xpc(pid) else {
         info!(?pid, ?bundle_id, "Could not get ProcessInfo; exiting app thread");
-        return;
+        return None;
     };
-    if process_info.is_xpc {
+    if is_xpc {
         // XPC processes are not supposed to have windows so at best they are
         // extra work and noise. Worse, Apple's QuickLookUIService reports
         // having standard windows (these seem to be for Finder previews), but
         // they are non-standard and unmanageable.
         debug!(?pid, ?bundle_id, "Filtering out XPC process");
-        return;
+        return None;
     }
 
     // Set up the observer callback.
     let Ok(observer) = Observer::new(pid) else {
         info!(?pid, ?bundle_id, "Making observer failed; exiting app thread");
-        return;
+        return None;
     };
     let (notifications_tx, notifications_rx) = channel();
     let observer =
@@ -1267,14 +1282,14 @@ fn app_thread_main(
         pending_frames: HashMap::default(),
     };
 
-    Executor::run(state.run(
+    Some(state.run(
         info,
         requests_tx,
         requests_rx,
         notifications_rx,
         raises_rx,
         startup,
-    ));
+    ))
 }
 
 const SET_WINDOW_FRAME_RETRIES: usize = 3;
@@ -1313,7 +1328,7 @@ fn set_window_frame_with_retries(
                 ?observed,
                 "Retrying window frame set because observed frame differs from requested frame"
             );
-            thread::sleep(SET_WINDOW_FRAME_RETRY_DELAY);
+            ax::sleep(SET_WINDOW_FRAME_RETRY_DELAY);
         }
     }
 

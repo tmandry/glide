@@ -6,7 +6,7 @@
 use std::fmt::{Debug, Formatter};
 use std::ptr::NonNull;
 
-use accessibility::{AXAttribute, AXAttributeValue, AXError, AXUIElement, AXUIElementAttributes};
+use accessibility::{AXAttribute, AXAttributeValue, AXError, AXUIElement};
 pub use accessibility_sys::pid_t;
 use accessibility_sys::{
     kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute, kAXStandardWindowSubrole,
@@ -20,6 +20,7 @@ use objc2_foundation::NSString;
 use redact::Secret;
 use serde::{Deserialize, Serialize};
 
+use super::ax::{self, AXUIElementAttributes as _};
 use super::geometry::CGRectDef;
 use super::window_server::WindowServerId;
 
@@ -95,9 +96,9 @@ pub struct WindowInfo {
     pub ax_subrole: Option<String>,
 }
 
-impl TryFrom<&AXUIElement> for WindowInfo {
+impl TryFrom<&ax::AXUIElement> for WindowInfo {
     type Error = accessibility::Error;
-    fn try_from(element: &AXUIElement) -> Result<Self, accessibility::Error> {
+    fn try_from(element: &ax::AXUIElement) -> Result<Self, accessibility::Error> {
         let role = element.role()?;
         let subrole = match element.subrole() {
             Ok(s) => Some(s),
@@ -116,7 +117,7 @@ impl TryFrom<&AXUIElement> for WindowInfo {
             title: element.title().map(|t| t.to_string().into()).unwrap_or_default(),
             frame: element.frame()?,
             sys_id: WindowServerId::try_from(element).ok(),
-            is_resizable: element.is_settable(&AXAttribute::size())?,
+            is_resizable: element.is_settable(&ax::AXAttribute::size())?,
             ax_role: role.to_string(),
             ax_subrole,
         })
