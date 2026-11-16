@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
+use std::time::Duration;
 
 use accessibility::AXError;
 use accessibility_sys::{
@@ -46,6 +47,9 @@ use crate::sys::ax::fake::{
 use crate::sys::event::MouseState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+
+/// How long an accessibility request waits for a reply.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// A macOS process that is sent messages.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -388,6 +392,10 @@ pub struct App {
     enhanced_user_interface: bool,
     /// The notifications observers asked for, each on one element.
     observers: Vec<(ObserverId, ElementId, &'static str)>,
+    /// Whether the app has stopped handling messages and requests.
+    hung: bool,
+    /// How long the app takes to handle each message and request.
+    delay: Duration,
 }
 
 struct AppWindow {
@@ -664,6 +672,8 @@ impl Mac {
                 active: false,
                 enhanced_user_interface: false,
                 observers: Vec::new(),
+                hung: false,
+                delay: Duration::ZERO,
             },
         );
         self.window_server.launch(pid, &mut self.out);
@@ -713,6 +723,18 @@ impl Mac {
         self.route();
     }
 
+    /// Make an app stop handling messages and accessibility requests, as it
+    /// does when it beachballs, or start again.
+    pub fn set_app_hung(&mut self, pid: pid_t, hung: bool) {
+        self.apps.get_mut(&pid).expect("app is not running").hung = hung;
+    }
+
+    /// Make an app take `delay` to handle each message and accessibility
+    /// request, as a busy app does.
+    pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
+        self.apps.get_mut(&pid).expect("app is not running").delay = delay;
+    }
+
     pub fn open_mission_control(&mut self) {
         assert!(!self.dock.mission_control, "Mission Control is already open");
         self.dock.mission_control = true;
@@ -759,13 +781,27 @@ impl Mac {
         }
     }
 
-    /// The processes with a message waiting.
+    /// The processes with a message waiting that can handle it.
     pub fn ready(&self) -> impl Iterator<Item = Process> + '_ {
-        self.inboxes.iter().filter(|(_, inbox)| !inbox.is_empty()).map(|(&p, _)| p)
+        self.inboxes
+            .iter()
+            .filter(|(_, inbox)| !inbox.is_empty())
+            .map(|(&p, _)| p)
+            .filter(|&p| !self.is_hung(p))
+    }
+
+    fn is_hung(&self, process: Process) -> bool {
+        match process {
+            Process::App(pid) => self.apps.get(&pid).is_some_and(|app| app.hung),
+            Process::WindowServer => false,
+        }
     }
 
     /// Have `process` handle its next message. Return false if it has none.
     pub fn step(&mut self, process: Process) -> bool {
+        if self.is_hung(process) {
+            return false;
+        }
         let Some(message) = self.inboxes.get_mut(&process).and_then(|inbox| inbox.pop_front())
         else {
             return false;
@@ -774,6 +810,7 @@ impl Mac {
             Process::WindowServer => self.window_server.handle(message, &mut self.out),
             Process::App(pid) => {
                 if let Some(app) = self.apps.get_mut(&pid) {
+                    fake::sleep(app.delay);
                     app.handle(message, &mut self.out);
                 }
             }
@@ -799,18 +836,12 @@ impl Mac {
         self.route();
     }
 
-    /// Send an app an accessibility request and wait for the reply.
-    ///
-    /// TODO: A real request fails if the app takes too long to reply. Let
-    /// the caller make a request fail that way.
+    /// Send an app an accessibility request and wait for the reply. A hung
+    /// app never replies, and the request fails once it times out.
     pub fn ax_request(&mut self, pid: pid_t, request: Request) -> Result<Option<Value>, AXError> {
-        if !self.apps.contains_key(&pid) {
+        let Some(app) = self.apps.get(&pid) else {
             return Err(AXError::CannotComplete);
-        }
-        // The app gets to the request after what is already in its inbox.
-        while self.step(Process::App(pid)) {}
-
-        let app = self.apps.get_mut(&pid).unwrap();
+        };
         let action: Option<(fn(String) -> Action, u32)> = match &request {
             Request::SetAttribute(ElementId::Window(id), ..) => Some((Action::Wrote, *id)),
             Request::PerformAction(ElementId::Window(id), _) => Some((Action::Raised, *id)),
@@ -821,6 +852,15 @@ impl Mac {
         {
             self.actions.push((action(window.title.clone()), self.dock.mission_control));
         }
+        if app.hung {
+            fake::sleep(REQUEST_TIMEOUT);
+            return Err(AXError::CannotComplete);
+        }
+        // The app gets to the request after what is already in its inbox.
+        while self.step(Process::App(pid)) {}
+
+        let app = self.apps.get_mut(&pid).unwrap();
+        fake::sleep(app.delay);
         let reply = app.ax(request, &mut self.out);
         self.route();
         reply
@@ -845,6 +885,10 @@ impl Mac {
     pub fn key_window(&self) -> Option<&str> {
         let app = self.apps.get(&self.window_server.frontmost?)?;
         self.title(app.main_window?)
+    }
+
+    pub fn any_app_hung(&self) -> bool {
+        self.apps.values().any(|app| app.hung)
     }
 
     pub fn mission_control_open(&self) -> bool {

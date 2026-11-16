@@ -62,8 +62,9 @@ impl Harness {
             }
         }
 
-        // Mission Control leaves Glide's layout behind until it closes.
-        if mac.mission_control_open() {
+        // Mission Control leaves Glide's layout behind until it closes, and a
+        // hung app can't take the frames Glide gives its windows.
+        if mac.mission_control_open() || mac.any_app_hung() {
             return;
         }
         let window_server = mac.window_server();

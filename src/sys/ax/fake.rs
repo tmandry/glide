@@ -386,10 +386,6 @@ pub fn get_mouse_state() -> MouseState {
 }
 
 /// The time on this thread's clock, which only [`sleep`] moves.
-///
-/// TODO: Nothing else moves the clock, so a deadline only passes for code
-/// that sleeps. Let the caller advance it to reach the cases where a reply
-/// arrives after its deadline.
 pub fn now() -> Instant {
     let now = CLOCK.get().unwrap_or_else(Instant::now);
     CLOCK.set(Some(now));

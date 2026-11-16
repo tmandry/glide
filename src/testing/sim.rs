@@ -25,6 +25,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use objc2_core_foundation::CGRect;
 
@@ -178,6 +179,17 @@ impl Sim {
         assert!(self.glide_running);
         let event = reactor::Event::Command(reactor::Command::Layout(command));
         self.send(Actor::Reactor, glide::Message::Reactor(event));
+    }
+
+    /// Make an app stop responding, or start again.
+    pub fn set_app_hung(&mut self, pid: pid_t, hung: bool) {
+        self.mac.borrow_mut().set_app_hung(pid, hung);
+    }
+
+    /// Make an app take `delay` to handle each message and accessibility
+    /// request.
+    pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
+        self.mac.borrow_mut().set_app_delay(pid, delay);
     }
 
     pub fn open_mission_control(&mut self) {

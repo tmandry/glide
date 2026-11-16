@@ -13,6 +13,7 @@ use crate::sys::app::pid_t;
 
 mod harness;
 mod invariants;
+mod slow;
 
 fn screen() -> CGRect {
     CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))
