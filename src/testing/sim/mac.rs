@@ -427,7 +427,9 @@ impl App {
             id,
             title: title.to_owned(),
             frame,
-            shown: false,
+            // The app puts the window on the desktop it believes is shown.
+            // The window server says where it really went.
+            shown: true,
         });
         self.notify(
             ElementId::Application,
