@@ -199,11 +199,7 @@ fn focused_window_dragged_to_another_desktop(schedule: Schedule) {
     assert_eq!(sim.tiled(2), ["A2", "B1", "B2"], "{schedule:?}");
 }
 
-// TODO: When Mission Control closes, Glide raises the dragged window along
-// with the ones left on the desktop. The raise gives the dragged window the
-// keyboard focus, which switches to its desktop. This is issue #291.
 #[test]
-#[ignore]
 fn focused_window_dragged_to_another_desktop_in_mission_control() {
     for schedule in SCHEDULES {
         focused_window_dragged_to_another_desktop(schedule);

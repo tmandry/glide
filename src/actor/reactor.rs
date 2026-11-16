@@ -796,6 +796,16 @@ impl Reactor {
                 self.update_complete_window_server_info(on_screen);
                 self.layout.cancel_interactive_state();
                 self.resizing_window = None;
+                // Drop windows that left these spaces before SpaceExposed
+                // raises them. A window moved to another space in Mission
+                // Control would otherwise be raised, switching to its space.
+                let laid_out: Vec<_> = (self.screens.iter())
+                    .flat_map(|screen| screen.space)
+                    .filter(|&space| self.layout.has_layout(space))
+                    .collect();
+                for pid in self.apps.keys().copied().collect::<Vec<_>>() {
+                    self.update_app_windows_on_screen(pid, &laid_out);
+                }
                 let response = self
                     .screens
                     .iter()

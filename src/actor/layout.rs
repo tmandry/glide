@@ -1558,6 +1558,11 @@ impl LayoutManager {
         self.layout_mapping.get(&space)?.active_layout().into()
     }
 
+    /// Whether `space` has been exposed and has a layout.
+    pub fn has_layout(&self, space: SpaceId) -> bool {
+        self.try_layout(space).is_some()
+    }
+
     fn layout(&self, space: SpaceId) -> LayoutId {
         self.try_layout(space).unwrap()
     }
