@@ -1,7 +1,8 @@
 name: Grouped release notes trial
 
-
 on:
+  push:
+    branches: [scribe/grouped-trial]
   workflow_dispatch:
     inputs:
       generate:
@@ -15,7 +16,7 @@ permissions:
 
 jobs:
   trial:
-    #if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/scribe/grouped-trial'
     environment: release-notes
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -31,7 +32,7 @@ jobs:
             target: v0.2.18
           - range: next
             base: v0.2.18
-            target: HEAD
+            target: refs/remotes/origin/main
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,7 +47,7 @@ jobs:
           commit: 9e0908afde76648baa8a58cc0d0a2039775a2f5e
           locked: true
       - uses: actions/cache/restore@v4
-        if: inputs.generate
+        if: github.event_name == 'push' || inputs.generate
         with:
           path: ${{ runner.temp }}/groups
           key: groups-v1-${{ matrix.range }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -55,8 +56,8 @@ jobs:
       - name: Investigate the pinned range
         env:
           GH_TOKEN: ${{ github.token }}
-          OPENAI_API_KEY: ${{ inputs.generate && secrets.OPENAI_API_KEY || '' }}
-          GENERATE: ${{ inputs.generate }}
+          OPENAI_API_KEY: ${{ (github.event_name == 'push' || inputs.generate) && secrets.OPENAI_API_KEY || '' }}
+          GENERATE: ${{ github.event_name == 'push' || inputs.generate }}
           BASE: ${{ matrix.base }}
           TARGET: ${{ matrix.target }}
           RANGE: ${{ matrix.range }}
@@ -74,11 +75,11 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           }
           if [[ "$RANGE" == next && "$GENERATE" == true ]]; then
-            replay "HEAD^1" previous-head
+            replay "${TARGET}^1" previous-head
           fi
           replay "$TARGET" "$RANGE"
       - uses: actions/cache/save@v4
-        if: ${{ !cancelled() && inputs.generate }}
+        if: ${{ !cancelled() && (github.event_name == 'push' || inputs.generate) }}
         with:
           path: ${{ runner.temp }}/groups
           key: groups-v1-${{ matrix.range }}-${{ github.run_id }}-${{ github.run_attempt }}
