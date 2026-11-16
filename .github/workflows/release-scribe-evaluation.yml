@@ -29,38 +29,16 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - name: Check out the reviewed tool
-        uses: actions/checkout@v4
-        with:
-          repository: tmandry/release-scribe
-          ref: efd6db1066073e76b884db76573706966d9019c7
-          path: .scribe-tool
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Identify the tool build
-        id: tool-build
-        run: |
-          set -euo pipefail
-          echo "revision=$(git -C .scribe-tool rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "compiler=$(rustc -vV | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-      - name: Restore the compiled tool
-        id: tool-cache
-        uses: actions/cache/restore@v5
+      - name: Install and cache the reviewed tool
+        uses: baptiste0928/cargo-install@v3
         with:
-          path: .scribe-tool/target/release/release-scribe
-          key: release-scribe-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.tool-build.outputs.compiler }}-${{ steps.tool-build.outputs.revision }}
-      - name: Build the tool
-        if: steps.tool-cache.outputs.cache-hit != 'true'
-        run: cargo build --release --locked --manifest-path .scribe-tool/Cargo.toml
-      - name: Save the compiled tool
-        if: steps.tool-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: .scribe-tool/target/release/release-scribe
-          key: ${{ steps.tool-cache.outputs.cache-primary-key }}
+          crate: release-scribe
+          git: https://github.com/tmandry/release-scribe
+          commit: 45289d68ea5751cfe5758f90498cfeb724474c75
+          locked: true
       - name: Verify the tool
-        run: .scribe-tool/target/release/release-scribe --version
+        run: release-scribe --version
       - name: Collect, optionally generate, and update the evaluation
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,7 +48,7 @@ jobs:
           set -euo pipefail
           args=()
           if [ "$APPLY" = true ]; then args+=(--apply); fi
-          .scribe-tool/target/release/release-scribe evaluate \
+          release-scribe evaluate \
             --repo "$GITHUB_WORKSPACE" \
             --config .github/release-scribe/config.json \
             --output "$RUNNER_TEMP/release-scribe" "${args[@]}"
