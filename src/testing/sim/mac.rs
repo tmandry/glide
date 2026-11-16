@@ -298,6 +298,10 @@ impl WindowServer {
     }
 
     /// The windows on the desktop being shown, front to back.
+    ///
+    /// TODO: While Mission Control is open the real window server can list
+    /// windows from every desktop here. The model doesn't, because the window
+    /// server doesn't know Mission Control is open; only the Dock does.
     pub fn windows_on_screen(&self) -> Vec<WindowServerInfo> {
         let desktop = Some(self.current_desktop());
         self.order
