@@ -7,6 +7,8 @@ use test_log::test;
 
 use self::harness::Harness;
 use super::{Action, Schedule};
+use crate::actor::layout::LayoutCommand;
+use crate::model::Direction;
 use crate::sys::app::pid_t;
 
 mod harness;
@@ -202,4 +204,41 @@ fn focused_window_dragged_to_another_desktop(schedule: Schedule) {
 #[test]
 fn focused_window_dragged_to_another_desktop_in_mission_control() {
     Schedule::each(focused_window_dragged_to_another_desktop);
+}
+
+#[test]
+fn a_focus_command_gives_the_window_the_keyboard_focus() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        assert_eq!(sim.key_window().as_deref(), Some("A2"), "{schedule:?}");
+
+        sim.command(LayoutCommand::MoveFocus(Direction::Left));
+        sim.run();
+        assert_eq!(sim.key_window().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.selected().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.actions(), [Action::Raised("A1".into())], "{schedule:?}");
+    });
+}
+
+#[test]
+fn glide_selects_the_window_the_user_clicks() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        sim.click_window("A1");
+        sim.run();
+        assert_eq!(sim.selected().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.actions(), [], "{schedule:?}");
+    });
+}
+
+#[test]
+fn a_window_moved_with_no_drag_is_put_back() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        let before = sim.scene().draw();
+        let moved = CGRect::new(CGPoint::new(40., 60.), CGSize::new(500., 1000.));
+        sim.set_window_frame("A1", moved);
+        sim.run();
+        assert_eq!(sim.scene().draw(), before, "{schedule:?}");
+    });
 }

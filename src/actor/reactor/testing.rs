@@ -63,6 +63,11 @@ impl Reactor {
         self.raise_manager_tx = tx;
     }
 
+    /// Return the window selected in the layout of `space`.
+    pub fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
+        self.layout.selected_window(space)
+    }
+
     /// Return the windows tiled on `space`.
     pub fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.layout.tiled_windows(space)

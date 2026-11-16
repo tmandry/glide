@@ -68,6 +68,9 @@ pub enum Message {
     OrderFront(WindowServerId),
     /// Give the window the keyboard focus, activating its app.
     MakeKey(WindowServerId),
+    /// From the user: click the window. It comes to the front and takes the
+    /// keyboard focus.
+    Click(WindowServerId),
     /// From the Dock: show another desktop, counting from 1.
     ShowDesktop(usize),
     /// From the Dock: put the window on another desktop, counting from 1.
@@ -271,6 +274,18 @@ impl WindowServer {
                     self.show_desktop(index, out);
                 }
             }
+            Message::Click(wsid) => {
+                let Some(window) = self.windows.get(&wsid) else {
+                    return;
+                };
+                let pid = window.pid;
+                self.activate(pid, out);
+                out.send(Process::App(pid), Message::BecomeMain(wsid));
+                if let Some(at) = self.order.iter().position(|&w| w == wsid) {
+                    self.order.remove(at);
+                    self.order.insert(0, wsid);
+                }
+            }
             Message::ShowDesktop(number) => self.show_desktop(number - 1, out),
             Message::MoveToDesktop(wsid, number) => {
                 let desktop = self.desktops[number - 1];
@@ -303,6 +318,10 @@ impl WindowServer {
 
     pub fn screen(&self) -> CGRect {
         self.screen
+    }
+
+    pub fn frontmost_app(&self) -> Option<pid_t> {
+        self.frontmost
     }
 
     pub fn current_desktop(&self) -> SpaceId {
@@ -439,6 +458,24 @@ impl App {
         );
         self.set_main_window(Some(id), out);
         out.send(Process::WindowServer, Message::OrderIn(id, frame));
+    }
+
+    /// Move or resize a window as the user would by dragging it.
+    fn set_frame(&mut self, wsid: WindowServerId, frame: CGRect, out: &mut Outbox) {
+        let Some(window) = self.windows.iter_mut().find(|w| w.id == wsid) else {
+            return;
+        };
+        let old = std::mem::replace(&mut window.frame, frame);
+        if old == frame {
+            return;
+        }
+        out.send(Process::WindowServer, Message::SetFrame(wsid, frame));
+        if old.origin != frame.origin {
+            self.notify(element(wsid), kAXWindowMovedNotification, element(wsid), out);
+        }
+        if old.size != frame.size {
+            self.notify(element(wsid), kAXWindowResizedNotification, element(wsid), out);
+        }
     }
 
     /// Close a window. The most recent remaining window becomes the main
@@ -653,6 +690,29 @@ impl Mac {
         self.route();
     }
 
+    /// Click a window on screen.
+    pub fn click_window(&mut self, wsid: WindowServerId) {
+        let on_screen = self.window_server.windows_on_screen();
+        assert!(
+            on_screen.iter().any(|w| w.id == wsid),
+            "{wsid:?} is not on screen"
+        );
+        self.out.send(Process::WindowServer, Message::Click(wsid));
+        self.route();
+    }
+
+    /// Move or resize a window with the mouse, which is released by the time
+    /// anything else sees the new frame.
+    pub fn set_window_frame(&mut self, wsid: WindowServerId, frame: CGRect) {
+        let app = self
+            .apps
+            .values_mut()
+            .find(|app| app.windows.iter().any(|w| w.id == wsid))
+            .expect("window does not exist");
+        app.set_frame(wsid, frame, &mut self.out);
+        self.route();
+    }
+
     pub fn open_mission_control(&mut self) {
         assert!(!self.dock.mission_control, "Mission Control is already open");
         self.dock.mission_control = true;
@@ -779,6 +839,13 @@ impl Mac {
     }
 
     // What a test can see. Nothing in the system has this view.
+
+    /// The title of the window with the keyboard focus: the main window of
+    /// the app the window server has frontmost.
+    pub fn key_window(&self) -> Option<&str> {
+        let app = self.apps.get(&self.window_server.frontmost?)?;
+        self.title(app.main_window?)
+    }
 
     pub fn mission_control_open(&self) -> bool {
         self.dock.mission_control

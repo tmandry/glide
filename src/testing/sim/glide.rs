@@ -184,6 +184,9 @@ impl Glide {
             let startup = Some(startup_tx.clone());
             self.sent.push((Actor::App(pid), Message::Start { startup }));
         }
+        if let Some(pid) = window_server.frontmost_app() {
+            self.reactor_event(reactor::Event::ApplicationGloballyActivated(pid));
+        }
     }
 
     /// Take the messages the actors have sent each other.
@@ -354,5 +357,9 @@ impl Glide {
 
     pub fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.reactor.tiled_windows(space)
+    }
+
+    pub fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
+        self.reactor.selected_window(space)
     }
 }

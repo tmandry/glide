@@ -20,7 +20,15 @@ const MAX_WRITES_PER_WINDOW: usize = 8;
 impl Harness {
     /// Panic if the settled system breaks an invariant. `first_action` is the
     /// index of the first action taken since the system last settled.
-    pub(super) fn check_invariants(&self, first_action: usize) {
+    pub(super) fn check_invariants(&mut self, first_action: usize) {
+        // Glide has no layout to select in until it has tiled a window there.
+        let settled_layout = !self.sim.mac.borrow().mission_control_open()
+            && !self.tiled(self.current_desktop()).is_empty();
+        let selected = if settled_layout {
+            self.selected()
+        } else {
+            None
+        };
         let mac = self.sim.mac.borrow();
         let fail = |what: String| -> ! {
             panic!("{what}\n{}", self.scene().draw());
@@ -71,6 +79,13 @@ impl Harness {
         if tiled.iter().collect::<Vec<_>>() != shown {
             fail(format!(
                 "Glide has tiled {tiled:?} on the desktop being shown, which has {shown:?}"
+            ));
+        }
+
+        let key_window = mac.key_window().map(str::to_owned);
+        if key_window.as_ref().is_some_and(|key| tiled.contains(key)) && selected != key_window {
+            fail(format!(
+                "Glide has {selected:?} selected, but {key_window:?} has the keyboard focus"
             ));
         }
 

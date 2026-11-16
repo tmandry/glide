@@ -31,6 +31,8 @@ use objc2_core_foundation::CGRect;
 use self::glide::{Actor, Glide};
 pub use self::mac::Action;
 use self::mac::{Mac, Notification};
+use crate::actor::layout::LayoutCommand;
+use crate::actor::reactor;
 use crate::sys::app::pid_t;
 use crate::testing::scene::Scene;
 
@@ -158,6 +160,26 @@ impl Sim {
         mac.close_window(wsid);
     }
 
+    pub fn click_window(&mut self, title: &str) {
+        let mut mac = self.mac.borrow_mut();
+        let wsid = mac.window_titled(title);
+        mac.click_window(wsid);
+    }
+
+    /// Move or resize a window with the mouse.
+    pub fn set_window_frame(&mut self, title: &str, frame: CGRect) {
+        let mut mac = self.mac.borrow_mut();
+        let wsid = mac.window_titled(title);
+        mac.set_window_frame(wsid, frame);
+    }
+
+    /// Give Glide a layout command, as a key binding would.
+    pub fn command(&mut self, command: LayoutCommand) {
+        assert!(self.glide_running);
+        let event = reactor::Event::Command(reactor::Command::Layout(command));
+        self.send(Actor::Reactor, glide::Message::Reactor(event));
+    }
+
     pub fn open_mission_control(&mut self) {
         self.mac.borrow_mut().open_mission_control();
     }
@@ -278,6 +300,24 @@ impl Sim {
             scene.window(title(w.id), w.frame)
         });
         scene.front_to_back(on_screen.iter().map(|w| title(w.id)))
+    }
+
+    /// The title of the window Glide has selected on the desktop being
+    /// shown.
+    pub fn selected(&mut self) -> Option<String> {
+        let mac = self.mac.borrow();
+        let space = mac.window_server().current_desktop();
+        // Glide has no layout to select in until it has tiled a window there.
+        if self.glide.tiled_windows(space).is_empty() {
+            return None;
+        }
+        let wid = self.glide.selected_window(space)?;
+        Some(mac.title(wid.wsid()?)?.to_owned())
+    }
+
+    /// The title of the window with the keyboard focus.
+    pub fn key_window(&self) -> Option<String> {
+        self.mac.borrow().key_window().map(str::to_owned)
     }
 
     /// The desktop being shown, counting from 1.
