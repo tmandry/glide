@@ -1110,6 +1110,20 @@ impl Reactor {
         self.window_ids
             .extend(new.iter().flat_map(|(wid, info)| info.sys_id.map(|wsid| (wsid, *wid))));
         self.windows.extend(new.into_iter().map(|(wid, info)| (wid, info.into())));
+        let spaces: Vec<_> = self.screens.iter().flat_map(|screen| screen.space).collect();
+        self.update_app_windows_on_screen(pid, &spaces);
+        // If it's possible we just added the main window to the layout, make
+        // sure the layout knows it's focused.
+        if let Some(main_window) = self.main_window() {
+            if main_window.pid == pid {
+                self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
+            }
+        }
+    }
+
+    /// Tell the layout which of the app's known windows are on screen in each
+    /// of `spaces`.
+    fn update_app_windows_on_screen(&mut self, pid: pid_t, spaces: &[SpaceId]) {
         let mut app_windows: BTreeMap<SpaceId, Vec<(WindowId, LayoutWindowInfo)>> = BTreeMap::new();
         for wid in self
             .visible_windows
@@ -1126,22 +1140,12 @@ impl Reactor {
             };
             app_windows.entry(space).or_default().push((wid, layout_info));
         }
-        let screens = self.screens.clone();
-        for screen in screens {
-            let Some(space) = screen.space else { continue };
+        for &space in spaces {
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
                 app_windows.remove(&space).unwrap_or_default(),
             ));
-        }
-        // If it's possible we just added the main window to the layout, make
-        // sure the layout knows it's focused.
-        if let Some(main_window) = self.main_window() {
-            if main_window.pid == pid {
-                let spaces = self.screens.iter().flat_map(|screen| screen.space).collect();
-                self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
-            }
         }
     }
 
