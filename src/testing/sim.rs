@@ -181,6 +181,20 @@ impl Sim {
         mac.close_window(wsid);
     }
 
+    /// Minimize a window to the Dock.
+    pub fn minimize_window(&mut self, title: &str) {
+        let mut mac = self.user();
+        let wsid = mac.window_titled(title);
+        mac.minimize_window(wsid);
+    }
+
+    /// Restore a minimized window from the Dock.
+    pub fn restore_window(&mut self, title: &str) {
+        let mut mac = self.user();
+        let wsid = mac.window_titled(title);
+        mac.restore_window(wsid);
+    }
+
     pub fn click_window(&mut self, title: &str) {
         let mut mac = self.user();
         let wsid = mac.window_titled(title);

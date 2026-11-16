@@ -60,3 +60,55 @@ fn a_window_that_rounds_its_size_down_settles() {
         assert_eq!(scene.frame("A2"), frame(500., 0., 497., 994.), "{schedule:?}");
     });
 }
+
+/// App A has windows A1 and A2 and Glide is running.
+fn two_windows(schedule: Schedule) -> Harness {
+    let mut sim = Harness::new(schedule, screen(), 1);
+    let a = sim.launch_app("A");
+    sim.open_window(a, "A1");
+    sim.open_window(a, "A2");
+    sim.run();
+    sim.start_glide();
+    sim.run();
+    sim
+}
+
+// TODO: Fails under GlideFirst. Glide hears about the minimized window but only
+// updates its list of visible windows, so the window stays in the layout. See
+// https://github.com/tmandry/glide/issues/209.
+#[test]
+#[ignore]
+fn minimize_and_restore() {
+    Schedule::each(|schedule| {
+        let mut sim = two_windows(schedule);
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+
+        sim.minimize_window("A1");
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A2"], "{schedule:?}");
+        sim.scene().assert("A2").fills_screen();
+        assert_eq!(sim.key_window().as_deref(), Some("A2"), "{schedule:?}");
+
+        sim.restore_window("A1");
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+        sim.scene().assert("A1").left_of("A2").same_size_as("A2");
+        assert_eq!(sim.key_window().as_deref(), Some("A1"), "{schedule:?}");
+    });
+}
+
+#[test]
+fn a_window_minimized_before_glide_starts_is_not_tiled() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        sim.open_window(a, "A2");
+        sim.minimize_window("A1");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A2"], "{schedule:?}");
+        sim.scene().assert("A2").fills_screen();
+    });
+}

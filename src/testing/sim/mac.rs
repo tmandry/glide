@@ -33,10 +33,11 @@ use accessibility::AXError;
 use accessibility_sys::{
     kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
     kAXFrontmostAttribute, kAXMainWindowAttribute, kAXMainWindowChangedNotification,
-    kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute,
-    kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute,
-    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification, kAXWindowMovedNotification,
-    kAXWindowResizedNotification, kAXWindowRole, kAXWindowsAttribute,
+    kAXMinimizedAttribute, kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute,
+    kAXSizeAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute,
+    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification,
+    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
+    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole, kAXWindowsAttribute,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
@@ -70,6 +71,9 @@ pub enum Message {
     SetFrame(WindowServerId, CGRect),
     /// From an app: bring the window to the front.
     OrderFront(WindowServerId),
+    /// From an app: the window was minimized to the Dock, or restored from it.
+    /// A restored window comes to the front and its app is activated.
+    SetMinimized(WindowServerId, bool),
     /// Give the window the keyboard focus, activating its app.
     MakeKey(WindowServerId),
     /// From the user: click the window. It comes to the front and takes the
@@ -200,6 +204,8 @@ struct ServerWindow {
     frame: CGRect,
     /// Unset until the window's app puts it on screen.
     desktop: Option<SpaceId>,
+    /// A minimized window is in no on-screen list.
+    minimized: bool,
 }
 
 impl WindowServer {
@@ -226,6 +232,7 @@ impl WindowServer {
                 pid,
                 frame: CGRect::ZERO,
                 desktop: None,
+                minimized: false,
             },
         );
         wsid
@@ -305,6 +312,20 @@ impl WindowServer {
                 self.order.remove(at);
                 self.order.insert(to, wsid);
             }
+            Message::SetMinimized(wsid, minimized) => {
+                let Some(window) = self.windows.get_mut(&wsid) else {
+                    return;
+                };
+                window.minimized = minimized;
+                let pid = window.pid;
+                if !minimized {
+                    if let Some(at) = self.order.iter().position(|&w| w == wsid) {
+                        self.order.remove(at);
+                        self.order.insert(0, wsid);
+                    }
+                    self.activate(pid, out);
+                }
+            }
             Message::MakeKey(wsid) => {
                 let Some(window) = self.windows.get(&wsid) else {
                     return;
@@ -339,8 +360,10 @@ impl WindowServer {
             }
             Message::FocusFrontWindow => {
                 let desktop = Some(self.current_desktop());
-                let Some(&front) = self.order.iter().find(|w| self.windows[w].desktop == desktop)
-                else {
+                let shown = |w: &&WindowServerId| {
+                    self.windows[*w].desktop == desktop && !self.windows[*w].minimized
+                };
+                let Some(&front) = self.order.iter().find(shown) else {
                     return;
                 };
                 let pid = self.windows[&front].pid;
@@ -406,7 +429,7 @@ impl WindowServer {
         let desktop = Some(self.current_desktop());
         self.order
             .iter()
-            .filter(|w| self.windows[w].desktop == desktop)
+            .filter(|w| self.windows[w].desktop == desktop && !self.windows[w].minimized)
             .filter_map(|&w| self.info(w))
             .collect()
     }
@@ -441,6 +464,7 @@ struct AppWindow {
     title: String,
     frame: CGRect,
     traits: WindowTraits,
+    minimized: bool,
     /// Whether the app has been told the window is on the desktop being
     /// shown. Accessibility only lists the app's windows that are.
     shown: bool,
@@ -503,6 +527,7 @@ impl App {
             title: title.to_owned(),
             frame,
             traits,
+            minimized: false,
             // The app puts the window on the desktop it believes is shown.
             // The window server says where it really went.
             shown: true,
@@ -538,8 +563,34 @@ impl App {
         }
     }
 
-    /// Close a window. The most recent remaining window becomes the main
-    /// window.
+    /// Minimize a window to the Dock, or restore it. Minimizing the main
+    /// window makes the most recent window that isn't minimized the main
+    /// window, and a restored window becomes the main window.
+    fn set_minimized(&mut self, wsid: WindowServerId, minimized: bool, out: &mut Outbox) {
+        let Some(window) = self.windows.iter_mut().find(|w| w.id == wsid) else {
+            return;
+        };
+        if window.minimized == minimized {
+            return;
+        }
+        window.minimized = minimized;
+        let name = if minimized {
+            kAXWindowMiniaturizedNotification
+        } else {
+            kAXWindowDeminiaturizedNotification
+        };
+        self.notify(element(wsid), name, element(wsid), out);
+        out.send(Process::WindowServer, Message::SetMinimized(wsid, minimized));
+        if !minimized {
+            self.set_main_window(Some(wsid), out);
+        } else if self.main_window == Some(wsid) {
+            let next = self.windows.iter().rev().find(|w| !w.minimized);
+            self.set_main_window(next.map(|w| w.id), out);
+        }
+    }
+
+    /// Close a window. The most recent remaining window that isn't minimized
+    /// becomes the main window.
     fn close_window(&mut self, wsid: WindowServerId, out: &mut Outbox) {
         self.windows.retain(|w| w.id != wsid);
         self.notify(
@@ -550,7 +601,8 @@ impl App {
         );
         self.observers.retain(|&(_, on, _)| on != element(wsid));
         if self.main_window == Some(wsid) {
-            self.set_main_window(self.windows.last().map(|w| w.id), out);
+            let next = self.windows.iter().rev().find(|w| !w.minimized);
+            self.set_main_window(next.map(|w| w.id), out);
         }
         out.send(Process::WindowServer, Message::DestroyWindow(wsid));
     }
@@ -609,6 +661,7 @@ impl App {
                     kAXRoleAttribute => Value::String(kAXWindowRole.into()),
                     kAXSubroleAttribute => Value::String(kAXStandardWindowSubrole.into()),
                     kAXTitleAttribute => Value::String(window.title.clone()),
+                    kAXMinimizedAttribute => Value::Bool(window.minimized),
                     kAXPositionAttribute => Value::Point(window.frame.origin),
                     kAXSizeAttribute => Value::Size(window.frame.size),
                     FRAME_ATTRIBUTE => Value::Rect(window.frame),
@@ -776,6 +829,26 @@ impl Mac {
             .expect("window does not exist");
         app.close_window(wsid, &mut self.out);
         self.route();
+    }
+
+    /// Minimize a window to the Dock.
+    pub fn minimize_window(&mut self, wsid: WindowServerId) {
+        let app = Self::app_of(&mut self.apps, wsid);
+        app.set_minimized(wsid, true, &mut self.out);
+        self.route();
+    }
+
+    /// Restore a minimized window from the Dock.
+    pub fn restore_window(&mut self, wsid: WindowServerId) {
+        let app = Self::app_of(&mut self.apps, wsid);
+        app.set_minimized(wsid, false, &mut self.out);
+        self.route();
+    }
+
+    fn app_of(apps: &mut BTreeMap<pid_t, App>, wsid: WindowServerId) -> &mut App {
+        apps.values_mut()
+            .find(|app| app.windows.iter().any(|w| w.id == wsid))
+            .expect("window does not exist")
     }
 
     /// Click a window on screen.
