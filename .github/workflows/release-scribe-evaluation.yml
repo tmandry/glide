@@ -33,13 +33,34 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: tmandry/release-scribe
-          ref: 0dc7d6729d040572317931dc10d18cddcc9a2852
+          ref: 0f77ee9ebf75f419e030e14af01c9082c9ac6ff5
           path: .scribe-tool
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Identify the tool build
+        id: tool-build
+        run: |
+          set -euo pipefail
+          echo "revision=$(git -C .scribe-tool rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "compiler=$(rustc -vV | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore the compiled tool
+        id: tool-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .scribe-tool/target/release/release-scribe
+          key: release-scribe-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.tool-build.outputs.compiler }}-${{ steps.tool-build.outputs.revision }}
       - name: Build the tool
+        if: steps.tool-cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked --manifest-path .scribe-tool/Cargo.toml
+      - name: Save the compiled tool
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .scribe-tool/target/release/release-scribe
+          key: ${{ steps.tool-cache.outputs.cache-primary-key }}
+      - name: Verify the tool
+        run: .scribe-tool/target/release/release-scribe --version
       - name: Collect, optionally generate, and update the evaluation
         env:
           GH_TOKEN: ${{ github.token }}

@@ -40,9 +40,11 @@ This list is a work in progress, and we don't always live up to these values tod
 ## Release notes
 
 For user-facing changes, include a short description in your PR of what changes
-for users and how to use the feature. See the [release-note guidelines](docs/release-notes.md)
-for examples and inclusion rules. You can also suggest wording or corrections on
-the open release PR; the maintainer reviews the notes before release.
+for users and how to use the feature. This description is input to the release-note
+automation, not the final release note; related changes may be combined and the
+wording edited. See the [release-note guidelines](docs/release-notes.md). You can
+also suggest wording or corrections on the open release PR; the maintainer reviews
+the notes before release.
 
 ## Development process
 
