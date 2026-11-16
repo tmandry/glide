@@ -214,7 +214,7 @@ const APP_NOTIFICATIONS: &[&str] = &[
     kAXWindowCreatedNotification,
 ];
 
-const WINDOW_NOTIFICATIONS: &[&str] = &[
+pub(crate) const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXUIElementDestroyedNotification,
     kAXWindowMovedNotification,
     kAXWindowResizedNotification,

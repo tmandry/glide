@@ -5,8 +5,12 @@ use expect_test::expect;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use test_log::test;
 
-use super::{Action, Schedule, Sim};
+use self::harness::Harness;
+use super::{Action, Schedule};
 use crate::sys::app::pid_t;
+
+mod harness;
+mod invariants;
 
 fn screen() -> CGRect {
     CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))
@@ -15,13 +19,13 @@ fn screen() -> CGRect {
 /// App A has windows A1 and A2 on desktop 1, and app B has B1 and B2 on
 /// desktop 2. Desktop 1 is shown and Glide is running.
 struct TwoDesktops {
-    sim: Sim,
+    sim: Harness,
     b: pid_t,
 }
 
 impl TwoDesktops {
     fn new(schedule: Schedule) -> TwoDesktops {
-        let mut sim = Sim::new(schedule, screen(), 2);
+        let mut sim = Harness::new(schedule, screen(), 2);
         let a = sim.launch_app("A");
         sim.open_window(a, "A1");
         sim.open_window(a, "A2");
@@ -57,7 +61,7 @@ fn windows_are_tiled_on_the_desktop_they_are_on() {
 #[test]
 fn a_new_window_is_tiled_next_to_the_others() {
     Schedule::each(|schedule| {
-        let mut sim = Sim::new(schedule, screen(), 1);
+        let mut sim = Harness::new(schedule, screen(), 1);
         let a = sim.launch_app("A");
         sim.open_window(a, "A1");
         sim.run();

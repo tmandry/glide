@@ -780,6 +780,32 @@ impl Mac {
 
     // What a test can see. Nothing in the system has this view.
 
+    pub fn mission_control_open(&self) -> bool {
+        self.dock.mission_control
+    }
+
+    /// The notifications each observer asked for on each window, sorted, with
+    /// the window's title.
+    pub fn window_notifications(&self) -> Vec<(String, Vec<&'static str>)> {
+        let mut asked: BTreeMap<(String, ObserverId), Vec<&'static str>> = BTreeMap::new();
+        for app in self.apps.values() {
+            for &(observer, on, name) in &app.observers {
+                let ElementId::Window(id) = on else { continue };
+                let Some(window) = app.windows.iter().find(|w| w.id.0 == id) else {
+                    continue;
+                };
+                asked.entry((window.title.clone(), observer)).or_default().push(name);
+            }
+        }
+        asked
+            .into_iter()
+            .map(|((title, _), mut names)| {
+                names.sort();
+                (title, names)
+            })
+            .collect()
+    }
+
     pub fn actions(&self) -> &[(Action, bool)] {
         &self.actions
     }
