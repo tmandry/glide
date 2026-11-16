@@ -14,7 +14,7 @@ use crate::actor::{self, reactor, space_manager, wm_controller};
 use crate::collections::HashMap;
 pub use crate::sys::app::pid_t;
 use crate::sys::event::MouseState;
-use crate::sys::screen::{self, NSScreenInfo, ScreenCache, ScreenInfo, SpaceId};
+use crate::sys::screen::{NSScreenInfo, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::window_server::{
     self as sys_ws, SkylightConnection, SkylightNotifier, WindowId, WindowServerId,
     WindowsOnScreen, kCGSWindowIsTerminated,
@@ -125,7 +125,7 @@ impl WindowServer {
     }
 
     #[instrument(skip(self))]
-    fn on_event(&mut self, event: Event) {
+    pub(crate) fn on_event(&mut self, event: Event) {
         match event {
             Event::RegisterWindow(wsid, wid, tx) => {
                 self.skylight_tx.send(SkylightRequest::TrackWindow(wsid, wid, tx));
@@ -192,12 +192,20 @@ impl WindowServer {
     }
 
     // Returns the screen spaces, leaving out native fullscreen spaces, which aren't managed.
+    #[cfg(not(test))]
     fn screen_spaces(&self) -> Vec<Option<SpaceId>> {
         self.screen_cache
             .get_screen_spaces()
             .into_iter()
-            .map(|space| space.filter(|&space| !screen::is_native_fullscreen_space(space)))
+            .map(|space| {
+                space.filter(|&space| !crate::sys::screen::is_native_fullscreen_space(space))
+            })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn screen_spaces(&self) -> Vec<Option<SpaceId>> {
+        MOCK_SCREEN_SPACES.with(|s| s.borrow().clone())
     }
 
     fn handle_screen_parameters(&mut self, ns_screens: Vec<NSScreenInfo>) {
@@ -418,6 +426,20 @@ thread_local! {
     static MOCK_VISIBLE_WINDOWS: RefCell<Vec<sys_ws::WindowServerInfo>> = RefCell::new(vec![]);
     /// Windows returned by lookups by id, whether or not they are visible.
     static MOCK_WINDOWS: RefCell<Vec<sys_ws::WindowServerInfo>> = RefCell::new(vec![]);
+    /// The space shown on each screen.
+    static MOCK_SCREEN_SPACES: RefCell<Vec<Option<SpaceId>>> = RefCell::new(vec![]);
+}
+
+/// Set what the window server reports to the actor on this thread.
+#[cfg(test)]
+pub(crate) fn mock_window_server(
+    visible: Vec<sys_ws::WindowServerInfo>,
+    windows: Vec<sys_ws::WindowServerInfo>,
+    screen_spaces: Vec<Option<SpaceId>>,
+) {
+    MOCK_VISIBLE_WINDOWS.with(|w| *w.borrow_mut() = visible);
+    MOCK_WINDOWS.with(|w| *w.borrow_mut() = windows);
+    MOCK_SCREEN_SPACES.with(|s| *s.borrow_mut() = screen_spaces);
 }
 
 #[cfg(test)]

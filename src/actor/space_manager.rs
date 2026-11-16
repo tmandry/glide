@@ -137,7 +137,7 @@ impl SpaceManager {
     }
 
     #[instrument(skip(self))]
-    fn on_event(&mut self, event: Event) {
+    pub(crate) fn on_event(&mut self, event: Event) {
         self.handle_event(event);
         self.report_space_state();
     }

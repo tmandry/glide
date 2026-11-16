@@ -64,6 +64,12 @@ impl WindowId {
         Self::with_manual_index(pid, idx)
     }
 
+    /// Return the index this id was made with, without its manual index flag.
+    #[cfg(test)]
+    pub(crate) fn manual_index(&self) -> u32 {
+        self.idx.get() & !MANUAL_INDEX_MASK
+    }
+
     /// Makes an id for a window that has no window server id, using an index
     /// assigned by the app actor.
     pub(crate) fn with_manual_index(pid: pid_t, idx: u32) -> WindowId {

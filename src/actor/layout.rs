@@ -1562,6 +1562,15 @@ impl LayoutManager {
         self.try_layout(space).unwrap()
     }
 
+    /// Return the windows tiled on `space`, or nothing if it has no layout.
+    #[cfg(test)]
+    pub(crate) fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
+        let Some(layout) = self.try_layout(space) else {
+            return Vec::new();
+        };
+        self.tree.visible_windows_under(self.tree.root(layout))
+    }
+
     fn top_layer_windows(&self, space: SpaceId) -> Vec<WindowId> {
         if self.is_floating() {
             // For now don't mess with window order if a floating window is focused.
@@ -1663,12 +1672,14 @@ impl LayoutManager {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use objc2_core_foundation::CGPoint;
     use pretty_assertions::assert_eq;
     use test_log::test;
 
     use super::*;
     use crate::config::WindowRuleConditions;
+    use crate::testing::scene::Scene;
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> CGRect {
         CGRect::new(CGPoint::new(x as f64, y as f64), CGSize::new(w as f64, h as f64))
@@ -1868,6 +1879,10 @@ mod tests {
             layout.sort_by_key(|(wid, _)| *wid);
             layout
         }
+
+        fn scene(&self, space: SpaceId, screen: CGRect) -> Scene {
+            Scene::of(screen, self.layout_sorted(space, screen))
+        }
     }
 
     #[test]
@@ -1878,70 +1893,69 @@ mod tests {
         let space = SpaceId::new(1);
         let pid = 1;
         let windows = make_windows(pid, 3);
-
         // Set up the starting layout.
         let screen1 = rect(0, 0, 120, 120);
         _ = mgr.handle_event(SpaceExposed(space, screen1.size));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows.clone()));
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
         _ = mgr.handle_command(Some(space), &[space], MoveNode(Direction::Up));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 120, 60)),
-                (WindowId::new(pid, 2), rect(0, 60, 60, 60)),
-                (WindowId::new(pid, 3), rect(60, 60, 60, 60)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        let one_on_top = mgr.scene(space, screen1).draw();
+        expect![[r#"
+            ┌───────────────────────┐
+            │ a1                    │
+            │                       │
+            │                       │
+            │                       │
+            │                       │
+            ├───────────┬───────────┤
+            │ a2        │ a3        │
+            │           │           │
+            │           │           │
+            │           │           │
+            │           │           │
+            └───────────┴───────────┘
+        "#]]
+        .assert_eq(&one_on_top);
 
         // Introduce new screen size.
         let screen2 = rect(0, 0, 1200, 1200);
         _ = mgr.handle_event(SpaceExposed(space, screen2.size));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows.clone()));
         assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 1200, 600)),
-                (WindowId::new(pid, 2), rect(0, 600, 600, 600)),
-                (WindowId::new(pid, 3), rect(600, 600, 600, 600)),
-            ],
-            mgr.layout_sorted(space, screen2),
+            one_on_top,
+            mgr.scene(space, screen2).draw(),
             "layout was not correctly scaled to new screen size"
         );
 
         // Change the layout for the second screen size.
         _ = mgr.handle_command(Some(space), &[space], MoveNode(Direction::Down));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 400, 1200)),
-                (WindowId::new(pid, 2), rect(400, 0, 400, 1200)),
-                (WindowId::new(pid, 3), rect(800, 0, 400, 1200)),
-            ],
-            mgr.layout_sorted(space, screen2),
-        );
+        let three_columns = mgr.scene(space, screen2).draw();
+        expect![[r#"
+            ┌───────┬───────┬───────┐
+            │ a1    │ a2    │ a3    │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            │       │       │       │
+            └───────┴───────┴───────┘
+        "#]]
+        .assert_eq(&three_columns);
 
         // Switch back to the first size; the layout should be the same as before.
         _ = mgr.handle_event(SpaceExposed(space, screen1.size));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows.clone()));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 120, 60)),
-                (WindowId::new(pid, 2), rect(0, 60, 60, 60)),
-                (WindowId::new(pid, 3), rect(60, 60, 60, 60)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        assert_eq!(one_on_top, mgr.scene(space, screen1).draw());
 
         // Switch back to the second size.
         _ = mgr.handle_event(SpaceExposed(space, screen2.size));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows.clone()));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 400, 1200)),
-                (WindowId::new(pid, 2), rect(400, 0, 400, 1200)),
-                (WindowId::new(pid, 3), rect(800, 0, 400, 1200)),
-            ],
-            mgr.layout_sorted(space, screen2),
-        );
+        assert_eq!(three_columns, mgr.scene(space, screen2).draw());
     }
 
     #[test]
@@ -2224,90 +2238,50 @@ mod tests {
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 3)));
         _ = mgr.handle_command(Some(space), &[space], MoveNode(Direction::Left));
 
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 100, 30)),
-                (WindowId::new(pid, 2), rect(100, 0, 100, 15)),
-                (WindowId::new(pid, 3), rect(100, 15, 100, 15)),
-                (WindowId::new(pid, 4), rect(200, 0, 100, 30)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        expect![[r#"
+            ┌───────┬───────┬───────┐
+            │ a1    │ a2    │ a4    │
+            │       ├───────┤       │
+            │       │ a3    │       │
+            └───────┴───────┴───────┘
+        "#]]
+        .assert_eq(&mgr.scene(space, screen1).draw());
 
         // Add a new window when the left window is selected.
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
         _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 6), win_info()));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 75, 30)),
-                (WindowId::new(pid, 2), rect(150, 0, 75, 15)),
-                (WindowId::new(pid, 3), rect(150, 15, 75, 15)),
-                (WindowId::new(pid, 4), rect(225, 0, 75, 30)),
-                (WindowId::new(pid, 6), rect(75, 0, 75, 30)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        let scene = mgr.scene(space, screen1);
+        scene.assert("a6").right_of("a1").left_of("a2").left_of("a3").same_size_as("a1");
         _ = mgr.handle_event(WindowRemoved(WindowId::new(pid, 6)));
 
         // Add a new window when the top middle is selected.
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 2)));
         _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 6), win_info()));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 100, 30)),
-                (WindowId::new(pid, 2), rect(100, 0, 100, 10)),
-                (WindowId::new(pid, 3), rect(100, 20, 100, 10)),
-                (WindowId::new(pid, 4), rect(200, 0, 100, 30)),
-                (WindowId::new(pid, 6), rect(100, 10, 100, 10)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        let scene = mgr.scene(space, screen1);
+        scene.assert("a6").below("a2").above("a3").same_size_as("a2");
         _ = mgr.handle_event(WindowRemoved(WindowId::new(pid, 6)));
 
         // Same thing, but unfloat an existing window instead of making a new one.
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 2)));
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 5)));
         _ = mgr.handle_command(Some(space), &[space], ToggleWindowFloating);
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 100, 30)),
-                (WindowId::new(pid, 2), rect(100, 0, 100, 10)),
-                (WindowId::new(pid, 3), rect(100, 20, 100, 10)),
-                (WindowId::new(pid, 4), rect(200, 0, 100, 30)),
-                (WindowId::new(pid, 5), rect(100, 10, 100, 10)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        let scene = mgr.scene(space, screen1);
+        scene.assert("a5").below("a2").above("a3").same_size_as("a2");
         _ = mgr.handle_command(Some(space), &[space], ToggleWindowFloating);
 
         // Add a new window when the bottom middle is selected.
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 3)));
         _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 6), win_info()));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 100, 30)),
-                (WindowId::new(pid, 2), rect(100, 0, 100, 10)),
-                (WindowId::new(pid, 3), rect(100, 10, 100, 10)),
-                (WindowId::new(pid, 4), rect(200, 0, 100, 30)),
-                (WindowId::new(pid, 6), rect(100, 20, 100, 10)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        let scene = mgr.scene(space, screen1);
+        scene.assert("a6").below("a3").same_size_as("a3");
+        scene.assert("a3").below("a2");
         _ = mgr.handle_event(WindowRemoved(WindowId::new(pid, 6)));
 
         // Add a new window when the right window is selected.
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 4)));
         _ = mgr.handle_event(WindowAdded(space, WindowId::new(pid, 6), win_info()));
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 75, 30)),
-                (WindowId::new(pid, 2), rect(75, 0, 75, 15)),
-                (WindowId::new(pid, 3), rect(75, 15, 75, 15)),
-                (WindowId::new(pid, 4), rect(150, 0, 75, 30)),
-                (WindowId::new(pid, 6), rect(225, 0, 75, 30)),
-            ],
-            mgr.layout_sorted(space, screen1),
-        );
+        let scene = mgr.scene(space, screen1);
+        scene.assert("a6").right_of("a4").same_size_as("a4");
         _ = mgr.handle_event(WindowRemoved(WindowId::new(pid, 6)));
     }
 
@@ -2844,43 +2818,19 @@ mod tests {
         };
 
         _ = mgr.handle_command(Some(space), &[space], grow.clone());
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 60, 100)),
-                (WindowId::new(pid, 2), rect(60, 0, 40, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").wider_than("a2", 20.0);
 
         _ = mgr.handle_command(Some(space), &[space], shrink.clone());
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
-                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").same_size_as("a2");
 
         // The last window has no neighbour on its far side. Growing it has to
         // take from the window before it rather than doing nothing.
         _ = mgr.handle_command(Some(space), &[space], MoveFocus(Direction::Right));
         _ = mgr.handle_command(Some(space), &[space], grow);
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 40, 100)),
-                (WindowId::new(pid, 2), rect(40, 0, 60, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a2").wider_than("a1", 20.0);
 
         _ = mgr.handle_command(Some(space), &[space], shrink);
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
-                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").same_size_as("a2");
     }
 
     #[test]
@@ -3007,13 +2957,7 @@ mod tests {
         _ = mgr.handle_event(SpaceExposed(space, screen.size));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
 
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 100, 150)),
-                (WindowId::new(pid, 2), rect(0, 150, 100, 150)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").above("a2").same_size_as("a2");
     }
 
     #[test]
@@ -3028,13 +2972,7 @@ mod tests {
         _ = mgr.handle_event(SpaceExposed(space, screen.size));
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
 
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 150, 100)),
-                (WindowId::new(pid, 2), rect(150, 0, 150, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").left_of("a2").same_size_as("a2");
     }
 
     #[test]
@@ -3051,33 +2989,15 @@ mod tests {
         _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, windows));
         _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
 
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
-                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").left_of("a2").same_size_as("a2");
 
         // Side by side becomes stacked top to bottom.
         _ = mgr.handle_command(Some(space), &[space], ToggleOrientation);
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 100, 50)),
-                (WindowId::new(pid, 2), rect(0, 50, 100, 50)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").above("a2").same_size_as("a2");
 
         // Toggling again returns to the original layout.
         _ = mgr.handle_command(Some(space), &[space], ToggleOrientation);
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
-                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").left_of("a2").same_size_as("a2");
     }
 
     #[test]
@@ -3124,22 +3044,10 @@ mod tests {
                 percent: 20.0,
             },
         );
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 70, 100)),
-                (WindowId::new(pid, 2), rect(70, 0, 30, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").wider_than("a2", 40.0);
 
         _ = mgr.handle_command(Some(space), &[space], Balance);
-        assert_eq!(
-            vec![
-                (WindowId::new(pid, 1), rect(0, 0, 50, 100)),
-                (WindowId::new(pid, 2), rect(50, 0, 50, 100)),
-            ],
-            mgr.layout_sorted(space, screen),
-        );
+        mgr.scene(space, screen).assert("a1").left_of("a2").same_size_as("a2");
     }
 
     #[test]

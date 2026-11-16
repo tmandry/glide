@@ -68,6 +68,38 @@ The first time you do this, you may have to follow instructions to enable
 Accessibility permissions. Instead of enabling them for Glide, enable them for
 whatever application your terminal is running in.
 
+### Layout assertions and snapshots
+
+Tests that check where windows end up can state how the windows relate instead of spelling out pixel frames. A `Scene` (in `src/testing/scene.rs`) is a screen plus labelled windows:
+
+```rust
+scene.assert("a1").left_of("a2").same_size_as("a2");
+scene.assert("b1").wider_than("b2", 20.0);
+```
+
+A failed assertion prints a drawing of the scene along with each window's frame. Use exact frames only when the pixels themselves are what the test is about.
+
+A test can also compare the drawing against a snapshot written inline with [expect-test]:
+
+```rust
+expect![[r#"
+    ┌───────────┬───────────┐
+    │ a1        │ a2        │
+    └───────────┴───────────┘
+"#]]
+.assert_eq(&scene.draw());
+```
+
+Don't draw these by hand. Write `expect![[""]]`, then have the test fill it in:
+
+```
+UPDATE_EXPECT=1 cargo test name_of_the_test
+```
+
+The same command rewrites snapshots after an intended change. Read the diff before committing it, since updating accepts whatever the code produces. Each `expect!` can back only one `assert_eq`.
+
+[expect-test]: https://docs.rs/expect-test
+
 ### Logging
 
 Glide makes extensive use of the [tracing] crate to provide detailed and contextual logs of what is going on in its internals. You can enable logs by setting the `RUST_LOG` environment variable.
