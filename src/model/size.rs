@@ -105,8 +105,9 @@ impl Direction {
 pub struct GroupBarInfo {
     pub node_id: NodeId,
     pub container_kind: ContainerKind,
-    /// Total number of windows in the group
-    pub total_count: usize,
+    /// The window each child shows: the child itself, or the window most
+    /// recently selected within it.
+    pub windows: Vec<WindowId>,
     /// Index of the currently selected window
     pub selected_index: usize,
     /// Whether this group should be visible
@@ -426,6 +427,20 @@ impl<'a, 'out> Visitor<'a, 'out> {
         self.target_rect
     }
 
+    /// The window shown for `node`: its own, or that of its last selected
+    /// descendant.
+    fn shown_window(&self, mut node: NodeId) -> Option<WindowId> {
+        loop {
+            if let Some(wid) = self.window.at(node) {
+                return Some(wid);
+            }
+            node = self
+                .selection
+                .last_selection(self.map, node)
+                .or_else(|| node.first_child(self.map))?;
+        }
+    }
+
     fn visit_node(
         &mut self,
         node: NodeId,
@@ -470,13 +485,13 @@ impl<'a, 'out> Visitor<'a, 'out> {
 
                 let selected_child = self.selection.last_selection(self.map, node);
                 let mut selected_index = 0;
-                let mut num_children = 0;
+                let mut windows = Vec::new();
                 for (index, child) in node.children(self.map).enumerate() {
                     let selected = selected_child == Some(child);
                     if selected {
                         selected_index = index;
                     }
-                    num_children += 1;
+                    windows.extend(self.shown_window(child));
 
                     self.visit_node(
                         child,
@@ -487,7 +502,7 @@ impl<'a, 'out> Visitor<'a, 'out> {
                     );
                 }
 
-                debug_assert!(num_children > 0, "empty group {node:?}");
+                debug_assert!(!windows.is_empty(), "empty group {node:?}");
                 if let Some(groups) = self.groups.as_deref_mut()
                     && let Some(indicator_frame) = indicator_frame
                 {
@@ -495,7 +510,7 @@ impl<'a, 'out> Visitor<'a, 'out> {
                         node_id: node,
                         container_kind: info.kind,
                         indicator_frame,
-                        total_count: num_children,
+                        windows,
                         selected_index,
                         is_visible,
                         is_selected,
@@ -621,99 +636,48 @@ fn size_with_group_indicator(
     }
 
     let thickness = config.thickness;
+    let CGRect { origin, size } = rect;
+    // The bar and the gap between it and the group's windows, limited to the
+    // space the group has along the bar's axis.
+    let available = match container_kind {
+        ContainerKind::Stacked => size.width,
+        _ => size.height,
+    };
+    let reserved = (thickness + config.gap).clamp(0.0, available.max(0.0));
+    let rect = |x, y, width, height| CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
 
     match container_kind {
-        ContainerKind::Tabbed => {
-            // Horizontal indicator
-            match config.horizontal_placement {
-                HorizontalPlacement::Top => {
-                    let group_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x,
-                            y: rect.origin.y + thickness,
-                        },
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: rect.size.height - thickness,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: thickness,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-                HorizontalPlacement::Bottom => {
-                    let group_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: rect.size.height - thickness,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x,
-                            y: rect.origin.y + group_frame.size.height,
-                        },
-                        size: CGSize {
-                            width: rect.size.width,
-                            height: thickness,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-            }
-        }
-        ContainerKind::Stacked => {
-            // Vertical indicator
-            match config.vertical_placement {
-                VerticalPlacement::Left => {
-                    let group_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x + thickness,
-                            y: rect.origin.y,
-                        },
-                        size: CGSize {
-                            width: rect.size.width - thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-                VerticalPlacement::Right => {
-                    let group_frame = CGRect {
-                        origin: rect.origin,
-                        size: CGSize {
-                            width: rect.size.width - thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    let indicator_frame = CGRect {
-                        origin: CGPoint {
-                            x: rect.origin.x + group_frame.size.width,
-                            y: rect.origin.y,
-                        },
-                        size: CGSize {
-                            width: thickness,
-                            height: rect.size.height,
-                        },
-                    };
-                    (group_frame, Some(indicator_frame))
-                }
-            }
-        }
-        _ => (rect, None),
+        ContainerKind::Tabbed => match config.horizontal_placement {
+            HorizontalPlacement::Top => (
+                rect(origin.x, origin.y + reserved, size.width, size.height - reserved),
+                Some(rect(origin.x, origin.y, size.width, thickness)),
+            ),
+            HorizontalPlacement::Bottom => (
+                rect(origin.x, origin.y, size.width, size.height - reserved),
+                Some(rect(
+                    origin.x,
+                    origin.y + size.height - thickness,
+                    size.width,
+                    thickness,
+                )),
+            ),
+        },
+        ContainerKind::Stacked => match config.vertical_placement {
+            VerticalPlacement::Left => (
+                rect(origin.x + reserved, origin.y, size.width - reserved, size.height),
+                Some(rect(origin.x, origin.y, thickness, size.height)),
+            ),
+            VerticalPlacement::Right => (
+                rect(origin.x, origin.y, size.width - reserved, size.height),
+                Some(rect(
+                    origin.x + size.width - thickness,
+                    origin.y,
+                    thickness,
+                    size.height,
+                )),
+            ),
+        },
+        _ => (rect(origin.x, origin.y, size.width, size.height), None),
     }
 }
 
@@ -783,7 +747,14 @@ mod tests {
         let group = &groups[0];
         assert_eq!(group.node_id, tabbed_group);
         assert_eq!(group.container_kind, ContainerKind::Tabbed);
-        assert_eq!(group.total_count, 3);
+        assert_eq!(
+            group.windows,
+            [
+                WindowId::new(2, 1),
+                WindowId::new(2, 2),
+                WindowId::new(2, 3)
+            ]
+        );
         assert_eq!(group.selected_index, 0); // First child selected by default
         assert_eq!(group.is_visible, true); // Root level group is visible
     }
@@ -810,7 +781,7 @@ mod tests {
         let group = &groups[0];
         assert_eq!(group.node_id, stacked_group);
         assert_eq!(group.container_kind, ContainerKind::Stacked);
-        assert_eq!(group.total_count, 2);
+        assert_eq!(group.windows, [WindowId::new(1, 1), WindowId::new(1, 2)]);
         assert_eq!(group.selected_index, 1);
         assert_eq!(group.is_visible, true);
     }
@@ -843,12 +814,13 @@ mod tests {
 
         // Outer group should be visible
         assert_eq!(outer.is_visible, true);
-        assert_eq!(outer.total_count, 2); // window + inner group
+        // The inner group's tab shows its first window, since none was selected.
+        assert_eq!(outer.windows, [WindowId::new(1, 1), WindowId::new(2, 1)]);
         assert_eq!(outer.selected_index, 0); // First tab selected
 
         // Inner group should not be visible (not the selected tab)
         assert_eq!(inner.is_visible, false);
-        assert_eq!(inner.total_count, 2);
+        assert_eq!(inner.windows, [WindowId::new(2, 1), WindowId::new(2, 2)]);
     }
 
     #[test]
@@ -962,6 +934,69 @@ mod tests {
 
         assert_eq!(window_frame_disabled, rect(0, 0, 1000, 1000));
         assert_eq!(window_frame_enabled, rect(0, 20, 1000, 980));
+    }
+
+    #[test]
+    fn it_leaves_a_gap_between_indicators_and_windows() {
+        use crate::config::{HorizontalPlacement, VerticalPlacement};
+
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let tabbed = tree.add_container(root, ContainerKind::Tabbed);
+        tree.add_window_under(layout, tabbed, WindowId::new(1, 1));
+        let stacked = tree.add_container(root, ContainerKind::Stacked);
+        tree.add_window_under(layout, stacked, WindowId::new(2, 1));
+
+        let screen = rect(0, 0, 2000, 1000);
+        let mut config = Config::default();
+        config.settings.group_bars.thickness = 20.0;
+        config.settings.group_bars.gap = 10.0;
+        let frame_of =
+            |frames: &[(WindowId, CGRect)], wid| frames.iter().find(|(w, _)| *w == wid).unwrap().1;
+        let indicator_of = |groups: &[GroupBarInfo], node| {
+            groups.iter().find(|g| g.node_id == node).unwrap().indicator_frame
+        };
+
+        config.settings.group_bars.horizontal_placement = HorizontalPlacement::Top;
+        config.settings.group_bars.vertical_placement = VerticalPlacement::Left;
+        let (frames, groups) = tree.calculate_layout_and_groups(layout, screen, &config);
+        assert_eq!(indicator_of(&groups, tabbed), rect(0, 0, 1000, 20));
+        assert_eq!(frame_of(&frames, WindowId::new(1, 1)), rect(0, 30, 1000, 970));
+        assert_eq!(indicator_of(&groups, stacked), rect(1000, 0, 20, 1000));
+        assert_eq!(frame_of(&frames, WindowId::new(2, 1)), rect(1030, 0, 970, 1000));
+
+        config.settings.group_bars.horizontal_placement = HorizontalPlacement::Bottom;
+        config.settings.group_bars.vertical_placement = VerticalPlacement::Right;
+        let (frames, groups) = tree.calculate_layout_and_groups(layout, screen, &config);
+        assert_eq!(indicator_of(&groups, tabbed), rect(0, 980, 1000, 20));
+        assert_eq!(frame_of(&frames, WindowId::new(1, 1)), rect(0, 0, 1000, 970));
+        assert_eq!(indicator_of(&groups, stacked), rect(1980, 0, 20, 1000));
+        assert_eq!(frame_of(&frames, WindowId::new(2, 1)), rect(1000, 0, 970, 1000));
+    }
+
+    #[test]
+    fn it_limits_the_indicator_gap_to_the_group_size() {
+        let mut tree = LayoutTree::new();
+        let layout = tree.create_layout();
+        let root = tree.root(layout);
+        let tabbed = tree.add_container(root, ContainerKind::Tabbed);
+        tree.add_window_under(layout, tabbed, WindowId::new(1, 1));
+        let stacked = tree.add_container(root, ContainerKind::Stacked);
+        tree.add_window_under(layout, stacked, WindowId::new(2, 1));
+
+        let screen = rect(0, 0, 2000, 1000);
+        let mut config = Config::default();
+        config.settings.group_bars.thickness = 20.0;
+        config.settings.group_bars.gap = 5000.0;
+        let (frames, _) = tree.calculate_layout_and_groups(layout, screen, &config);
+        assert_eq!(
+            frames,
+            vec![
+                (WindowId::new(1, 1), rect(0, 1000, 1000, 0)),
+                (WindowId::new(2, 1), rect(1000, 0, 0, 1000)),
+            ]
+        );
     }
 
     #[test]
