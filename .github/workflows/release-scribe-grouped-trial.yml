@@ -45,7 +45,7 @@ jobs:
         with:
           crate: release-scribe
           git: https://github.com/tmandry/release-scribe
-          commit: 4292f97f2005bfd5a9270817dd6d1c55b96ce342
+          commit: 54cac6ff2e2bb7a71ce7e0268e82523f46572e48
           locked: true
       - uses: actions/cache/restore@v4
         if: github.event_name == 'push' || inputs.generate
