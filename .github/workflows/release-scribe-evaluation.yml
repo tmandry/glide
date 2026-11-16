@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: tmandry/release-scribe
-          ref: 0f77ee9ebf75f419e030e14af01c9082c9ac6ff5
+          ref: efd6db1066073e76b884db76573706966d9019c7
           path: .scribe-tool
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           persist-credentials: false
