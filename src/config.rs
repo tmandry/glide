@@ -313,7 +313,9 @@ pub struct StatusIconExperimental {
 #[serde(deny_unknown_fields)]
 pub struct GroupBars {
     pub enable: bool,
+    pub style: GroupBarStyle,
     pub thickness: f64,
+    pub gap: f64,
     pub horizontal_placement: HorizontalPlacement,
     pub vertical_placement: VerticalPlacement,
     pub selected_color: Color,
@@ -322,6 +324,7 @@ pub struct GroupBars {
     pub inactive_background_color: Color,
     pub border_color: Color,
     pub border_width: f64,
+    pub corner_radius: f64,
 }
 
 #[derive(
@@ -352,6 +355,13 @@ impl std::fmt::Display for Color {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#{}", hex::encode_upper([self.r, self.g, self.b, self.a]))
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupBarStyle {
+    Solid,
+    Glass,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -395,8 +405,10 @@ impl ConfigPartial {
             };
             keys.push((key, cmd));
         }
+        let mut settings = self.settings.validate()?;
+        settings.group_bars.gap = settings.group_bars.gap.max(0.0);
         Ok(Config {
-            settings: self.settings.validate()?,
+            settings,
             window_rules: self.window_rules.unwrap_or_default(),
             keys,
         })
@@ -534,6 +546,12 @@ mod tests {
     #[test]
     fn default_settings_match_unspecified_setting_values() {
         assert_eq!(Config::default().settings, Config::parse("").unwrap().settings);
+    }
+
+    #[test]
+    fn negative_group_bar_gap_is_clamped() {
+        let config = Config::parse("settings.group_bars.gap = -5").unwrap();
+        assert_eq!(config.settings.group_bars.gap, 0.0);
     }
 
     #[test]
