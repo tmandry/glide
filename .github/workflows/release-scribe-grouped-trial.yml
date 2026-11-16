@@ -1,5 +1,6 @@
 name: Grouped release notes trial
 
+
 on:
   workflow_dispatch:
     inputs:
