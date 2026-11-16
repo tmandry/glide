@@ -36,7 +36,7 @@ jobs:
         with:
           crate: release-scribe
           git: https://github.com/tmandry/release-scribe
-          commit: dc9483146d92551e4072c67526c625ccf33b2335
+          commit: f8145d8d9f1262e8033773b5db737a724bd42db4
           locked: true
       - name: Verify the tool
         run: release-scribe --version
