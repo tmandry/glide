@@ -51,7 +51,8 @@ fn windows_are_tiled_on_the_desktop_they_are_on() {
         sim.run();
         assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
         assert_eq!(sim.tiled(2), ["B1", "B2"], "{schedule:?}");
-        sim.scene().assert("B1").left_of("B2").same_size_as("B2");
+        // Glide can discover B1 and B2 in either order.
+        sim.scene().assert("B1").same_size_as("B2");
     }
 }
 
