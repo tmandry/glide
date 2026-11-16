@@ -15,5 +15,5 @@
   "documentation_links": {
     "Configuration reference": "https://glidewm.org/reference/config/"
   },
-  "max_input_bytes": 2000000
+  "max_input_bytes": 4000000
 }
