@@ -127,6 +127,8 @@ Fixes #12345.
 
 Features should include a short user-facing blurb for the release notes summarizing the feature and how to use it.
 
+When writing or reviewing release notes, follow [docs/release-notes.md](docs/release-notes.md).
+
 Keep the body short: what was wrong and what the change does. Defend the change
 only when it reverses an earlier decision, or when it's subtle enough that a
 reviewer would otherwise think it's wrong. Weighing alternatives, restating what

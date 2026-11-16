@@ -37,6 +37,15 @@ This combination leads to some architectural principles:
 
 This list is a work in progress, and we don't always live up to these values today. But understanding the philosophy can help you understand architectural decisions and how the codebase is meant to evolve.
 
+## Release notes
+
+For user-facing changes, include a short description in your PR of what changes
+for users and how to use the feature. This description is input to the release-note
+automation, not the final release note; related changes may be combined and the
+wording edited. See the [release-note guidelines](docs/release-notes.md). You can
+also suggest wording or corrections on the open release PR; the maintainer reviews
+the notes before release.
+
 ## Development process
 
 Glide is very easy to build, run, and test with cargo. Running tests is as simple as
