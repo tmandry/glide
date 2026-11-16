@@ -21,7 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     strategy:
-      fail-fast: false
+      fail-fast: true
+      max-parallel: 1
       matrix:
         include:
           - range: 0.2.17
@@ -44,7 +45,7 @@ jobs:
         with:
           crate: release-scribe
           git: https://github.com/tmandry/release-scribe
-          commit: 9e0908afde76648baa8a58cc0d0a2039775a2f5e
+          commit: 4292f97f2005bfd5a9270817dd6d1c55b96ce342
           locked: true
       - uses: actions/cache/restore@v4
         if: github.event_name == 'push' || inputs.generate
