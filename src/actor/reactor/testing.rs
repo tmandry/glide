@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Instant;
 
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -50,6 +51,11 @@ impl Reactor {
         for event in events {
             self.handle_event(event);
         }
+    }
+
+    /// Handle an event at `now`, for a caller that keeps its own clock.
+    pub fn handle_event_at_time(&mut self, event: Event, now: Instant) {
+        self.handle_event_at(event, now);
     }
 
     /// Send raise requests to `tx`.

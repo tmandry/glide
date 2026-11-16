@@ -3,32 +3,39 @@
 
 //! Glide's side of the simulation.
 //!
-//! The reactor, raise manager, space manager and window server actor are the
-//! real ones, wired to each other as they are in the running program. The app
-//! actors, the WmController and the dock actor are stand-ins: each turns what
-//! it observes in macOS into the events the real one sends.
+//! The reactor, raise manager, space manager, window server actor and app
+//! actors are the real ones, wired to each other as they are in the running
+//! program. The app actors reach macOS through the fake accessibility
+//! interface in [`crate::sys::ax::fake`]. The WmController and the dock actor
+//! are stand-ins: each turns what it observes in macOS into the events the
+//! real one sends.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Wake, Waker};
 
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
-use tokio_util::sync::CancellationToken;
 use tracing::Span;
 
-use super::mac::{self, AxNotification, Mac, Notification, WorkspaceNotification};
-use crate::actor::app::{AppThreadHandle, Quiet, Request};
+use super::mac::{self, Mac, Notification, WorkspaceNotification};
 use crate::actor::layout::LayoutManager;
 use crate::actor::raise::{self, RaiseManager};
-use crate::actor::reactor::{self, Reactor, Requested};
+use crate::actor::reactor::{self, Reactor};
 use crate::actor::space_manager::{self, SpaceManager};
 use crate::actor::window_server::{self, WindowServer, mock_window_server};
-use crate::actor::{self, group_bars, mouse, status, wm_controller};
+use crate::actor::wm_controller::{self, StartupToken};
+use crate::actor::{self, app, group_bars, mouse, status};
 use crate::config::Config;
-use crate::sys::app::{AppInfo, WindowInfo, pid_t};
-use crate::sys::event::MouseState;
-use crate::sys::geometry::SameAs;
+use crate::sys::app::{AppInfo, pid_t};
+use crate::sys::ax::fake;
 use crate::sys::screen::{CoordinateConverter, ScreenId, SpaceId};
-use crate::sys::window_server::{WindowId, WindowServerId, WindowsOnScreen};
+use crate::sys::window_server::{WindowId, WindowsOnScreen};
 
 /// One of Glide's actors. Each handles its messages on its own event loop.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,50 +54,32 @@ pub enum Message {
     Raise(raise::Event),
     SpaceManager(space_manager::Event),
     WindowServer(window_server::Event),
-    /// To an app actor, from the reactor or the raise manager.
-    Request(Request),
     /// To the actor observing whatever sent the notification.
     Notification(Notification),
-    /// To an app actor: start observing the app and report it. `startup` is
-    /// set for apps that were running when Glide started.
+    /// To an app actor: start up. Apps that were running when Glide started
+    /// get a startup token.
     Start {
-        startup: bool,
+        startup: Option<StartupToken>,
     },
     /// To the WmController: every app that was running when Glide started has
-    /// reported.
+    /// reported or given up.
     StartupAppsReported,
 }
 
-/// Something Glide did to a window.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    Wrote(String),
-    Raised(String),
-}
-
-/// The stand-in app actor for one app.
+/// An app actor, run a step at a time.
 struct AppActor {
-    rx: UnboundedReceiver<(Span, Request)>,
-    /// Windows reported to Glide.
-    known: BTreeSet<WindowServerId>,
-    /// The main window last reported to Glide.
-    main_window: Option<WindowServerId>,
-    /// Whether the app was frontmost when last read.
-    is_frontmost: bool,
-    /// Raise requests not finished, oldest first.
-    raises: VecDeque<Raise>,
-    /// Whether the oldest raise is waiting for the app to activate.
-    raise_waiting: bool,
-    /// How to report the activation a raise asked for, and the window whose
-    /// becoming main belongs to that raise.
-    last_activated: Option<(Quiet, Option<WindowId>)>,
+    /// The actor's task, until it finishes.
+    task: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    woken: Arc<Woken>,
 }
 
-struct Raise {
-    wids: Vec<WindowId>,
-    token: CancellationToken,
-    sequence_id: u64,
-    quiet: Quiet,
+/// Records that a task was woken.
+struct Woken(AtomicBool);
+
+impl Wake for Woken {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 pub struct Glide {
@@ -115,28 +104,13 @@ pub struct Glide {
     ),
 
     apps: BTreeMap<pid_t, AppActor>,
-    /// Apps running at startup whose actors haven't reported yet.
-    starting_apps: usize,
+    /// The apps the WmController has started an actor for.
+    known_apps: BTreeSet<pid_t>,
+    /// Closes once every app that was running at startup has dropped its
+    /// token.
+    startup_rx: Option<UnboundedReceiver<()>>,
     /// Messages from the stand-ins that don't go through a channel.
     sent: Vec<(Actor, Message)>,
-    /// What Glide did, with whether Mission Control was open at the time.
-    actions: Vec<(Action, bool)>,
-}
-
-fn window_id(pid: pid_t, wsid: WindowServerId) -> WindowId {
-    WindowId::with_wsid(pid, wsid).unwrap()
-}
-
-fn window_info(window: &mac::AppWindow) -> WindowInfo {
-    WindowInfo {
-        is_standard: true,
-        is_resizable: true,
-        title: window.title.clone().into(),
-        frame: window.frame,
-        sys_id: Some(window.id),
-        ax_role: "AXWindow".into(),
-        ax_subrole: Some("AXStandardWindow".into()),
-    }
 }
 
 impl Glide {
@@ -183,9 +157,9 @@ impl Glide {
             ws_rx,
             _unread: (wm_rx, status_rx, group_bars_rx, mouse_rx, skylight_rx),
             apps: BTreeMap::new(),
-            starting_apps: 0,
+            known_apps: BTreeSet::new(),
+            startup_rx: None,
             sent: Vec::new(),
-            actions: Vec::new(),
         }
     }
 
@@ -201,19 +175,13 @@ impl Glide {
             converter: CoordinateConverter::default(),
             on_screen: WindowsOnScreen::new(window_server.windows_on_screen()),
         });
-        let apps: Vec<_> = mac.apps().collect();
-        self.starting_apps = apps.len();
-        for pid in apps {
-            self.sent.push((Actor::App(pid), Message::Start { startup: true }));
+        let (startup_tx, startup_rx) = unbounded_channel();
+        self.startup_rx = Some(startup_rx);
+        for pid in mac.apps() {
+            self.known_apps.insert(pid);
+            let startup = Some(startup_tx.clone());
+            self.sent.push((Actor::App(pid), Message::Start { startup }));
         }
-        if self.starting_apps == 0 {
-            self.sent.push((Actor::WmController, Message::StartupAppsReported));
-        }
-    }
-
-    /// Whether an app actor is observing `pid`.
-    pub fn observes(&self, pid: pid_t) -> bool {
-        self.apps.contains_key(&pid)
     }
 
     /// Take the messages the actors have sent each other.
@@ -231,19 +199,33 @@ impl Glide {
         while let Ok((_, event)) = self.ws_rx.try_recv() {
             sent.push((Actor::WindowServer, Message::WindowServer(event)));
         }
-        for (&pid, app) in &mut self.apps {
-            while let Ok((_, request)) = app.rx.try_recv() {
-                sent.push((Actor::App(pid), Message::Request(request)));
-            }
+        if let Some(rx) = &mut self.startup_rx
+            && rx.try_recv() == Err(TryRecvError::Disconnected)
+        {
+            self.startup_rx = None;
+            sent.push((Actor::WmController, Message::StartupAppsReported));
         }
         sent
     }
 
     /// Have `actor` handle `message`.
-    pub fn deliver(&mut self, actor: Actor, message: Message, mac: &mut Mac) {
+    ///
+    /// An app actor also runs when its task has been woken without a message
+    /// from the simulator, for example by a request the reactor sent on its
+    /// channel or by another app actor releasing the raise lock. `message` is
+    /// `None` then, and the task is polled.
+    pub fn deliver(&mut self, actor: Actor, message: Option<Message>, mac: &Rc<RefCell<Mac>>) {
+        let _system = fake::install(Rc::new(mac::System(Rc::clone(mac))));
+        let message = match (actor, message) {
+            (Actor::App(pid), None) => return self.poll_app(pid),
+            (_, Some(message)) => message,
+            (actor, None) => unreachable!("{actor:?} has no message"),
+        };
         match (actor, message) {
             // The real actors.
-            (Actor::Reactor, Message::Reactor(event)) => self.reactor.handle_events(vec![event]),
+            (Actor::Reactor, Message::Reactor(event)) => {
+                self.reactor.handle_event_at_time(event, fake::now())
+            }
             (Actor::RaiseManager, Message::Raise(event)) => {
                 self.raise_manager.handle_message(event)
             }
@@ -253,21 +235,27 @@ impl Glide {
             (Actor::WindowServer, Message::WindowServer(event)) => {
                 // The actor queries the window server while it handles the
                 // event.
-                let window_server = mac.window_server();
-                mock_window_server(
-                    window_server.windows_on_screen(),
-                    window_server.all_windows(),
-                    vec![Some(window_server.current_desktop())],
-                );
+                {
+                    let mac = mac.borrow();
+                    let window_server = mac.window_server();
+                    mock_window_server(
+                        window_server.windows_on_screen(),
+                        window_server.all_windows(),
+                        vec![Some(window_server.current_desktop())],
+                    );
+                }
                 self.window_server.on_event(event);
+            }
+            (Actor::App(pid), Message::Start { startup }) => self.start_app(pid, startup, mac),
+            (
+                Actor::App(_),
+                Message::Notification(Notification::Ax { pid, observer, element, name }),
+            ) => {
+                fake::notify(observer, pid, element, name);
+                self.poll_app(pid);
             }
 
             // The stand-ins.
-            (Actor::App(pid), Message::Start { startup }) => self.start_app(pid, startup, mac),
-            (Actor::App(pid), Message::Request(request)) => self.app_request(pid, request, mac),
-            (Actor::App(pid), Message::Notification(Notification::Ax(_, n))) => {
-                self.app_notification(pid, n, mac)
-            }
             (Actor::WmController, Message::StartupAppsReported) => {
                 self.sm_tx.send(space_manager::Event::ReactorEvent(
                     reactor::Event::StartupComplete,
@@ -275,7 +263,9 @@ impl Glide {
             }
             (Actor::WmController, Message::Notification(Notification::Workspace(n))) => match n {
                 WorkspaceNotification::AppLaunched(pid) => {
-                    self.sent.push((Actor::App(pid), Message::Start { startup: false }));
+                    if self.known_apps.insert(pid) {
+                        self.sent.push((Actor::App(pid), Message::Start { startup: None }));
+                    }
                 }
                 WorkspaceNotification::AppActivated(pid) => {
                     self.reactor_event(reactor::Event::ApplicationGloballyActivated(pid))
@@ -300,266 +290,61 @@ impl Glide {
         self.ws_tx.send(window_server::Event::ReactorEvent(event));
     }
 
-    fn record(&mut self, action: fn(String) -> Action, wsid: WindowServerId, mac: &Mac) {
-        if let Some(title) = mac.title(wsid) {
-            self.actions.push((action(title.to_owned()), mac.mission_control()));
-        }
-    }
+    // The app actors.
 
-    // The app actor stand-in. It follows `actor::app`.
-
-    fn start_app(&mut self, pid: pid_t, startup: bool, mac: &mut Mac) {
-        let (tx, rx) = unbounded_channel();
-        let ax = mac.ax(pid);
-        let (is_frontmost, main_window) = (ax.is_frontmost(), ax.main_window());
-        self.ws_tx.send(window_server::Event::ApplicationLaunched {
-            pid,
-            handle: AppThreadHandle::new_for_test(tx),
-            info: AppInfo {
-                bundle_id: Some(format!("com.example.{}", ax.name())),
-                localized_name: Some(ax.name().to_owned()),
-            },
-            is_frontmost,
-            main_window: main_window.map(|wsid| window_id(pid, wsid)),
-            visible_windows: ax.windows().map(|w| (window_id(pid, w.id), window_info(w))).collect(),
-        });
+    fn start_app(&mut self, pid: pid_t, startup: Option<StartupToken>, mac: &Rc<RefCell<Mac>>) {
+        let info = {
+            let mac = mac.borrow();
+            let Some(name) = mac.app_name(pid) else {
+                return;
+            };
+            AppInfo {
+                bundle_id: mac.bundle_id(pid),
+                localized_name: Some(name.to_owned()),
+            }
+        };
+        let Some(task) = app::app_task(pid, info, self.ws_tx.clone(), startup) else {
+            return;
+        };
         self.apps.insert(
             pid,
             AppActor {
-                rx,
-                known: ax.windows().map(|w| w.id).collect(),
-                main_window,
-                is_frontmost,
-                raises: VecDeque::new(),
-                raise_waiting: false,
-                last_activated: None,
+                task: Some(Box::pin(task)),
+                woken: Arc::new(Woken(AtomicBool::new(true))),
             },
         );
-        if startup {
-            self.starting_apps -= 1;
-            if self.starting_apps == 0 {
-                self.sent.push((Actor::WmController, Message::StartupAppsReported));
-            }
-        }
+        self.poll_app(pid);
     }
 
-    fn app(&mut self, pid: pid_t) -> &mut AppActor {
-        self.apps.get_mut(&pid).expect("app actor is not running")
-    }
-
-    /// Report a window to Glide if this actor hasn't yet.
-    fn register_window(&mut self, pid: pid_t, wsid: WindowServerId, mac: &mut Mac) {
-        let ax = mac.ax(pid);
-        let Some(window) = ax.window(wsid) else {
+    /// Poll an app actor's task once if it was woken. A task that wakes
+    /// itself while it is polled is left for the schedule to pick again, as
+    /// the real executor goes back to its run loop between polls.
+    fn poll_app(&mut self, pid: pid_t) {
+        let Some(app) = self.apps.get_mut(&pid) else {
             return;
         };
-        if !self.app(pid).known.insert(wsid) {
+        if !app.woken.0.swap(false, Ordering::Relaxed) {
             return;
         }
-        self.ws_tx.send(window_server::Event::WindowCreated(
-            window_id(pid, wsid),
-            window_info(window),
-            MouseState::Up,
-        ));
-    }
-
-    fn app_notification(&mut self, pid: pid_t, notification: AxNotification, mac: &mut Mac) {
-        match notification {
-            AxNotification::WindowCreated(wsid) => self.register_window(pid, wsid, mac),
-            AxNotification::WindowDestroyed(wsid) => {
-                if self.app(pid).known.remove(&wsid) {
-                    self.reactor_event(reactor::Event::WindowDestroyed(window_id(pid, wsid)));
-                }
-            }
-            AxNotification::MainWindowChanged => {
-                let quiet_if = self.app(pid).last_activated.as_mut().and_then(|a| a.1.take());
-                self.on_main_window_changed(pid, quiet_if, mac);
-            }
-            AxNotification::Activated | AxNotification::Deactivated => {
-                self.on_activation_changed(pid, mac)
-            }
-        }
-        self.advance_raises(pid, mac);
-    }
-
-    /// Read the app's main window and report it if it changed. The change is
-    /// quiet if the new main window is `quiet_if`.
-    fn on_main_window_changed(&mut self, pid: pid_t, quiet_if: Option<WindowId>, mac: &mut Mac) {
-        let Some(wsid) = mac.ax(pid).main_window() else {
-            return;
-        };
-        // This often runs before the window's creation is observed.
-        self.register_window(pid, wsid, mac);
-        let app = self.app(pid);
-        if app.main_window == Some(wsid) {
-            return;
-        }
-        app.main_window = Some(wsid);
-        let wid = window_id(pid, wsid);
-        let quiet = if quiet_if == Some(wid) {
-            Quiet::Yes
-        } else {
-            Quiet::No
-        };
-        self.ws_tx.send(window_server::Event::ApplicationMainWindowChanged(
-            pid,
-            Some(wid),
-            quiet,
-        ));
-    }
-
-    /// Read whether the app is frontmost and report it if that changed. An
-    /// activation lets the raise waiting for it go on.
-    fn on_activation_changed(&mut self, pid: pid_t, mac: &mut Mac) {
-        let is_frontmost = mac.ax(pid).is_frontmost();
-        let app = self.app(pid);
-        let was_frontmost = std::mem::replace(&mut app.is_frontmost, is_frontmost);
-        let event = if is_frontmost {
-            let (quiet, quiet_window) = app.last_activated.take().unwrap_or((Quiet::No, None));
-            self.on_main_window_changed(pid, quiet_window, mac);
-            reactor::Event::ApplicationActivated(pid, quiet)
-        } else {
-            reactor::Event::ApplicationDeactivated(pid)
-        };
-        if was_frontmost != is_frontmost {
-            self.reactor_event(event);
-        }
-        if is_frontmost && std::mem::take(&mut self.app(pid).raise_waiting) {
-            self.finish_raise(pid, mac);
+        let Some(task) = &mut app.task else { return };
+        let waker = Waker::from(Arc::clone(&app.woken));
+        if task.as_mut().poll(&mut Context::from_waker(&waker)).is_ready() {
+            app.task = None;
         }
     }
 
-    fn app_request(&mut self, pid: pid_t, request: Request, mac: &mut Mac) {
-        match request {
-            Request::Terminate
-            | Request::BeginWindowAnimation(_)
-            | Request::EndWindowAnimation(_)
-            | Request::WindowDestroyed(_) => {}
-            Request::GetVisibleWindows => {
-                let windows: Vec<_> = mac.ax(pid).windows().cloned().collect();
-                let app = self.app(pid);
-                let (mut new, mut known_visible) = (Vec::new(), Vec::new());
-                for window in &windows {
-                    let wid = window_id(pid, window.id);
-                    if app.known.insert(window.id) {
-                        new.push((wid, window_info(window)));
-                    } else {
-                        known_visible.push(wid);
-                    }
-                }
-                self.reactor_event(reactor::Event::WindowsDiscovered { pid, new, known_visible });
-            }
-            Request::SetWindowFrame(wid, frame, txid)
-            | Request::AnimationFrame { wid, frame, txid, .. } => {
-                let Some(wsid) = wid.wsid() else { return };
-                let Some(old_frame) = mac.ax(pid).set_frame(wsid, frame) else {
-                    return;
-                };
-                self.record(Action::Wrote, wsid, mac);
-                if !old_frame.same_as(frame) {
-                    self.reactor_event(reactor::Event::WindowFrameChanged(
-                        wid,
-                        frame,
-                        txid,
-                        Requested(true),
-                        None,
-                    ));
-                }
-            }
-            Request::Raise(wids, token, sequence_id, quiet) => {
-                self.app(pid).raises.push_back(Raise {
-                    wids,
-                    token,
-                    sequence_id,
-                    quiet,
-                });
-            }
-        }
-        self.advance_raises(pid, mac);
-    }
-
-    fn fail_raise(&mut self, raise: Raise) {
-        self.reactor_event(reactor::Event::RaiseRequestFailed {
-            windows: raise.wids,
-            sequence_id: raise.sequence_id,
-            quiet: raise.quiet,
-        });
-    }
-
-    /// Carry the app's raise requests as far as they can go.
-    ///
-    /// A raise gives its first window the keyboard focus. If the app isn't
-    /// frontmost, the raise then waits to observe the app's activation before
-    /// it brings its windows to the front.
-    fn advance_raises(&mut self, pid: pid_t, mac: &mut Mac) {
-        loop {
-            let app = self.app(pid);
-            let Some(raise) = app.raises.front() else {
-                return;
-            };
-            let first = raise.wids.first().copied();
-            let first_wsid = first.and_then(|wid| wid.wsid());
-            let (quiet, single) = (raise.quiet, raise.wids.len() == 1);
-            if raise.token.is_cancelled()
-                || first_wsid.is_none_or(|wsid| mac.ax(pid).window(wsid).is_none())
-            {
-                let app = self.app(pid);
-                app.raise_waiting = false;
-                let raise = app.raises.pop_front().unwrap();
-                self.fail_raise(raise);
-                continue;
-            }
-            if app.raise_waiting {
-                return;
-            }
-            let is_frontmost = mac.ax(pid).is_frontmost();
-            mac.send_window_server(mac::Message::MakeKey(first_wsid.unwrap()));
-            if !is_frontmost {
-                let app = self.app(pid);
-                app.raise_waiting = true;
-                // Windows under the last one are always raised quietly.
-                app.last_activated = Some(if single {
-                    (quiet, (quiet == Quiet::Yes).then_some(first).flatten())
-                } else {
-                    (Quiet::Yes, first)
-                });
-                return;
-            }
-            self.finish_raise(pid, mac);
-        }
-    }
-
-    /// Bring the windows of the app's oldest raise to the front, in order.
-    fn finish_raise(&mut self, pid: pid_t, mac: &mut Mac) {
-        let raise = self.app(pid).raises.pop_front().unwrap();
-        for (i, &wid) in raise.wids.iter().enumerate() {
-            let raised = wid.wsid().filter(|&wsid| mac.ax(pid).raise(wsid));
-            let Some(wsid) = raised else {
-                self.fail_raise(raise);
-                return;
-            };
-            self.record(Action::Raised, wsid, mac);
-            self.reactor_event(reactor::Event::RaiseCompleted {
-                window_id: wid,
-                sequence_id: raise.sequence_id,
-            });
-            let is_last = i + 1 == raise.wids.len();
-            let quiet_if = (!is_last || raise.quiet == Quiet::Yes).then_some(wid);
-            self.on_main_window_changed(pid, quiet_if, mac);
-        }
+    /// The app actors that have something to do without being sent a message:
+    /// a request waiting in their channel, or a lock they were waiting for.
+    pub fn woken_apps(&self) -> impl Iterator<Item = Actor> + '_ {
+        self.apps
+            .iter()
+            .filter(|(_, app)| app.task.is_some() && app.woken.0.load(Ordering::Relaxed))
+            .map(|(&pid, _)| Actor::App(pid))
     }
 
     // What a test can observe.
 
     pub fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.reactor.tiled_windows(space)
-    }
-
-    pub fn actions(&self) -> &[(Action, bool)] {
-        &self.actions
-    }
-
-    pub fn clear_actions(&mut self) {
-        self.actions.clear();
     }
 }

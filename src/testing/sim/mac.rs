@@ -9,22 +9,41 @@
 //! process makes reaches another as a [`Message`], which is handled later, in
 //! an order the caller picks.
 //!
-//! Only these happen without a message in between:
+//! Only these happen without a queued message in between:
 //!
 //! - Something the user does is handled by one process right away.
-//! - An accessibility call ([`Ax`]) reads or changes its app before returning.
 //! - A window server query reads the window server before returning.
 //! - An app gets the id of a window it creates from the window server.
 //!
+//! An accessibility request blocks its caller until the app replies. The app
+//! gets to the request after everything already in its inbox, so
+//! [`Mac::ax_request`] has the app handle its inbox and then the request.
+//!
 //! A [`Notification`] is for a process observing macOS from outside. The model
-//! knows nothing about Glide; delivering messages and notifications is up to
-//! the caller, which takes them with [`Mac::next_sent`].
+//! knows nothing about Glide; the caller picks which process handles its next
+//! message with [`Mac::step`] and takes notifications with
+//! [`Mac::next_notification`].
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 
+use accessibility::AXError;
+use accessibility_sys::{
+    kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
+    kAXFrontmostAttribute, kAXMainWindowAttribute, kAXMainWindowChangedNotification,
+    kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute,
+    kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute,
+    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification, kAXWindowMovedNotification,
+    kAXWindowResizedNotification, kAXWindowRole, kAXWindowsAttribute,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 use crate::sys::app::pid_t;
+use crate::sys::ax::fake::{
+    self, ENHANCED_USER_INTERFACE_ATTRIBUTE, ElementId, FRAME_ATTRIBUTE, ObserverId, Request, Value,
+};
+use crate::sys::event::MouseState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -62,26 +81,25 @@ pub enum Message {
     Deactivate,
     /// One of the app's windows took the keyboard focus.
     BecomeMain(WindowServerId),
+    /// One of the app's windows is now on the desktop being shown, or no
+    /// longer is.
+    WindowShown(WindowServerId, bool),
 }
 
 /// Something a process observing macOS is told.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Notification {
-    /// Accessibility, from an app to its observers.
-    Ax(pid_t, AxNotification),
+    /// Accessibility, from an app to one of its observers, about `element`.
+    Ax {
+        pid: pid_t,
+        observer: ObserverId,
+        element: ElementId,
+        name: &'static str,
+    },
     /// Accessibility, from the Dock: Mission Control opened or closed.
     MissionControl(bool),
     /// From the workspace notification center.
     Workspace(WorkspaceNotification),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AxNotification {
-    WindowCreated(WindowServerId),
-    WindowDestroyed(WindowServerId),
-    MainWindowChanged,
-    Activated,
-    Deactivated,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,9 +110,16 @@ pub enum WorkspaceNotification {
     ActiveSpaceChanged,
 }
 
-/// Something a process sent while handling a message or a call.
+/// Something a process was asked to do to a window through accessibility.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Sent {
+pub enum Action {
+    Wrote(String),
+    Raised(String),
+}
+
+/// Something a process sent while handling a message or a request.
+#[derive(Debug, Clone, PartialEq)]
+enum Sent {
     Message(Process, Message),
     Notification(Notification),
 }
@@ -181,7 +206,15 @@ impl WindowServer {
 
     fn show_desktop(&mut self, index: usize, out: &mut Outbox) {
         if index != self.current {
+            let (old, new) = (self.desktops[self.current], self.desktops[index]);
             self.current = index;
+            for (&wsid, window) in &self.windows {
+                if window.desktop == Some(old) {
+                    out.send(Process::App(window.pid), Message::WindowShown(wsid, false));
+                } else if window.desktop == Some(new) {
+                    out.send(Process::App(window.pid), Message::WindowShown(wsid, true));
+                }
+            }
             out.notify(Notification::Workspace(
                 WorkspaceNotification::ActiveSpaceChanged,
             ));
@@ -197,6 +230,7 @@ impl WindowServer {
                 };
                 window.frame = frame;
                 window.desktop = Some(desktop);
+                out.send(Process::App(window.pid), Message::WindowShown(wsid, true));
                 self.order.insert(0, wsid);
             }
             Message::DestroyWindow(wsid) => {
@@ -240,8 +274,10 @@ impl WindowServer {
             Message::ShowDesktop(number) => self.show_desktop(number - 1, out),
             Message::MoveToDesktop(wsid, number) => {
                 let desktop = self.desktops[number - 1];
+                let shown = desktop == self.current_desktop();
                 if let Some(window) = self.windows.get_mut(&wsid) {
                     window.desktop = Some(desktop);
+                    out.send(Process::App(window.pid), Message::WindowShown(wsid, shown));
                 }
             }
             Message::FocusFrontWindow => {
@@ -254,7 +290,10 @@ impl WindowServer {
                 self.activate(pid, out);
                 out.send(Process::App(pid), Message::BecomeMain(front));
             }
-            Message::Activate | Message::Deactivate | Message::BecomeMain(_) => {
+            Message::Activate
+            | Message::Deactivate
+            | Message::BecomeMain(_)
+            | Message::WindowShown(..) => {
                 unreachable!("{message:?} is for an app")
             }
         }
@@ -327,24 +366,56 @@ pub struct App {
     main_window: Option<WindowServerId>,
     /// Whether the app has been told it is frontmost.
     active: bool,
+    enhanced_user_interface: bool,
+    /// The notifications observers asked for, each on one element.
+    observers: Vec<(ObserverId, ElementId, &'static str)>,
 }
 
-#[derive(Debug, Clone)]
-pub struct AppWindow {
-    pub id: WindowServerId,
-    pub title: String,
-    pub frame: CGRect,
+struct AppWindow {
+    id: WindowServerId,
+    title: String,
+    frame: CGRect,
+    /// Whether the app has been told the window is on the desktop being
+    /// shown. Accessibility only lists the app's windows that are.
+    shown: bool,
+}
+
+fn element(wsid: WindowServerId) -> ElementId {
+    ElementId::Window(wsid.0)
 }
 
 impl App {
-    fn notify(&self, notification: AxNotification, out: &mut Outbox) {
-        out.notify(Notification::Ax(self.pid, notification));
+    /// Send `name` about `subject` to the observers that asked for it on
+    /// `registered_on`.
+    fn notify(
+        &self,
+        registered_on: ElementId,
+        name: &'static str,
+        subject: ElementId,
+        out: &mut Outbox,
+    ) {
+        for &(observer, on, wanted) in &self.observers {
+            if on == registered_on && wanted == name {
+                out.notify(Notification::Ax {
+                    pid: self.pid,
+                    observer,
+                    element: subject,
+                    name,
+                });
+            }
+        }
     }
 
     fn set_main_window(&mut self, wsid: Option<WindowServerId>, out: &mut Outbox) {
         if self.main_window != wsid {
             self.main_window = wsid;
-            self.notify(AxNotification::MainWindowChanged, out);
+            let subject = wsid.map_or(ElementId::Application, element);
+            self.notify(
+                ElementId::Application,
+                kAXMainWindowChangedNotification,
+                subject,
+                out,
+            );
         }
     }
 
@@ -356,8 +427,14 @@ impl App {
             id,
             title: title.to_owned(),
             frame,
+            shown: false,
         });
-        self.notify(AxNotification::WindowCreated(id), out);
+        self.notify(
+            ElementId::Application,
+            kAXWindowCreatedNotification,
+            element(id),
+            out,
+        );
         self.set_main_window(Some(id), out);
         out.send(Process::WindowServer, Message::OrderIn(id, frame));
     }
@@ -366,7 +443,13 @@ impl App {
     /// window.
     fn close_window(&mut self, wsid: WindowServerId, out: &mut Outbox) {
         self.windows.retain(|w| w.id != wsid);
-        self.notify(AxNotification::WindowDestroyed(wsid), out);
+        self.notify(
+            element(wsid),
+            kAXUIElementDestroyedNotification,
+            element(wsid),
+            out,
+        );
+        self.observers.retain(|&(_, on, _)| on != element(wsid));
         if self.main_window == Some(wsid) {
             self.set_main_window(self.windows.last().map(|w| w.id), out);
         }
@@ -374,77 +457,128 @@ impl App {
     }
 
     fn handle(&mut self, message: Message, out: &mut Outbox) {
+        let app = ElementId::Application;
         match message {
             Message::Activate => {
                 self.active = true;
-                self.notify(AxNotification::Activated, out);
+                self.notify(app, kAXApplicationActivatedNotification, app, out);
             }
             Message::Deactivate => {
                 self.active = false;
-                self.notify(AxNotification::Deactivated, out);
+                self.notify(app, kAXApplicationDeactivatedNotification, app, out);
             }
             Message::BecomeMain(wsid) => {
                 if self.windows.iter().any(|w| w.id == wsid) {
                     self.set_main_window(Some(wsid), out);
                 }
             }
+            Message::WindowShown(wsid, shown) => {
+                if let Some(window) = self.windows.iter_mut().find(|w| w.id == wsid) {
+                    window.shown = shown;
+                }
+            }
             _ => unreachable!("{message:?} is for the window server"),
         }
     }
-}
 
-/// The accessibility interface of one app.
-pub struct Ax<'a> {
-    app: &'a mut App,
-    window_server: &'a WindowServer,
-    out: &'a mut Outbox,
-}
-
-impl Ax<'_> {
-    pub fn name(&self) -> &str {
-        &self.app.name
+    fn window_mut(&mut self, id: u32) -> Result<&mut AppWindow, AXError> {
+        self.windows.iter_mut().find(|w| w.id.0 == id).ok_or(AXError::InvalidUIElement)
     }
 
-    /// The app's windows on the desktop being shown, oldest first.
-    ///
-    /// Windows on other desktops and windows not on screen yet are left out,
-    /// but [`Ax::window`] still finds them.
-    pub fn windows(&self) -> impl Iterator<Item = &AppWindow> {
-        let desktop = Some(self.window_server.current_desktop());
-        self.app.windows.iter().filter(move |w| {
-            self.window_server.windows.get(&w.id).and_then(|s| s.desktop) == desktop
-        })
-    }
-
-    pub fn window(&self, wsid: WindowServerId) -> Option<&AppWindow> {
-        self.app.windows.iter().find(|w| w.id == wsid)
-    }
-
-    pub fn main_window(&self) -> Option<WindowServerId> {
-        self.app.main_window
-    }
-
-    pub fn is_frontmost(&self) -> bool {
-        self.app.active
-    }
-
-    /// Set a window's frame. Return the frame it had.
-    pub fn set_frame(&mut self, wsid: WindowServerId, frame: CGRect) -> Option<CGRect> {
-        let window = self.app.windows.iter_mut().find(|w| w.id == wsid)?;
-        let old = std::mem::replace(&mut window.frame, frame);
-        self.out.send(Process::WindowServer, Message::SetFrame(wsid, frame));
-        Some(old)
-    }
-
-    /// Bring a window to the front and make it the main window. Return false
-    /// if the app has no such window.
-    pub fn raise(&mut self, wsid: WindowServerId) -> bool {
-        if self.window(wsid).is_none() {
-            return false;
-        }
-        self.app.set_main_window(Some(wsid), self.out);
-        self.out.send(Process::WindowServer, Message::OrderFront(wsid));
-        true
+    /// Answer an accessibility request. `Ok(None)` is an attribute with no
+    /// value.
+    #[allow(non_upper_case_globals)]
+    fn ax(&mut self, request: Request, out: &mut Outbox) -> Result<Option<Value>, AXError> {
+        use ElementId::{Application, Window};
+        let value = match request {
+            Request::Attribute(Application, name) => match &*name {
+                kAXRoleAttribute => Value::String("AXApplication".into()),
+                kAXWindowsAttribute => {
+                    let shown = self.windows.iter().filter(|w| w.shown);
+                    Value::Elements(shown.map(|w| element(w.id)).collect())
+                }
+                kAXMainWindowAttribute => {
+                    return Ok(self.main_window.map(element).map(Value::Element));
+                }
+                kAXFrontmostAttribute => Value::Bool(self.active),
+                ENHANCED_USER_INTERFACE_ATTRIBUTE => Value::Bool(self.enhanced_user_interface),
+                _ => return Err(AXError::AttributeUnsupported),
+            },
+            Request::Attribute(Window(id), name) => {
+                let window = self.window_mut(id)?;
+                match &*name {
+                    kAXRoleAttribute => Value::String(kAXWindowRole.into()),
+                    kAXSubroleAttribute => Value::String(kAXStandardWindowSubrole.into()),
+                    kAXTitleAttribute => Value::String(window.title.clone()),
+                    kAXPositionAttribute => Value::Point(window.frame.origin),
+                    kAXSizeAttribute => Value::Size(window.frame.size),
+                    FRAME_ATTRIBUTE => Value::Rect(window.frame),
+                    _ => return Err(AXError::AttributeUnsupported),
+                }
+            }
+            Request::SetAttribute(Application, name, Value::Bool(enabled))
+                if name == ENHANCED_USER_INTERFACE_ATTRIBUTE =>
+            {
+                self.enhanced_user_interface = enabled;
+                return Ok(None);
+            }
+            Request::SetAttribute(Window(id), name, value) => {
+                let window = self.window_mut(id)?;
+                let old = window.frame;
+                let notification = match (&*name, value) {
+                    (kAXPositionAttribute, Value::Point(origin)) => {
+                        window.frame.origin = origin;
+                        kAXWindowMovedNotification
+                    }
+                    (kAXSizeAttribute, Value::Size(size)) => {
+                        window.frame.size = size;
+                        kAXWindowResizedNotification
+                    }
+                    _ => return Err(AXError::AttributeUnsupported),
+                };
+                let (wsid, frame) = (window.id, window.frame);
+                if frame != old {
+                    out.send(Process::WindowServer, Message::SetFrame(wsid, frame));
+                    self.notify(Window(id), notification, Window(id), out);
+                }
+                return Ok(None);
+            }
+            Request::IsSettable(Window(id), name) => {
+                self.window_mut(id)?;
+                Value::Bool(matches!(&*name, kAXPositionAttribute | kAXSizeAttribute))
+            }
+            Request::PerformAction(Window(id), name) if name == kAXRaiseAction => {
+                let wsid = self.window_mut(id)?.id;
+                self.set_main_window(Some(wsid), out);
+                out.send(Process::WindowServer, Message::OrderFront(wsid));
+                return Ok(None);
+            }
+            Request::WindowId(Window(id)) => Value::Number(self.window_mut(id)?.id.0),
+            Request::WindowId(Application) => return Err(AXError::IllegalArgument),
+            Request::AddNotification(observer, on, name) => {
+                if let Window(id) = on {
+                    self.window_mut(id)?;
+                }
+                if self.observers.contains(&(observer, on, name)) {
+                    return Err(AXError::NotificationAlreadyRegistered);
+                }
+                self.observers.push((observer, on, name));
+                return Ok(None);
+            }
+            Request::RemoveNotification(observer, on, name) => {
+                let before = self.observers.len();
+                self.observers.retain(|&registered| registered != (observer, on, name));
+                if self.observers.len() == before {
+                    return Err(AXError::NotificationNotRegistered);
+                }
+                return Ok(None);
+            }
+            Request::SetAttribute(..) | Request::IsSettable(..) => {
+                return Err(AXError::AttributeUnsupported);
+            }
+            Request::PerformAction(..) => return Err(AXError::ActionUnsupported),
+        };
+        Ok(Some(value))
     }
 }
 
@@ -454,6 +588,11 @@ pub struct Mac {
     apps: BTreeMap<pid_t, App>,
     next_pid: pid_t,
     out: Outbox,
+    inboxes: BTreeMap<Process, VecDeque<Message>>,
+    notifications: VecDeque<Notification>,
+    /// What apps were asked to do to windows through accessibility, with
+    /// whether Mission Control was open at the time.
+    actions: Vec<(Action, bool)>,
 }
 
 impl Mac {
@@ -464,6 +603,9 @@ impl Mac {
             apps: BTreeMap::new(),
             next_pid: 1,
             out: Outbox::default(),
+            inboxes: BTreeMap::new(),
+            notifications: VecDeque::new(),
+            actions: Vec::new(),
         }
     }
 
@@ -481,9 +623,12 @@ impl Mac {
                 windows: Vec::new(),
                 main_window: None,
                 active: false,
+                enhanced_user_interface: false,
+                observers: Vec::new(),
             },
         );
         self.window_server.launch(pid, &mut self.out);
+        self.route();
         pid
     }
 
@@ -492,6 +637,7 @@ impl Mac {
         let wsid = self.window_server.new_window(pid);
         let app = self.apps.get_mut(&pid).expect("app is not running");
         app.open_window(wsid, title, &mut self.out);
+        self.route();
         wsid
     }
 
@@ -502,12 +648,14 @@ impl Mac {
             .find(|app| app.windows.iter().any(|w| w.id == wsid))
             .expect("window does not exist");
         app.close_window(wsid, &mut self.out);
+        self.route();
     }
 
     pub fn open_mission_control(&mut self) {
         assert!(!self.dock.mission_control, "Mission Control is already open");
         self.dock.mission_control = true;
         self.out.notify(Notification::MissionControl(true));
+        self.route();
     }
 
     pub fn close_mission_control(&mut self) {
@@ -515,6 +663,7 @@ impl Mac {
         self.dock.mission_control = false;
         self.out.notify(Notification::MissionControl(false));
         self.out.send(Process::WindowServer, Message::FocusFrontWindow);
+        self.route();
     }
 
     /// Show another desktop, counting from 1. Outside Mission Control this
@@ -524,23 +673,41 @@ impl Mac {
         if !self.dock.mission_control {
             self.out.send(Process::WindowServer, Message::FocusFrontWindow);
         }
+        self.route();
     }
 
     /// Drag a window onto another desktop in Mission Control.
     pub fn drag_window_to_desktop(&mut self, wsid: WindowServerId, number: usize) {
         assert!(self.dock.mission_control, "Mission Control is not open");
         self.out.send(Process::WindowServer, Message::MoveToDesktop(wsid, number));
+        self.route();
     }
 
     // Delivery.
 
-    /// Take the next thing a process sent.
-    pub fn next_sent(&mut self) -> Option<Sent> {
-        self.out.0.pop_front()
+    /// Put what was sent where it goes.
+    fn route(&mut self) {
+        while let Some(sent) = self.out.0.pop_front() {
+            match sent {
+                Sent::Message(to, message) => {
+                    self.inboxes.entry(to).or_default().push_back(message)
+                }
+                Sent::Notification(notification) => self.notifications.push_back(notification),
+            }
+        }
     }
 
-    /// Have `process` handle `message`.
-    pub fn deliver(&mut self, process: Process, message: Message) {
+    /// The processes with a message waiting.
+    pub fn ready(&self) -> impl Iterator<Item = Process> + '_ {
+        self.inboxes.iter().filter(|(_, inbox)| !inbox.is_empty()).map(|(&p, _)| p)
+    }
+
+    /// Have `process` handle its next message. Return false if it has none.
+    pub fn step(&mut self, process: Process) -> bool {
+        let Some(message) = self.inboxes.get_mut(&process).and_then(|inbox| inbox.pop_front())
+        else {
+            return false;
+        };
         match process {
             Process::WindowServer => self.window_server.handle(message, &mut self.out),
             Process::App(pid) => {
@@ -549,6 +716,13 @@ impl Mac {
                 }
             }
         }
+        self.route();
+        true
+    }
+
+    /// Take the next notification for a process outside macOS.
+    pub fn next_notification(&mut self) -> Option<Notification> {
+        self.notifications.pop_front()
     }
 
     // What a process outside macOS can do.
@@ -560,14 +734,42 @@ impl Mac {
     /// Send the window server a message.
     pub fn send_window_server(&mut self, message: Message) {
         self.out.send(Process::WindowServer, message);
+        self.route();
     }
 
-    pub fn ax(&mut self, pid: pid_t) -> Ax<'_> {
-        Ax {
-            app: self.apps.get_mut(&pid).expect("app is not running"),
-            window_server: &self.window_server,
-            out: &mut self.out,
+    /// Send an app an accessibility request and wait for the reply.
+    ///
+    /// TODO: A real request fails if the app takes too long to reply. Let
+    /// the caller make a request fail that way.
+    pub fn ax_request(&mut self, pid: pid_t, request: Request) -> Result<Option<Value>, AXError> {
+        if !self.apps.contains_key(&pid) {
+            return Err(AXError::CannotComplete);
         }
+        // The app gets to the request after what is already in its inbox.
+        while self.step(Process::App(pid)) {}
+
+        let app = self.apps.get_mut(&pid).unwrap();
+        let action: Option<(fn(String) -> Action, u32)> = match &request {
+            Request::SetAttribute(ElementId::Window(id), ..) => Some((Action::Wrote, *id)),
+            Request::PerformAction(ElementId::Window(id), _) => Some((Action::Raised, *id)),
+            _ => None,
+        };
+        if let Some((action, id)) = action
+            && let Some(window) = app.windows.iter().find(|w| w.id.0 == id)
+        {
+            self.actions.push((action(window.title.clone()), self.dock.mission_control));
+        }
+        let reply = app.ax(request, &mut self.out);
+        self.route();
+        reply
+    }
+
+    pub fn bundle_id(&self, pid: pid_t) -> Option<String> {
+        self.apps.get(&pid).map(|app| format!("com.example.{}", app.name))
+    }
+
+    pub fn app_name(&self, pid: pid_t) -> Option<&str> {
+        self.apps.get(&pid).map(|app| &*app.name)
     }
 
     pub fn apps(&self) -> impl Iterator<Item = pid_t> + '_ {
@@ -576,8 +778,12 @@ impl Mac {
 
     // What a test can see. Nothing in the system has this view.
 
-    pub fn mission_control(&self) -> bool {
-        self.dock.mission_control
+    pub fn actions(&self) -> &[(Action, bool)] {
+        &self.actions
+    }
+
+    pub fn clear_actions(&mut self) {
+        self.actions.clear();
     }
 
     pub fn title(&self, wsid: WindowServerId) -> Option<&str> {
@@ -591,5 +797,27 @@ impl Mac {
         let window = matches.next().unwrap_or_else(|| panic!("no window titled {title}"));
         assert!(matches.next().is_none(), "more than one window titled {title}");
         window.id
+    }
+}
+
+/// Connects the fake accessibility interface to a [`Mac`].
+pub struct System(pub Rc<RefCell<Mac>>);
+
+impl fake::System for System {
+    fn ax(&self, pid: pid_t, request: Request) -> Result<Option<Value>, AXError> {
+        self.0.borrow_mut().ax_request(pid, request)
+    }
+
+    fn make_key_window(&self, _pid: pid_t, wsid: WindowServerId) -> Result<(), ()> {
+        self.0.borrow_mut().send_window_server(Message::MakeKey(wsid));
+        Ok(())
+    }
+
+    fn bundle_id(&self, pid: pid_t) -> Option<String> {
+        self.0.borrow().bundle_id(pid)
+    }
+
+    fn mouse_state(&self) -> MouseState {
+        MouseState::Up
     }
 }
