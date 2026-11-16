@@ -14,6 +14,8 @@ pub(super) struct Harness {
     pub(super) sim: Sim,
     /// The windows that may not take the frame Glide gives them.
     pub(super) frame_mismatch_allowed: BTreeSet<String>,
+    /// The windows Glide is expected to leave floating.
+    pub(super) floating: BTreeSet<String>,
     /// How many inputs the user had given when the system last settled.
     pub(super) inputs_at_settle: usize,
     /// The length of the selection history when a focus command was the only
@@ -26,6 +28,7 @@ impl Harness {
         Harness {
             sim: Sim::new(schedule, screen, desktops),
             frame_mismatch_allowed: BTreeSet::new(),
+            floating: BTreeSet::new(),
             inputs_at_settle: 0,
             focus_command: None,
         }
@@ -54,6 +57,12 @@ impl Harness {
         self.sim.command(command);
         self.focus_command =
             (moves_focus && only_input).then(|| self.sim.selection_history().len());
+    }
+
+    /// Say that Glide leaves the window floating. The invariants about tiled
+    /// windows don't apply to it, and the scenario checks it isn't tiled.
+    pub(super) fn expect_floating(&mut self, title: &str) {
+        self.floating.insert(title.to_owned());
     }
 
     /// Say that the window may not take the frame Glide gives it, because

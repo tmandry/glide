@@ -94,6 +94,7 @@ impl Harness {
             .windows_on_screen()
             .iter()
             .map(|w| (mac.title(w.id).unwrap().to_owned(), w.frame))
+            .filter(|(title, _)| !self.floating.contains(title))
             .collect();
         let tiled = self.tiled(window_server.current_desktop_number());
         let mut shown: Vec<&String> = on_screen.keys().collect();

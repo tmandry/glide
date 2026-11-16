@@ -3,10 +3,12 @@
 
 //! Apps that don't behave like the plain windows the other scenarios use.
 
+use accessibility_sys::kAXDialogSubrole;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use test_log::test;
 
 use super::{Harness, screen};
+use crate::actor::layout::LayoutCommand;
 use crate::testing::sim::{Schedule, WindowTraits};
 
 /// App A has a window A1, and opens A2 with `traits`. Glide is running and
@@ -110,5 +112,65 @@ fn a_window_minimized_before_glide_starts_is_not_tiled() {
         sim.run();
         assert_eq!(sim.tiled(1), ["A2"], "{schedule:?}");
         sim.scene().assert("A2").fills_screen();
+    });
+}
+
+fn dialog() -> WindowTraits {
+    WindowTraits {
+        subrole: Some(kAXDialogSubrole),
+        ..Default::default()
+    }
+}
+
+/// App B has a dialog D. App A, which is frontmost, has windows A1 and A2.
+/// Glide is running and the system has settled.
+fn dialog_and_two_windows(schedule: Schedule) -> Harness {
+    let mut sim = Harness::new(schedule, screen(), 1);
+    let b = sim.launch_app("B");
+    sim.open_window_with(b, "D", dialog());
+    sim.expect_floating("D");
+    let a = sim.launch_app("A");
+    sim.open_window(a, "A1");
+    sim.open_window(a, "A2");
+    sim.run();
+    sim.start_glide();
+    sim.run();
+    sim
+}
+
+#[test]
+fn a_dialog_is_not_tiled() {
+    Schedule::each(|schedule| {
+        let sim = dialog_and_two_windows(schedule);
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+        sim.scene().assert("A1").left_of("A2").same_size_as("A2");
+        // Glide leaves the dialog with the size its app gave it.
+        let dialog = sim.scene().frame("D");
+        assert_eq!(dialog.size, CGSize::new(400., 300.), "{schedule:?}");
+    });
+}
+
+#[test]
+fn a_dialog_opened_after_glide_starts_is_not_tiled() {
+    Schedule::each(|schedule| {
+        let mut sim = two_windows(schedule);
+        let b = sim.launch_app("B");
+        sim.run();
+        sim.expect_floating("D");
+        sim.open_window_with(b, "D", dialog());
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+        sim.scene().assert("A1").left_of("A2").same_size_as("A2");
+    });
+}
+
+#[test]
+fn raising_a_dialog_gives_it_the_keyboard_focus() {
+    Schedule::each(|schedule| {
+        let mut sim = dialog_and_two_windows(schedule);
+        sim.command(LayoutCommand::ToggleFocusFloating);
+        sim.run();
+        assert_eq!(sim.key_window().as_deref(), Some("D"), "{schedule:?}");
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
     });
 }

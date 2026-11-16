@@ -129,6 +129,9 @@ pub struct WindowTraits {
     /// The app only lets the window have a size that is a multiple of this,
     /// as a terminal does with its character cells.
     pub size_increment: Option<CGSize>,
+    /// The window's accessibility subrole, such as `AXDialog`. A standard
+    /// window if unset.
+    pub subrole: Option<&'static str>,
 }
 
 impl WindowTraits {
@@ -659,7 +662,9 @@ impl App {
                 let window = self.window_mut(id)?;
                 match &*name {
                     kAXRoleAttribute => Value::String(kAXWindowRole.into()),
-                    kAXSubroleAttribute => Value::String(kAXStandardWindowSubrole.into()),
+                    kAXSubroleAttribute => Value::String(
+                        window.traits.subrole.unwrap_or(kAXStandardWindowSubrole).into(),
+                    ),
                     kAXTitleAttribute => Value::String(window.title.clone()),
                     kAXMinimizedAttribute => Value::Bool(window.minimized),
                     kAXPositionAttribute => Value::Point(window.frame.origin),
