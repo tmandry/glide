@@ -21,6 +21,7 @@ concurrency:
 jobs:
   evaluate:
     if: github.ref == 'refs/heads/main'
+    environment: release-notes
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -35,7 +36,7 @@ jobs:
         with:
           crate: release-scribe
           git: https://github.com/tmandry/release-scribe
-          commit: 45289d68ea5751cfe5758f90498cfeb724474c75
+          commit: dc9483146d92551e4072c67526c625ccf33b2335
           locked: true
       - name: Verify the tool
         run: release-scribe --version
