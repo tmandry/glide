@@ -3,9 +3,17 @@
   "source_branch": "main",
   "guidelines": "docs/release-notes.md",
   "model": "gpt-6.1-sol",
-  "omit": ["CHANGELOG.md", ".release-scribe"],
-  "context": ["glide.default.toml", "src/model/layout_tree.rs", "src/actor/layout.rs"],
+  "omit": [
+    "CHANGELOG.md",
+    ".release-scribe"
+  ],
+  "context": [
+    "glide.default.toml",
+    "src/model/layout_tree.rs",
+    "src/actor/layout.rs"
+  ],
   "documentation_links": {
     "Configuration reference": "https://glidewm.org/reference/config/"
-  }
+  },
+  "max_input_bytes": 4000000
 }
