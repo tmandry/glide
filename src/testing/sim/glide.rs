@@ -321,17 +321,13 @@ impl Glide {
             },
             is_frontmost,
             main_window: main_window.map(|wsid| window_id(pid, wsid)),
-            visible_windows: ax
-                .windows()
-                .iter()
-                .map(|w| (window_id(pid, w.id), window_info(w)))
-                .collect(),
+            visible_windows: ax.windows().map(|w| (window_id(pid, w.id), window_info(w))).collect(),
         });
         self.apps.insert(
             pid,
             AppActor {
                 rx,
-                known: ax.windows().iter().map(|w| w.id).collect(),
+                known: ax.windows().map(|w| w.id).collect(),
                 main_window,
                 is_frontmost,
                 raises: VecDeque::new(),
@@ -440,7 +436,7 @@ impl Glide {
             | Request::EndWindowAnimation(_)
             | Request::WindowDestroyed(_) => {}
             Request::GetVisibleWindows => {
-                let windows = mac.ax(pid).windows().to_vec();
+                let windows: Vec<_> = mac.ax(pid).windows().cloned().collect();
                 let app = self.app(pid);
                 let (mut new, mut known_visible) = (Vec::new(), Vec::new());
                 for window in &windows {

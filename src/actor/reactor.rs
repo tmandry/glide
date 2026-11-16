@@ -796,6 +796,16 @@ impl Reactor {
                 self.update_complete_window_server_info(on_screen);
                 self.layout.cancel_interactive_state();
                 self.resizing_window = None;
+                // Drop windows that left these spaces before SpaceExposed
+                // raises them. A window moved to another space in Mission
+                // Control would otherwise be raised, switching to its space.
+                let laid_out: Vec<_> = (self.screens.iter())
+                    .flat_map(|screen| screen.space)
+                    .filter(|&space| self.layout.has_layout(space))
+                    .collect();
+                for pid in self.apps.keys().copied().collect::<Vec<_>>() {
+                    self.update_app_windows_on_screen(pid, &laid_out);
+                }
                 let response = self
                     .screens
                     .iter()
@@ -1110,6 +1120,20 @@ impl Reactor {
         self.window_ids
             .extend(new.iter().flat_map(|(wid, info)| info.sys_id.map(|wsid| (wsid, *wid))));
         self.windows.extend(new.into_iter().map(|(wid, info)| (wid, info.into())));
+        let spaces: Vec<_> = self.screens.iter().flat_map(|screen| screen.space).collect();
+        self.update_app_windows_on_screen(pid, &spaces);
+        // If it's possible we just added the main window to the layout, make
+        // sure the layout knows it's focused.
+        if let Some(main_window) = self.main_window() {
+            if main_window.pid == pid {
+                self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
+            }
+        }
+    }
+
+    /// Tell the layout which of the app's known windows are on screen in each
+    /// of `spaces`.
+    fn update_app_windows_on_screen(&mut self, pid: pid_t, spaces: &[SpaceId]) {
         let mut app_windows: BTreeMap<SpaceId, Vec<(WindowId, LayoutWindowInfo)>> = BTreeMap::new();
         for wid in self
             .visible_windows
@@ -1126,22 +1150,12 @@ impl Reactor {
             };
             app_windows.entry(space).or_default().push((wid, layout_info));
         }
-        let screens = self.screens.clone();
-        for screen in screens {
-            let Some(space) = screen.space else { continue };
+        for &space in spaces {
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
                 app_windows.remove(&space).unwrap_or_default(),
             ));
-        }
-        // If it's possible we just added the main window to the layout, make
-        // sure the layout knows it's focused.
-        if let Some(main_window) = self.main_window() {
-            if main_window.pid == pid {
-                let spaces = self.screens.iter().flat_map(|screen| screen.space).collect();
-                self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
-            }
         }
     }
 
@@ -1185,6 +1199,11 @@ impl Reactor {
             .map(|info| &info.spaces);
         match spaces {
             Some(spaces) if !spaces.is_empty() && !spaces.contains(&space) => None,
+            // The window server hasn't placed the window yet. It goes on the
+            // active space, but in expose the screen's space is the one expose
+            // was opened from, not the one being shown. Wait for the window
+            // to be discovered on a space after expose closes.
+            Some(spaces) if spaces.is_empty() && self.expose_active => None,
             _ => Some(space),
         }
     }
@@ -2422,6 +2441,21 @@ pub mod tests {
         }
     }
 
+    /// The windows in every raise request sent so far.
+    fn raised_wids(rx: &mut mpsc::UnboundedReceiver<(Span, raise::Event)>) -> Vec<WindowId> {
+        let mut wids = Vec::new();
+        while let Ok((_, event)) = rx.try_recv() {
+            if let raise::Event::RaiseRequest(RaiseRequest {
+                raise_windows, focus_window, ..
+            }) = event
+            {
+                wids.extend(raise_windows.into_iter().flatten());
+                wids.extend(focus_window.map(|(wid, _)| wid));
+            }
+        }
+        wids
+    }
+
     fn layout_windows(reactor: &Reactor, space: SpaceId, screen: CGRect) -> Vec<WindowId> {
         reactor
             .layout
@@ -2498,6 +2532,66 @@ pub mod tests {
         reactor.handle_event(Event::WindowBecameVisible(wid2));
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(layout_windows(&reactor, space1, SCREEN), vec![wid1]);
+    }
+
+    #[test]
+    fn it_waits_for_the_space_of_a_window_created_during_expose() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(one_screen(space1));
+        reactor.handle_events(apps.make_app(1, make_windows(1)));
+        reactor.handle_event(Event::StartupComplete);
+        apps.simulate_until_quiet(&mut reactor);
+        let wid1 = WindowId::new(1, 1);
+        let wid2 = WindowId::new(1, 2);
+        assert_eq!(SCREEN, apps.windows[&wid1].frame);
+
+        // Expose shows space2, where the window server has yet to place the
+        // new window.
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space2)],
+            WindowsOnScreen::default(),
+            ExposeActive(true),
+        ));
+        apps.windows.insert(
+            wid2,
+            testing::WindowState {
+                frame: make_window(2).frame,
+                ..Default::default()
+            },
+        );
+        reactor.handle_event(Event::WindowCreated(
+            wid2,
+            make_window(2),
+            MouseState::Up,
+            Some(ws_info(1, 2, CGRect::ZERO, vec![])),
+        ));
+        reactor.handle_event(Event::WindowBecameVisible(wid2));
+
+        // Expose closes onto space1. The window is on space2.
+        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        reactor.raise_manager_tx = raise_manager_tx;
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space1)],
+            WindowsOnScreen::new(vec![ws_info(1, 1, SCREEN, vec![space1])]),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space1, SCREEN), vec![wid1]);
+        assert_eq!(SCREEN, apps.windows[&wid1].frame);
+        assert_eq!(make_window(2).frame, apps.windows[&wid2].frame);
+        assert!(!raised_wids(&mut raise_manager_rx).contains(&wid2));
+
+        reactor.handle_event(Event::SpaceChanged(
+            vec![Some(space2)],
+            WindowsOnScreen::new(vec![ws_info(1, 2, make_window(2).frame, vec![space2])]),
+            ExposeActive(false),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(layout_windows(&reactor, space2, SCREEN), vec![wid2]);
+        assert_eq!(SCREEN, apps.windows[&wid2].frame);
     }
 
     #[test]

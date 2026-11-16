@@ -396,6 +396,7 @@ impl App {
 /// The accessibility interface of one app.
 pub struct Ax<'a> {
     app: &'a mut App,
+    window_server: &'a WindowServer,
     out: &'a mut Outbox,
 }
 
@@ -404,8 +405,15 @@ impl Ax<'_> {
         &self.app.name
     }
 
-    pub fn windows(&self) -> &[AppWindow] {
-        &self.app.windows
+    /// The app's windows on the desktop being shown, oldest first.
+    ///
+    /// Windows on other desktops and windows not on screen yet are left out,
+    /// but [`Ax::window`] still finds them.
+    pub fn windows(&self) -> impl Iterator<Item = &AppWindow> {
+        let desktop = Some(self.window_server.current_desktop());
+        self.app.windows.iter().filter(move |w| {
+            self.window_server.windows.get(&w.id).and_then(|s| s.desktop) == desktop
+        })
     }
 
     pub fn window(&self, wsid: WindowServerId) -> Option<&AppWindow> {
@@ -557,6 +565,7 @@ impl Mac {
     pub fn ax(&mut self, pid: pid_t) -> Ax<'_> {
         Ax {
             app: self.apps.get_mut(&pid).expect("app is not running"),
+            window_server: &self.window_server,
             out: &mut self.out,
         }
     }

@@ -51,7 +51,8 @@ fn windows_are_tiled_on_the_desktop_they_are_on() {
         sim.run();
         assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
         assert_eq!(sim.tiled(2), ["B1", "B2"], "{schedule:?}");
-        sim.scene().assert("B1").left_of("B2").same_size_as("B2");
+        // Glide can discover B1 and B2 in either order.
+        sim.scene().assert("B1").same_size_as("B2");
     }
 }
 
@@ -166,19 +167,12 @@ fn window_created_in_mission_control_joins_its_desktop_when_placed_first() {
     window_created_in_mission_control(Schedule::MacFirst);
 }
 
-// TODO: Glide tiles the window into the desktop Mission Control was opened
-// from, because the window server reports no desktop for it yet. Closing
-// Mission Control then raises it, which switches to its real desktop.
 #[test]
-#[ignore]
 fn window_created_in_mission_control_joins_its_desktop_when_seen_before_placed() {
     window_created_in_mission_control(Schedule::GlideFirst);
 }
 
-// TODO: Fails for the same reason as the test above, under the orders where
-// Glide sees the window before the window server places it.
 #[test]
-#[ignore]
 fn window_created_in_mission_control_joins_its_desktop_in_any_order() {
     for seed in 1..=200 {
         window_created_in_mission_control(Schedule::Seeded(seed));
@@ -205,11 +199,7 @@ fn focused_window_dragged_to_another_desktop(schedule: Schedule) {
     assert_eq!(sim.tiled(2), ["A2", "B1", "B2"], "{schedule:?}");
 }
 
-// TODO: When Mission Control closes, Glide raises the dragged window along
-// with the ones left on the desktop. The raise gives the dragged window the
-// keyboard focus, which switches to its desktop. This is issue #291.
 #[test]
-#[ignore]
 fn focused_window_dragged_to_another_desktop_in_mission_control() {
     for schedule in SCHEDULES {
         focused_window_dragged_to_another_desktop(schedule);
