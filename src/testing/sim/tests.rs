@@ -11,6 +11,7 @@ use crate::actor::layout::LayoutCommand;
 use crate::model::Direction;
 use crate::sys::app::pid_t;
 
+mod apps;
 mod frames;
 mod harness;
 mod invariants;

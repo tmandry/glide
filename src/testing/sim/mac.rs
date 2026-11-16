@@ -117,6 +117,44 @@ pub enum WorkspaceNotification {
     ActiveSpaceChanged,
 }
 
+/// How a window behaves, beyond what every window does.
+#[derive(Debug, Clone, Default)]
+pub struct WindowTraits {
+    /// The smallest size the app lets the window have.
+    pub min_size: Option<CGSize>,
+    /// The app only lets the window have a size that is a multiple of this,
+    /// as a terminal does with its character cells.
+    pub size_increment: Option<CGSize>,
+}
+
+impl WindowTraits {
+    /// The size the app gives a window that is asked to have `size`: at least
+    /// the minimum, then rounded down to a multiple of the increment, or up
+    /// if that would go below the minimum.
+    fn adjust_size(&self, size: CGSize) -> CGSize {
+        let min = self.min_size.unwrap_or(CGSize::new(0.0, 0.0));
+        let size = CGSize::new(size.width.max(min.width), size.height.max(min.height));
+        let Some(step) = self.size_increment else {
+            return size;
+        };
+        let round = |length: f64, step: f64, min: f64| {
+            if step <= 0.0 {
+                return length;
+            }
+            let rounded = (length / step).floor() * step;
+            if rounded < min {
+                rounded + step
+            } else {
+                rounded
+            }
+        };
+        CGSize::new(
+            round(size.width, step.width, min.width),
+            round(size.height, step.height, min.height),
+        )
+    }
+}
+
 /// Something a process was asked to do to a window through accessibility.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -402,6 +440,7 @@ struct AppWindow {
     id: WindowServerId,
     title: String,
     frame: CGRect,
+    traits: WindowTraits,
     /// Whether the app has been told the window is on the desktop being
     /// shown. Accessibility only lists the app's windows that are.
     shown: bool,
@@ -448,13 +487,22 @@ impl App {
 
     /// Show a new window, which becomes the main window. The app reports the
     /// new main window before the window's creation if `main_first` is set.
-    fn open_window(&mut self, id: WindowServerId, title: &str, main_first: bool, out: &mut Outbox) {
+    fn open_window(
+        &mut self,
+        id: WindowServerId,
+        title: &str,
+        traits: WindowTraits,
+        main_first: bool,
+        out: &mut Outbox,
+    ) {
         let offset = 30.0 * f64::from(id.0);
-        let frame = CGRect::new(CGPoint::new(offset, offset), CGSize::new(400.0, 300.0));
+        let size = traits.adjust_size(CGSize::new(400.0, 300.0));
+        let frame = CGRect::new(CGPoint::new(offset, offset), size);
         self.windows.push(AppWindow {
             id,
             title: title.to_owned(),
             frame,
+            traits,
             // The app puts the window on the desktop it believes is shown.
             // The window server says where it really went.
             shown: true,
@@ -582,7 +630,7 @@ impl App {
                         kAXWindowMovedNotification
                     }
                     (kAXSizeAttribute, Value::Size(size)) => {
-                        window.frame.size = size;
+                        window.frame.size = window.traits.adjust_size(size);
                         kAXWindowResizedNotification
                     }
                     _ => return Err(AXError::AttributeUnsupported),
@@ -687,19 +735,35 @@ impl Mac {
 
     /// Have an app open a window.
     pub fn open_window(&mut self, pid: pid_t, title: &str) -> WindowServerId {
-        self.open_window_ordered(pid, title, false)
+        self.open_window_ordered(pid, title, WindowTraits::default(), false)
     }
 
     /// Have an app open a window, reporting the new main window before the
     /// window's creation.
     pub fn open_window_main_first(&mut self, pid: pid_t, title: &str) -> WindowServerId {
-        self.open_window_ordered(pid, title, true)
+        self.open_window_ordered(pid, title, WindowTraits::default(), true)
     }
 
-    fn open_window_ordered(&mut self, pid: pid_t, title: &str, main_first: bool) -> WindowServerId {
+    /// Have an app open a window that behaves as `traits` say.
+    pub fn open_window_with(
+        &mut self,
+        pid: pid_t,
+        title: &str,
+        traits: WindowTraits,
+    ) -> WindowServerId {
+        self.open_window_ordered(pid, title, traits, false)
+    }
+
+    fn open_window_ordered(
+        &mut self,
+        pid: pid_t,
+        title: &str,
+        traits: WindowTraits,
+        main_first: bool,
+    ) -> WindowServerId {
         let wsid = self.window_server.new_window(pid);
         let app = self.apps.get_mut(&pid).expect("app is not running");
-        app.open_window(wsid, title, main_first, &mut self.out);
+        app.open_window(wsid, title, traits, main_first, &mut self.out);
         self.route();
         wsid
     }

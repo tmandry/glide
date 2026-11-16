@@ -1,0 +1,62 @@
+// Copyright The Glide Authors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Apps that don't behave like the plain windows the other scenarios use.
+
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use test_log::test;
+
+use super::{Harness, screen};
+use crate::testing::sim::{Schedule, WindowTraits};
+
+/// App A has a window A1, and opens A2 with `traits`. Glide is running and
+/// the system has settled.
+fn with_second_window(schedule: Schedule, traits: WindowTraits) -> Harness {
+    let mut sim = Harness::new(schedule, screen(), 1);
+    let a = sim.launch_app("A");
+    sim.open_window(a, "A1");
+    sim.run();
+    sim.start_glide();
+    sim.run();
+    sim.open_window_with(a, "A2", traits);
+    sim.allow_frame_mismatch("A2");
+    sim.run();
+    sim
+}
+
+fn frame(x: f64, y: f64, width: f64, height: f64) -> CGRect {
+    CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+}
+
+#[test]
+fn a_window_wider_than_its_tile_settles() {
+    Schedule::each(|schedule| {
+        let traits = WindowTraits {
+            min_size: Some(CGSize::new(700., 0.)),
+            ..Default::default()
+        };
+        let sim = with_second_window(schedule, traits);
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+        // The app keeps the width it needs and its neighbor keeps its tile,
+        // so the window runs past the edge of the screen.
+        let scene = sim.scene();
+        assert_eq!(scene.frame("A1"), frame(0., 0., 500., 1000.), "{schedule:?}");
+        assert_eq!(scene.frame("A2"), frame(500., 0., 700., 1000.), "{schedule:?}");
+    });
+}
+
+#[test]
+fn a_window_that_rounds_its_size_down_settles() {
+    Schedule::each(|schedule| {
+        let traits = WindowTraits {
+            size_increment: Some(CGSize::new(7., 7.)),
+            ..Default::default()
+        };
+        let sim = with_second_window(schedule, traits);
+        assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+        // The tile is 500 by 1000, which rounds down to 497 by 994.
+        let scene = sim.scene();
+        assert_eq!(scene.frame("A1"), frame(0., 0., 500., 1000.), "{schedule:?}");
+        assert_eq!(scene.frame("A2"), frame(500., 0., 497., 994.), "{schedule:?}");
+    });
+}

@@ -1,6 +1,7 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::collections::BTreeSet;
 use std::ops::{Deref, DerefMut};
 
 use objc2_core_foundation::CGRect;
@@ -11,6 +12,8 @@ use crate::testing::sim::{Schedule, Sim};
 /// A simulation that checks Glide's invariants whenever it settles.
 pub(super) struct Harness {
     pub(super) sim: Sim,
+    /// The windows that may not take the frame Glide gives them.
+    pub(super) frame_mismatch_allowed: BTreeSet<String>,
     /// How many inputs the user had given when the system last settled.
     pub(super) inputs_at_settle: usize,
     /// The length of the selection history when a focus command was the only
@@ -22,6 +25,7 @@ impl Harness {
     pub(super) fn new(schedule: Schedule, screen: CGRect, desktops: usize) -> Harness {
         Harness {
             sim: Sim::new(schedule, screen, desktops),
+            frame_mismatch_allowed: BTreeSet::new(),
             inputs_at_settle: 0,
             focus_command: None,
         }
@@ -50,6 +54,13 @@ impl Harness {
         self.sim.command(command);
         self.focus_command =
             (moves_focus && only_input).then(|| self.sim.selection_history().len());
+    }
+
+    /// Say that the window may not take the frame Glide gives it, because
+    /// its app adjusts frames. The invariants about tiled windows fitting the
+    /// screen without overlapping don't apply to it.
+    pub(super) fn allow_frame_mismatch(&mut self, title: &str) {
+        self.frame_mismatch_allowed.insert(title.to_owned());
     }
 }
 

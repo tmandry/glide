@@ -30,7 +30,7 @@ use std::time::Duration;
 use objc2_core_foundation::CGRect;
 
 use self::glide::{Actor, Glide};
-pub use self::mac::Action;
+pub use self::mac::{Action, WindowTraits};
 use self::mac::{Mac, Notification};
 use crate::actor::layout::LayoutCommand;
 use crate::actor::reactor;
@@ -168,6 +168,11 @@ impl Sim {
     /// before the window's creation.
     pub fn open_window_main_first(&mut self, pid: pid_t, title: &str) {
         self.user().open_window_main_first(pid, title);
+    }
+
+    /// Open a window that adjusts the frame it is given, as `traits` say.
+    pub fn open_window_with(&mut self, pid: pid_t, title: &str, traits: WindowTraits) {
+        self.user().open_window_with(pid, title, traits);
     }
 
     pub fn close_window(&mut self, title: &str) {

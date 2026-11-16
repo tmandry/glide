@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use objc2_core_foundation::CGRect;
 
 use super::Harness;
-use crate::actor::app::WINDOW_NOTIFICATIONS;
+use crate::actor::app::{SET_WINDOW_FRAME_RETRIES, WINDOW_NOTIFICATIONS};
+use crate::actor::reactor::MAX_FRAME_ATTEMPTS;
 use crate::testing::sim::Action;
 
 /// How many accessibility writes Glide may make to one window before the
@@ -59,7 +60,16 @@ impl Harness {
                 *writes.entry(title).or_default() += 1;
             }
         }
-        if let Some((title, n)) = writes.iter().find(|&(_, &n)| n > MAX_WRITES_PER_WINDOW) {
+        // Glide keeps placing a window that doesn't take its frame until it
+        // has given up on it.
+        let max_writes = |title: &str| {
+            if self.frame_mismatch_allowed.contains(title) {
+                MAX_FRAME_ATTEMPTS as usize * SET_WINDOW_FRAME_RETRIES * 2
+            } else {
+                MAX_WRITES_PER_WINDOW
+            }
+        };
+        if let Some((title, n)) = writes.iter().find(|&(&title, &n)| n > max_writes(title)) {
             fail(format!("Glide wrote to {title} {n} times"));
         }
 
@@ -101,13 +111,16 @@ impl Harness {
             ));
         }
 
+        // A window that doesn't take its frame can stick out, overlap its
+        // neighbors or leave a gap.
+        let allowed = |title: &str| self.frame_mismatch_allowed.contains(title);
         let area = |r: &CGRect| r.size.width * r.size.height;
         for (i, (a, frame)) in on_screen.iter().enumerate() {
-            if !contains(&screen, frame) {
+            if !allowed(a) && !contains(&screen, frame) {
                 fail(format!("{a} is partly off screen at {frame:?}"));
             }
             for (b, other) in on_screen.iter().skip(i + 1) {
-                if overlaps(frame, other) {
+                if !allowed(a) && !allowed(b) && overlaps(frame, other) {
                     fail(format!("{a} and {b} overlap"));
                 }
             }
@@ -116,7 +129,10 @@ impl Harness {
         // beside each window.
         let covered: f64 = on_screen.values().map(area).sum();
         let rounding = on_screen.len() as f64 * (screen.size.width + screen.size.height);
-        if !on_screen.is_empty() && covered < area(&screen) - rounding {
+        if on_screen.keys().all(|title| !allowed(title))
+            && !on_screen.is_empty()
+            && covered < area(&screen) - rounding
+        {
             fail("the tiled windows leave part of the screen empty".to_owned());
         }
     }
