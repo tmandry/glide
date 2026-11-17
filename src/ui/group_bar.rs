@@ -13,13 +13,21 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
-use objc2_app_kit::{NSColor, NSEvent, NSView};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::MainThreadMarker;
-use objc2_quartz_core::CALayer;
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSColor, NSEvent, NSFont, NSGlassEffectView, NSImage, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindowOrderingMode,
+};
+use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
+use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_quartz_core::{
+    CALayer, CATextLayer, kCAAlignmentCenter, kCAGravityResizeAspect, kCATruncationEnd,
+};
+use redact::Secret;
 
-use crate::config::{Color, GroupBars};
+use crate::config::{Color, GroupBarStyle, GroupBars};
 use crate::sys::geometry::CGRectExt;
 
 pub trait ColorExt {
@@ -48,6 +56,15 @@ pub struct GroupDisplayData {
     pub selected_index: usize,
     pub frame: CGRect,
     pub is_selected: bool,
+    /// Labels for each segment. May be shorter than `total_count` if some are
+    /// unknown.
+    pub tabs: Vec<TabLabel>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TabLabel {
+    pub title: Secret<String>,
+    pub icon: Option<Retained<NSImage>>,
 }
 
 pub type SegmentClickCallback = Rc<dyn Fn(usize)>;
@@ -59,7 +76,32 @@ pub struct IndicatorState {
     background_layer: Option<Retained<CALayer>>,
     separator_layers: Vec<Retained<CALayer>>,
     selected_layer: Option<Retained<CALayer>>,
+    label_layers: Vec<LabelLayers>,
     click_callback: Option<SegmentClickCallback>,
+}
+
+struct LabelLayers {
+    icon: Retained<CALayer>,
+    title: Retained<CATextLayer>,
+}
+
+impl LabelLayers {
+    fn new(parent_layer: &CALayer) -> Self {
+        let icon = CALayer::layer();
+        // SAFETY: The gravity constant is a valid value for this property.
+        icon.setContentsGravity(unsafe { kCAGravityResizeAspect });
+        let title = CATextLayer::layer();
+        title.setTruncationMode(unsafe { kCATruncationEnd });
+        title.setAlignmentMode(unsafe { kCAAlignmentCenter });
+        parent_layer.addSublayer(&icon);
+        parent_layer.addSublayer(&title);
+        Self { icon, title }
+    }
+
+    fn remove(&self) {
+        self.icon.removeFromSuperlayer();
+        self.title.removeFromSuperlayer();
+    }
 }
 
 objc2::define_class!(
@@ -68,6 +110,12 @@ objc2::define_class!(
     pub struct ClickableIndicatorView;
 
     impl ClickableIndicatorView {
+        // Take the click that activates the window too, so one click selects a tab.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let location = self.convertPoint_fromView(event.locationInWindow(), None);
@@ -92,7 +140,77 @@ objc2::define_class!(
 
 /// NSView wrapper for displaying group indicators using CALayer
 pub struct GroupIndicatorNSView {
+    /// Holds the backdrop (if any) and the indicator view on top of it.
+    root: Retained<NSView>,
+    backdrop: Option<GlassBackdrop>,
     view: Retained<ClickableIndicatorView>,
+    mtm: MainThreadMarker,
+}
+
+/// The material drawn behind the segments when `style = "glass"`.
+enum GlassBackdrop {
+    /// Liquid Glass, macOS 26 and later.
+    Glass(Retained<NSGlassEffectView>),
+    /// A behind-window blur, for earlier versions of macOS.
+    Blur(Retained<NSVisualEffectView>),
+}
+
+impl GlassBackdrop {
+    fn new(frame: CGRect, mtm: MainThreadMarker) -> Self {
+        if AnyClass::get(c"NSGlassEffectView").is_some() {
+            GlassBackdrop::Glass(NSGlassEffectView::initWithFrame(
+                NSGlassEffectView::alloc(mtm),
+                frame,
+            ))
+        } else {
+            let view = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
+            view.setMaterial(NSVisualEffectMaterial::HUDWindow);
+            view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            view.setState(NSVisualEffectState::Active);
+            view.setWantsLayer(true);
+            GlassBackdrop::Blur(view)
+        }
+    }
+
+    fn view(&self) -> &NSView {
+        match self {
+            GlassBackdrop::Glass(v) => v,
+            GlassBackdrop::Blur(v) => v,
+        }
+    }
+
+    /// Glass takes the tint directly. The blur has no tint, so the background
+    /// layer paints over it instead; returns whether that is needed.
+    #[must_use]
+    fn set_appearance(&self, corner_radius: f64, tint: &Color) -> bool {
+        match self {
+            GlassBackdrop::Glass(v) => {
+                v.setCornerRadius(corner_radius);
+                v.setTintColor(Some(&tint.to_nscolor()));
+                false
+            }
+            GlassBackdrop::Blur(v) => {
+                if let Some(layer) = v.layer() {
+                    layer.setCornerRadius(corner_radius);
+                    layer.setMasksToBounds(true);
+                }
+                true
+            }
+        }
+    }
+}
+
+fn fill_superview(view: &NSView) {
+    view.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+}
+
+/// The configured radius, limited to what the bar's shape allows.
+fn corner_radius(config: &GroupBars, bounds: CGRect) -> f64 {
+    config
+        .corner_radius
+        .clamp(0.0, f64::min(bounds.size.width, bounds.size.height) / 2.0)
 }
 
 impl ClickableIndicatorView {
@@ -111,15 +229,11 @@ impl ClickableIndicatorView {
 
         let pct = match group_data.group_kind {
             GroupKind::Horizontal => point.x / bounds.size.width,
-            GroupKind::Vertical => point.y / bounds.size.height,
+            // The first segment is at the top, and y increases upward.
+            GroupKind::Vertical => 1.0 - point.y / bounds.size.height,
         };
         let segment_index = (pct * group_data.total_count as f64).floor() as usize;
-
-        if segment_index < group_data.total_count {
-            Some(segment_index)
-        } else {
-            None
-        }
+        Some(segment_index.min(group_data.total_count - 1))
     }
 }
 
@@ -131,10 +245,13 @@ impl GroupIndicatorNSView {
             background_layer: None,
             separator_layers: Vec::new(),
             selected_layer: None,
+            label_layers: Vec::new(),
             click_callback: None,
         };
         let view = ClickableIndicatorView::alloc(mtm).set_ivars(RefCell::new(state));
-        let view: Retained<_> = unsafe { msg_send![super(view), initWithFrame: frame] };
+        // The view fills `root`, which takes `frame`.
+        let bounds = CGRect::new(CGPoint::ZERO, frame.size);
+        let view: Retained<_> = unsafe { msg_send![super(view), initWithFrame: bounds] };
 
         view.setWantsLayer(true);
         let parent_layer = view.makeBackingLayer();
@@ -143,11 +260,44 @@ impl GroupIndicatorNSView {
         // SAFETY: The mask must not have a superlayer; we use a brand new layer.
         unsafe { parent_layer.setMask(Some(&CALayer::layer())) };
 
-        Self { view }
+        let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        fill_superview(&view);
+        root.addSubview(&view);
+
+        let mut this = Self {
+            root,
+            backdrop: None,
+            view,
+            mtm,
+        };
+        this.update_backdrop();
+        this
     }
 
     pub fn view(&self) -> &NSView {
-        &*self.view
+        &self.root
+    }
+
+    /// Adds or removes the backdrop to match the configured style.
+    fn update_backdrop(&mut self) {
+        let style = self.view.ivars().borrow().config.style;
+        match (style, &self.backdrop) {
+            (GroupBarStyle::Glass, None) => {
+                let backdrop = GlassBackdrop::new(self.root.bounds(), self.mtm);
+                fill_superview(backdrop.view());
+                self.root.addSubview_positioned_relativeTo(
+                    backdrop.view(),
+                    NSWindowOrderingMode::Below,
+                    Some(&self.view),
+                );
+                self.backdrop = Some(backdrop);
+            }
+            (GroupBarStyle::Solid, Some(backdrop)) => {
+                backdrop.view().removeFromSuperview();
+                self.backdrop = None;
+            }
+            _ => {}
+        }
     }
 
     pub fn update(&mut self, group_data: GroupDisplayData) {
@@ -169,6 +319,7 @@ impl GroupIndicatorNSView {
 
     pub fn set_config(&mut self, config: &GroupBars) {
         self.view.ivars().borrow_mut().config = config.clone();
+        self.update_backdrop();
         self.update_layers();
     }
 
@@ -252,6 +403,7 @@ impl GroupIndicatorNSView {
         state.background_layer = None;
         state.separator_layers.clear();
         state.selected_layer = None;
+        state.label_layers.clear();
     }
 
     /// Update the layer structure to match current group data
@@ -277,6 +429,94 @@ impl GroupIndicatorNSView {
         self.update_background_layer(&parent_layer, &group_data, bounds);
         self.update_separator_layers(&parent_layer, &group_data, bounds);
         self.update_selected_layer(&parent_layer, &group_data, bounds);
+        self.update_label_layers(&parent_layer, &group_data, bounds);
+    }
+
+    /// Lays out the icon and title of each tab. Only tabbed groups are labeled.
+    fn update_label_layers(
+        &mut self,
+        parent_layer: &CALayer,
+        group_data: &GroupDisplayData,
+        bounds: CGRect,
+    ) {
+        const PADDING: f64 = 8.0;
+        const ICON_SPACING: f64 = 5.0;
+
+        let scale = self.view.window().map_or(2.0, |w| w.backingScaleFactor());
+        let mut state = self.view.ivars().borrow_mut();
+        let show_titles = state.config.show_titles;
+        let show_icons = state.config.show_icons;
+        let wanted =
+            if (show_titles || show_icons) && group_data.group_kind == GroupKind::Horizontal {
+                group_data.tabs.len().min(group_data.total_count)
+            } else {
+                0
+            };
+        while state.label_layers.len() > wanted {
+            state.label_layers.pop().unwrap().remove();
+        }
+        while state.label_layers.len() < wanted {
+            state.label_layers.push(LabelLayers::new(parent_layer));
+        }
+
+        let font_size = (bounds.size.height * 0.5).clamp(8.0, 14.0);
+        let icon_side = (font_size + 3.0).min(bounds.size.height);
+        let line_height = (font_size * 1.3).min(bounds.size.height);
+        let regular = NSFont::systemFontOfSize(font_size);
+        let bold = NSFont::boldSystemFontOfSize(font_size);
+        let text_color = state.config.text_color;
+        let dimmed_text_color = Color {
+            a: (f64::from(text_color.a) * 0.7) as u8,
+            ..text_color
+        };
+
+        for (index, (layers, tab)) in state.label_layers.iter().zip(&group_data.tabs).enumerate() {
+            let is_active = index == group_data.selected_index;
+            let segment = Self::calculate_segment_frame(group_data, bounds, index);
+            let mut x = segment.origin.x + PADDING;
+            let max_x = segment.max().x - PADDING;
+
+            let icon = tab.icon.as_ref().filter(|_| show_icons);
+            layers.icon.setHidden(icon.is_none());
+            if let Some(icon) = icon {
+                layers.icon.setFrame(CGRect::new(
+                    CGPoint::new(x, segment.mid().y - icon_side / 2.0),
+                    CGSize::new(icon_side, icon_side),
+                ));
+                // SAFETY: CALayer accepts an NSImage as its contents.
+                unsafe { layers.icon.setContents(Some(icon.as_ref() as &AnyObject)) };
+                layers.icon.setOpacity(if is_active { 1.0 } else { 0.7 });
+                x += icon_side + ICON_SPACING;
+            }
+
+            layers.title.setHidden(!show_titles);
+            if show_titles {
+                // Leave the same room on the right as the icon takes on the
+                // left, so the title stays centered in the segment.
+                let right_inset = x - (segment.origin.x + PADDING);
+                let width = (max_x - right_inset - x).max(0.0);
+                layers.title.setFrame(CGRect::new(
+                    CGPoint::new(x, segment.mid().y - line_height / 2.0),
+                    CGSize::new(width, line_height),
+                ));
+                let title = NSString::from_str(tab.title.expose_secret());
+                let font = if is_active { &bold } else { &regular };
+                // SAFETY: NSString and NSFont are toll-free bridged with
+                // CFString and CTFont, which these properties accept.
+                unsafe {
+                    layers.title.setString(Some(&title));
+                    layers.title.setFont(Some(&*(Retained::as_ptr(font) as *const CFType)));
+                }
+                layers.title.setFontSize(font_size);
+                let color = if is_active {
+                    text_color
+                } else {
+                    dimmed_text_color
+                };
+                layers.title.setForegroundColor(Some(&color.to_nscolor().CGColor()));
+                layers.title.setContentsScale(scale);
+            }
+        }
     }
 
     /// Ensure we have the correct number of separator layers
@@ -326,17 +566,23 @@ impl GroupIndicatorNSView {
         } else {
             state.config.inactive_background_color
         };
+        let paint_background = match &self.backdrop {
+            Some(backdrop) => {
+                backdrop.set_appearance(corner_radius(&state.config, bounds), &bg_color)
+            }
+            None => true,
+        };
         let border_color = state.config.border_color.to_nscolor();
-        background_layer.setBackgroundColor(Some(&bg_color.to_nscolor().CGColor()));
+        background_layer.setBackgroundColor(
+            paint_background.then(|| bg_color.to_nscolor().CGColor()).as_deref(),
+        );
         background_layer.setBorderColor(Some(&border_color.CGColor()));
         background_layer.setBorderWidth(state.config.border_width);
 
         // Also update the mask here.
         if let Some(mask) = parent_layer.mask() {
-            // This seems to look the best for a range of sizes.
-            const RADIUS_RATIO: f64 = 2.0 / 3.0;
             mask.setFrame(bounds);
-            mask.setCornerRadius(RADIUS_RATIO * f64::min(bounds.size.width, bounds.size.height));
+            mask.setCornerRadius(corner_radius(&state.config, bounds));
             mask.setBackgroundColor(Some(&NSColor::whiteColor().CGColor()));
         }
     }
@@ -492,6 +738,7 @@ mod tests {
             selected_index: 1,
             frame: bounds,
             is_selected: true,
+            tabs: vec![],
         };
 
         // Test horizontal segments (each segment is 100px wide)
@@ -521,24 +768,30 @@ mod tests {
             selected_index: 2,
             frame: bounds,
             is_selected: true,
+            tabs: vec![],
         };
 
-        // Test vertical segments (each segment is 25px tall)
-        // Segment 0: y 0-25, Segment 1: y 25-50, etc.
+        // Test vertical segments (each segment is 25px tall), which run from
+        // the top of the bar down while y increases upward.
+        // Segment 0: y 75-100, Segment 1: y 50-75, etc.
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 12.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 87.0), &vertical_group),
             Some(0)
         );
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 37.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 62.0), &vertical_group),
             Some(1)
         );
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 62.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 37.0), &vertical_group),
             Some(2)
         );
         assert_eq!(
-            view.segment_at_point(CGPoint::new(298.0, 87.0), &vertical_group),
+            view.segment_at_point(CGPoint::new(298.0, 12.0), &vertical_group),
+            Some(3)
+        );
+        assert_eq!(
+            view.segment_at_point(CGPoint::new(298.0, 0.0), &vertical_group),
             Some(3)
         );
 
