@@ -4,6 +4,7 @@
 //! The WM Controller handles hotkey registration, app launching, and command
 //! dispatch. Space/screen enablement state lives in SpaceManager.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -111,6 +112,8 @@ pub struct WmController {
     sender: self::WeakSender,
     startup_channel_tx: Option<self::StartupToken>,
     login_window_pid: Option<pid_t>,
+    /// Processes an app thread has been spawned for.
+    known_apps: HashSet<pid_t>,
     hotkeys: Option<HotkeyManager>,
     mtm: MainThreadMarker,
 }
@@ -134,6 +137,7 @@ impl WmController {
             sender: sender.downgrade(),
             startup_channel_tx: None,
             login_window_pid: None,
+            known_apps: HashSet::new(),
             hotkeys: None,
             mtm: MainThreadMarker::new().unwrap(),
         };
@@ -183,6 +187,10 @@ impl WmController {
                 self.new_app(pid, info, None);
             }
             AppGloballyActivated(pid) => {
+                // Before startup, the initial scan of running apps is still pending.
+                if self.startup_channel_tx.is_none() && !self.known_apps.contains(&pid) {
+                    self.discover_missed_app(pid);
+                }
                 // Make sure the mouse cursor stays hidden after app switch.
                 self.mouse_tx.send(mouse::Request::EnforceHidden);
                 if let Some(screen_id) = self.get_focused_screen() {
@@ -196,10 +204,12 @@ impl WmController {
             AppGloballyDeactivated(pid) => {
                 if self.login_window_pid == Some(pid) {
                     self.sm_tx.send(space_manager::Event::LoginWindowActive(false));
+                    self.discover_missed_apps();
                 }
                 self.send_reactor_event(reactor::Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
+                self.known_apps.remove(&pid);
                 self.send_reactor_event(reactor::Event::ApplicationTerminated(pid));
             }
             Command(Wm(ToggleSpaceActivated)) => {
@@ -251,6 +261,10 @@ impl WmController {
         if pid == NSRunningApplication::currentApplication().pid() {
             return;
         }
+        if !self.known_apps.insert(pid) {
+            debug!(?pid, "App thread already spawned");
+            return;
+        }
         if info.bundle_id.as_deref() == Some("com.apple.loginwindow") {
             if let Some(prev) = self.login_window_pid {
                 warn!("Multiple loginwindow instances found: {prev:?} and {pid:?}");
@@ -258,6 +272,31 @@ impl WmController {
             self.login_window_pid = Some(pid);
         }
         actor::app::spawn_app_thread(pid, info, self.ws_tx.clone(), startup.clone());
+    }
+
+    /// Spawn app threads for running apps whose launch notification was never
+    /// delivered.
+    fn discover_missed_apps(&mut self) {
+        for (pid, info) in sys::app::running_apps(None) {
+            if !self.known_apps.contains(&pid) {
+                self.spawn_missed_app(pid, info);
+            }
+        }
+    }
+
+    fn discover_missed_app(&mut self, pid: pid_t) {
+        let Some(app) = NSRunningApplication::with_process_id(pid) else {
+            return;
+        };
+        self.spawn_missed_app(pid, AppInfo::from(&*app));
+    }
+
+    fn spawn_missed_app(&mut self, pid: pid_t, info: AppInfo) {
+        if pid == NSRunningApplication::currentApplication().pid() {
+            return;
+        }
+        debug!(?pid, ?info, "Discovered app with no launch notification");
+        self.new_app(pid, info, None);
     }
 
     fn get_focused_screen(&self) -> Option<crate::sys::screen::ScreenId> {
