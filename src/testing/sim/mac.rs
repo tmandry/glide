@@ -446,8 +446,9 @@ impl App {
         }
     }
 
-    /// Show a new window, which becomes the main window.
-    fn open_window(&mut self, id: WindowServerId, title: &str, out: &mut Outbox) {
+    /// Show a new window, which becomes the main window. The app reports the
+    /// new main window before the window's creation if `main_first` is set.
+    fn open_window(&mut self, id: WindowServerId, title: &str, main_first: bool, out: &mut Outbox) {
         let offset = 30.0 * f64::from(id.0);
         let frame = CGRect::new(CGPoint::new(offset, offset), CGSize::new(400.0, 300.0));
         self.windows.push(AppWindow {
@@ -458,6 +459,9 @@ impl App {
             // The window server says where it really went.
             shown: true,
         });
+        if main_first {
+            self.set_main_window(Some(id), out);
+        }
         self.notify(
             ElementId::Application,
             kAXWindowCreatedNotification,
@@ -683,9 +687,19 @@ impl Mac {
 
     /// Have an app open a window.
     pub fn open_window(&mut self, pid: pid_t, title: &str) -> WindowServerId {
+        self.open_window_ordered(pid, title, false)
+    }
+
+    /// Have an app open a window, reporting the new main window before the
+    /// window's creation.
+    pub fn open_window_main_first(&mut self, pid: pid_t, title: &str) -> WindowServerId {
+        self.open_window_ordered(pid, title, true)
+    }
+
+    fn open_window_ordered(&mut self, pid: pid_t, title: &str, main_first: bool) -> WindowServerId {
         let wsid = self.window_server.new_window(pid);
         let app = self.apps.get_mut(&pid).expect("app is not running");
-        app.open_window(wsid, title, &mut self.out);
+        app.open_window(wsid, title, main_first, &mut self.out);
         self.route();
         wsid
     }

@@ -14,6 +14,7 @@ use crate::sys::app::pid_t;
 mod frames;
 mod harness;
 mod invariants;
+mod lifecycle;
 mod slow;
 
 fn screen() -> CGRect {
@@ -310,27 +311,5 @@ fn switching_desktops_raises_nothing_when_the_order_already_matches() {
             "{schedule:?}: {:?}",
             sim.actions()
         );
-    });
-}
-
-// TODO: Fails under GlideFirst. Glide reads B's window list before the window
-// server has put B1 on a desktop, and never lays B1 out. Check whether a real
-// app can list a window the window server hasn't placed, outside Mission
-// Control, before treating this as a bug.
-#[test]
-#[ignore]
-fn windows_of_an_app_launched_later_are_tiled() {
-    Schedule::each(|schedule| {
-        let mut sim = Harness::new(schedule, screen(), 1);
-        let a = sim.launch_app("A");
-        sim.open_window(a, "A1");
-        sim.run();
-        sim.start_glide();
-        sim.run();
-
-        let b = sim.launch_app("B");
-        sim.open_window(b, "B1");
-        sim.run();
-        assert_eq!(sim.tiled(1), ["A1", "B1"], "{schedule:?}");
     });
 }

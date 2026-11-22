@@ -164,6 +164,12 @@ impl Sim {
         self.user().open_window(pid, title);
     }
 
+    /// Have an app open a window, telling Glide about the new main window
+    /// before the window's creation.
+    pub fn open_window_main_first(&mut self, pid: pid_t, title: &str) {
+        self.user().open_window_main_first(pid, title);
+    }
+
     pub fn close_window(&mut self, title: &str) {
         let mut mac = self.user();
         let wsid = mac.window_titled(title);
