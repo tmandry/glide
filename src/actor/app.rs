@@ -132,6 +132,16 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1000);
 /// cancelled. The activation is already in flight at that point.
 const CANCELLED_ACTIVATION_GRACE: Duration = Duration::from_millis(100);
 
+/// Whether a change of the frontmost app or of an app's main window should
+/// leave the layout selection alone.
+///
+/// The reactor selects the frontmost app's new main window unless the change
+/// is quiet. Each raise request carries a `Quiet` value, and the app actor
+/// gives it to the activation and main window changes it attributes to that
+/// raise. Raising windows to put them in front, such as the windows a group
+/// reveals, is quiet, and raising the window to focus is not. Changes the app
+/// actor doesn't attribute to a raise, such as ones the user makes, are never
+/// quiet.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Quiet {
     Yes,
