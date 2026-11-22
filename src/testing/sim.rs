@@ -234,6 +234,9 @@ impl Sim {
                 .map(|(&a, _)| Process::Glide(a)),
         );
         ready.extend(self.glide.woken_apps().map(Process::Glide));
+        if self.glide.raise_timeout_due() {
+            ready.insert(Process::Glide(Actor::RaiseManager));
+        }
         ready.extend(self.mac.borrow().ready().map(Process::Mac));
         let ready: Vec<Process> = ready.into_iter().collect();
         if ready.is_empty() {

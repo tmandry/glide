@@ -18,6 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Wake, Waker};
+use std::time::Duration;
 
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -88,6 +89,7 @@ pub struct Glide {
     space_manager: SpaceManager,
     window_server: WindowServer,
 
+    reactor_tx: reactor::Sender,
     reactor_rx: reactor::Receiver,
     raise_rx: UnboundedReceiver<(Span, raise::Event)>,
     sm_tx: space_manager::Sender,
@@ -135,7 +137,7 @@ impl Glide {
         let space_manager = SpaceManager::new(
             false,
             config,
-            reactor_tx,
+            reactor_tx.clone(),
             ws_tx.clone(),
             wm_tx.clone(),
             status_tx,
@@ -150,6 +152,7 @@ impl Glide {
             raise_manager: RaiseManager::new(),
             space_manager,
             window_server,
+            reactor_tx,
             reactor_rx,
             raise_rx,
             sm_tx,
@@ -218,11 +221,13 @@ impl Glide {
     /// An app actor also runs when its task has been woken without a message
     /// from the simulator, for example by a request the reactor sent on its
     /// channel or by another app actor releasing the raise lock. `message` is
-    /// `None` then, and the task is polled.
+    /// `None` then, and the task is polled. The raise manager runs with no
+    /// message when its timeout for the active sequence has passed.
     pub fn deliver(&mut self, actor: Actor, message: Option<Message>, mac: &Rc<RefCell<Mac>>) {
         let _system = fake::install(Rc::new(mac::System(Rc::clone(mac))));
         let message = match (actor, message) {
             (Actor::App(pid), None) => return self.poll_app(pid),
+            (Actor::RaiseManager, None) => return self.time_out_raise(),
             (_, Some(message)) => message,
             (actor, None) => unreachable!("{actor:?} has no message"),
         };
@@ -341,6 +346,17 @@ impl Glide {
         let waker = Waker::from(Arc::clone(&app.woken));
         if task.as_mut().poll(&mut Context::from_waker(&waker)).is_ready() {
             app.task = None;
+        }
+    }
+
+    /// Whether the raise manager's timer for its active sequence has fired.
+    pub fn raise_timeout_due(&self) -> bool {
+        self.raise_manager.time_to_timeout() == Duration::ZERO
+    }
+
+    fn time_out_raise(&mut self) {
+        if let Some(sequence_id) = self.raise_manager.take_timeout() {
+            self.reactor_tx.send(reactor::Event::RaiseTimeout { sequence_id });
         }
     }
 

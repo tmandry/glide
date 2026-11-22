@@ -40,8 +40,7 @@ fn focus_a1(sim: &Harness) -> LayoutCommand {
 fn focus_moves_to_a_slow_app() {
     Schedule::each(|schedule| {
         let (mut sim, a, _) = two_apps(schedule);
-        // A reports its activation after the app actor has stopped expecting
-        // it.
+        // Glide gives up on raising A1 before A gets to it.
         sim.set_app_delay(a, Duration::from_secs(1));
         let command = focus_a1(&sim);
         sim.command(command);
