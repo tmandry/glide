@@ -303,8 +303,8 @@ impl HotkeyTap {
     /// Start a tap that calls `on_press` from the tap's thread whenever one of
     /// `hotkeys` is pressed, with the value bound to it.
     ///
-    /// The key press is kept from the rest of the system. Repeats from holding
-    /// the key down are passed through without calling `on_press`.
+    /// The key press is kept from the rest of the system, as are the repeats
+    /// from holding the key down. Repeats don't call `on_press`.
     pub fn new<T: Send + 'static>(
         hotkeys: impl IntoIterator<Item = (Hotkey, T)>,
         on_press: impl Fn(Hotkey, &T) + Send + 'static,
@@ -397,9 +397,6 @@ fn on_key_down<T>(
     on_press: &impl Fn(Hotkey, &T),
     event: &CGEvent,
 ) -> Disposition {
-    if CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventAutorepeat) != 0 {
-        return Disposition::Pass;
-    }
     let keycode = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
     let Some(candidates) = u16::try_from(keycode).ok().and_then(|k| bindings.get(&k)) else {
         return Disposition::Pass;
@@ -407,7 +404,10 @@ fn on_key_down<T>(
     let pressed = pressed_modifiers(CGEvent::flags(Some(event)));
     match candidates.iter().find(|(hotkey, _)| hotkey.modifiers.matches(pressed)) {
         Some((hotkey, value)) => {
-            on_press(*hotkey, value);
+            if CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventAutorepeat) == 0
+            {
+                on_press(*hotkey, value);
+            }
             Disposition::Consume
         }
         None => Disposition::Pass,
@@ -672,6 +672,33 @@ mod tests {
         };
         assert_eq!(first_match(Modifiers::ALT_LEFT), Some(2));
         assert_eq!(first_match(Modifiers::ALT_RIGHT), Some(1));
+    }
+
+    #[test]
+    fn autorepeat_is_consumed_without_a_press() {
+        let bindings = bindings_by_keycode([(hotkey("Alt + H"), ())]);
+        let presses = std::cell::Cell::new(0);
+        let on_press = |_: Hotkey, _: &()| presses.set(presses.get() + 1);
+        let key_down = |keycode: u16, autorepeat: bool| {
+            let event = CGEvent::new_keyboard_event(None, keycode, true).unwrap();
+            CGEvent::set_flags(
+                Some(&event),
+                CGEventFlags::MaskAlternate | CGEventFlags(device_flags::LEFT_ALT),
+            );
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::KeyboardEventAutorepeat,
+                autorepeat.into(),
+            );
+            event
+        };
+
+        let d = on_key_down(&bindings, &on_press, &key_down(0x04, false));
+        assert_eq!((d, presses.get()), (Disposition::Consume, 1));
+        let d = on_key_down(&bindings, &on_press, &key_down(0x04, true));
+        assert_eq!((d, presses.get()), (Disposition::Consume, 1));
+        let d = on_key_down(&bindings, &on_press, &key_down(0x26, true));
+        assert_eq!((d, presses.get()), (Disposition::Pass, 1));
     }
 
     #[test]
