@@ -282,7 +282,8 @@ impl Serialize for Hotkey {
 impl<'de> Deserialize<'de> for Hotkey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        s.parse()
+            .map_err(|err| serde::de::Error::custom(format!("Could not parse hotkey {s:?}: {err}")))
     }
 }
 
