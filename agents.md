@@ -117,6 +117,13 @@ against an alternative that was considered, is noise.
 
 Break changes into small and atomic commits. When a feature requires a refactor, do the refactor first in a commit that builds with passing tests. Always run the formatter before making a commit.
 
+If a commit both adds a capability to a lower layer, e.g. a new `sys` wrapper,
+and uses it, split the capability into its own commit first. Before a branch is
+merged, squash each fix into the commit that introduced the problem; only a bug
+that's already on `main` gets its own `fix:` commit. Every commit should build
+and pass tests; `scripts/check-each-commit.sh` checks this. The
+`polish-branch` skill does all of this, along with an outside review.
+
 For user-facing changes, use commit message prefixes like `feat`, `fix`, `docs`, `improve`, and `perf`. The first line of each message goes into the release notes, categorized by prefix. Use Github conventions to reference issues. For example:
 
 ```
