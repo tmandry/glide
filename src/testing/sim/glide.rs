@@ -24,6 +24,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::Span;
 
+use super::FocusReport;
 use super::mac::{self, Mac, Notification, WorkspaceNotification};
 use crate::actor::layout::LayoutManager;
 use crate::actor::raise::{self, RaiseManager};
@@ -109,6 +110,7 @@ pub struct Glide {
     /// The apps the WmController has started an actor for.
     known_apps: BTreeSet<pid_t>,
     raise_lock: app::RaiseLock,
+    reported_focus: Vec<FocusReport>,
     /// The title of each window the reactor's selection moved to on the
     /// desktop being shown.
     selection_history: Vec<String>,
@@ -162,6 +164,7 @@ impl Glide {
             sm_rx,
             ws_tx,
             raise_lock: app::RaiseLock::default(),
+            reported_focus: Vec::new(),
             selection_history: Vec::new(),
             ws_rx,
             _unread: (wm_rx, status_rx, group_bars_rx, mouse_rx, skylight_rx),
@@ -238,6 +241,20 @@ impl Glide {
         match (actor, message) {
             // The real actors.
             (Actor::Reactor, Message::Reactor(event)) => {
+                let report = {
+                    let mac = mac.borrow();
+                    match event {
+                        reactor::Event::ApplicationActivated(pid, quiet) => {
+                            mac.app_name(pid).map(|name| FocusReport::App(name.to_owned(), quiet))
+                        }
+                        reactor::Event::ApplicationMainWindowChanged(_, Some(wid), quiet) => wid
+                            .wsid()
+                            .and_then(|wsid| mac.title(wsid))
+                            .map(|title| FocusReport::Window(title.to_owned(), quiet)),
+                        _ => None,
+                    }
+                };
+                self.reported_focus.extend(report);
                 self.reactor.handle_event_at_time(event, fake::now());
                 self.record_selection(&mac.borrow());
             }
@@ -399,6 +416,10 @@ impl Glide {
 
     pub fn selection_history(&self) -> &[String] {
         &self.selection_history
+    }
+
+    pub fn reported_focus(&self) -> &[FocusReport] {
+        &self.reported_focus
     }
 
     pub fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {

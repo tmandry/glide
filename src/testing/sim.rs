@@ -32,9 +32,11 @@ use objc2_core_foundation::CGRect;
 use self::glide::{Actor, Glide};
 pub use self::mac::{Action, WindowTraits};
 use self::mac::{Mac, Notification};
+pub use crate::actor::app::Quiet;
 use crate::actor::layout::LayoutCommand;
 use crate::actor::reactor;
 use crate::sys::app::pid_t;
+use crate::sys::ax::fake;
 use crate::testing::scene::Scene;
 
 /// Something with an inbox and its own event loop.
@@ -66,6 +68,12 @@ impl Schedule {
     /// than 1.
     pub fn each(scenario: impl Fn(Schedule) + Sync) {
         Schedule::sweep(16, scenario);
+    }
+
+    /// Like [`Schedule::each`] with 8 seeded schedules, for a scenario that is
+    /// run many times to vary something else as well.
+    pub fn sample(scenario: impl Fn(Schedule) + Sync) {
+        Schedule::sweep(8, scenario);
     }
 
     fn sweep(seeds: u64, scenario: impl Fn(Schedule) + Sync) {
@@ -114,6 +122,15 @@ fn env_u64(name: &str) -> Option<u64> {
             .parse()
             .unwrap_or_else(|_| panic!("{name} must be a number, not {value:?}")),
     )
+}
+
+/// A change of keyboard focus as one of Glide's app actors reported it: an
+/// app became active, or a window became its app's main window, with the
+/// [`Quiet`] value the actor gave the change.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FocusReport {
+    App(String, Quiet),
+    Window(String, Quiet),
 }
 
 pub struct Sim {
@@ -225,6 +242,24 @@ impl Sim {
     /// request.
     pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
         self.mac.borrow_mut().set_app_delay(pid, delay);
+    }
+
+    /// Make Glide's requests to give one of an app's windows the keyboard
+    /// focus silently do nothing, as activations sometimes do, or work again.
+    pub fn set_ignores_make_key(&mut self, pid: pid_t, ignores: bool) {
+        self.mac.borrow_mut().set_ignores_make_key(pid, ignores);
+    }
+
+    /// Let time pass, then let what was waiting for it run until every inbox
+    /// is empty.
+    pub fn wait(&mut self, duration: Duration) {
+        fake::sleep(duration);
+        self.run();
+    }
+
+    /// The pid of the app with this name.
+    pub fn app(&self, name: &str) -> pid_t {
+        self.mac.borrow().app_named(name)
     }
 
     pub fn open_mission_control(&mut self) {
@@ -363,6 +398,14 @@ impl Sim {
         }
         let wid = self.glide.selected_window(space)?;
         Some(mac.title(wid.wsid()?)?.to_owned())
+    }
+
+    /// What Glide's app actors told the reactor about the keyboard focus, in
+    /// the order the reactor heard it. This is the app actors' output, for
+    /// scenarios about how they attribute focus changes; other scenarios check
+    /// what the user sees.
+    pub fn focus_reports_from_app_actors(&self) -> &[FocusReport] {
+        self.glide.reported_focus()
     }
 
     /// Each window Glide's selection moved to, in order, on whichever desktop

@@ -16,6 +16,7 @@ mod frames;
 mod harness;
 mod invariants;
 mod lifecycle;
+mod raises;
 mod slow;
 
 fn screen() -> CGRect {

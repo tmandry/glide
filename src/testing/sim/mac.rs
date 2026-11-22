@@ -25,7 +25,7 @@
 //! [`Mac::next_notification`].
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -201,6 +201,9 @@ pub struct WindowServer {
     order: Vec<WindowServerId>,
     frontmost: Option<pid_t>,
     next_wsid: u32,
+    /// The apps whose windows silently don't take the keyboard focus when a
+    /// process outside macOS asks.
+    ignores_make_key: BTreeSet<pid_t>,
 }
 
 struct ServerWindow {
@@ -222,6 +225,7 @@ impl WindowServer {
             order: Vec::new(),
             frontmost: None,
             next_wsid: 1,
+            ignores_make_key: BTreeSet::new(),
         }
     }
 
@@ -334,6 +338,9 @@ impl WindowServer {
                 let Some(window) = self.windows.get(&wsid) else {
                     return;
                 };
+                if self.ignores_make_key.contains(&window.pid) {
+                    return;
+                }
                 let (pid, desktop) = (window.pid, window.desktop);
                 self.activate(pid, out);
                 // The desktop of the window with the keyboard focus is shown.
@@ -891,6 +898,16 @@ impl Mac {
         self.apps.get_mut(&pid).expect("app is not running").hung = hung;
     }
 
+    /// Make requests from outside macOS to give one of an app's windows the
+    /// keyboard focus silently do nothing, or work again.
+    pub fn set_ignores_make_key(&mut self, pid: pid_t, ignores: bool) {
+        if ignores {
+            self.window_server.ignores_make_key.insert(pid);
+        } else {
+            self.window_server.ignores_make_key.remove(&pid);
+        }
+    }
+
     /// Make an app take `delay` to handle each message and accessibility
     /// request, as a busy app does.
     pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
@@ -1030,6 +1047,13 @@ impl Mac {
 
     pub fn bundle_id(&self, pid: pid_t) -> Option<String> {
         self.apps.get(&pid).map(|app| format!("com.example.{}", app.name))
+    }
+
+    pub fn app_named(&self, name: &str) -> pid_t {
+        let mut apps = self.apps.values().filter(|app| app.name == name);
+        let app = apps.next().unwrap_or_else(|| panic!("no app named {name}"));
+        assert!(apps.next().is_none(), "more than one app named {name}");
+        app.pid
     }
 
     pub fn app_name(&self, pid: pid_t) -> Option<&str> {
