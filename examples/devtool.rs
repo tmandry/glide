@@ -19,12 +19,12 @@ use glide_wm::actor::{self, reactor};
 use glide_wm::sys::app::{AXUIElementExt, AppInfo, NSRunningApplicationExt, WindowInfo};
 use glide_wm::sys::event::{self, get_mouse_pos};
 use glide_wm::sys::executor::Executor;
+use glide_wm::sys::hotkey::{Hotkey, HotkeyTap};
 use glide_wm::sys::screen::{self, ScreenCache};
 use glide_wm::sys::window_server::{
     self, SkylightConnection, WindowServerId, get_window, kCGSWindowCreated,
 };
 use glide_wm::sys::{self};
-use livesplit_hotkey::{ConsumePreference, Modifiers};
 use objc2_app_kit::{
     NSRunningApplication, NSScreen, NSWindow, NSWindowNumberListOptions, NSWorkspace,
 };
@@ -637,14 +637,9 @@ async fn run_app_actor(pid_or_bundle: String) -> anyhow::Result<()> {
 
 fn inspect(mtm: MainThreadMarker) {
     let (tx, rx) = unbounded_channel();
-    let hook =
-        livesplit_hotkey::Hook::with_consume_preference(ConsumePreference::MustConsume).unwrap();
-    let key = livesplit_hotkey::Hotkey {
-        key_code: livesplit_hotkey::KeyCode::KeyI,
-        modifiers: Modifiers::ALT | Modifiers::SHIFT,
-    };
-    hook.register(key, move || _ = tx.send(())).unwrap();
-    println!("Press {key:?} to inspect the window under the mouse");
+    let key: Hotkey = "Alt + Shift + KeyI".parse().unwrap();
+    let _tap = HotkeyTap::new([(key, ())], move |_, ()| _ = tx.send(())).unwrap();
+    println!("Press {key} to inspect the window under the mouse");
     Executor::run(inspect_inner(rx, mtm));
 }
 

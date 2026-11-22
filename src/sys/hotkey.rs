@@ -10,9 +10,20 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 
 use keycode::{KeyMap, KeyMappingCode};
+use objc2_core_foundation::CFRunLoop;
+use objc2_core_graphics::{
+    CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventTapPlacement, CGEventType,
+};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tracing::warn;
+
+use super::event_tap::{CreateError, Disposition, EventTap};
+use super::run_loop::WakeupHandle;
 
 /// A key together with the modifiers that must be held when it is pressed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,6 +56,25 @@ pub enum ParseError {
 }
 
 impl KeyCode {
+    /// Return whether this is a modifier key, which macOS doesn't report with
+    /// key-down events.
+    fn is_modifier(self) -> bool {
+        use KeyMappingCode::*;
+        matches!(
+            self.0,
+            ShiftLeft
+                | ShiftRight
+                | ControlLeft
+                | ControlRight
+                | AltLeft
+                | AltRight
+                | MetaLeft
+                | MetaRight
+                | CapsLock
+                | Fn
+        )
+    }
+
     /// The macOS virtual keycode of this key, or `None` if Mac keyboards don't
     /// have it.
     pub fn mac_keycode(self) -> Option<u16> {
@@ -181,6 +211,158 @@ impl<'de> Deserialize<'de> for Hotkey {
     }
 }
 
+/// A tap that consumes key presses matching a set of hotkeys.
+///
+/// The system holds up every key press until the tap has looked at it, so the
+/// tap runs on a thread of its own. Dropping the `HotkeyTap` stops the tap and
+/// waits for its thread to exit.
+pub struct HotkeyTap {
+    stop: WakeupHandle,
+    thread: Option<JoinHandle<()>>,
+}
+
+type Bindings<T> = FxHashMap<u16, Vec<(Hotkey, T)>>;
+
+impl HotkeyTap {
+    /// Start a tap that calls `on_press` from the tap's thread whenever one of
+    /// `hotkeys` is pressed, with the value bound to it.
+    ///
+    /// The key press is kept from the rest of the system. Repeats from holding
+    /// the key down are passed through without calling `on_press`.
+    pub fn new<T: Send + 'static>(
+        hotkeys: impl IntoIterator<Item = (Hotkey, T)>,
+        on_press: impl Fn(Hotkey, &T) + Send + 'static,
+    ) -> Result<Self, CreateError> {
+        let bindings = bindings_by_keycode(hotkeys);
+        let (tx, rx) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("hotkeys".into())
+            .spawn(move || {
+                let tap = EventTap::new_active(
+                    CGEventTapLocation::SessionEventTap,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    &[CGEventType::KeyDown],
+                    move |_, event| on_key_down(&bindings, &on_press, event),
+                );
+                let tap = match tap {
+                    Ok(tap) => tap,
+                    Err(err) => {
+                        _ = tx.send(Err(err));
+                        return;
+                    }
+                };
+                let stop = WakeupHandle::for_current_thread(0, || {
+                    CFRunLoop::current().expect("no current run loop").stop();
+                });
+                _ = tx.send(Ok(stop));
+                CFRunLoop::run();
+                drop(tap);
+            })
+            .expect("failed to spawn the hotkey thread");
+        match rx.recv().expect("hotkey thread exited without reporting") {
+            Ok(stop) => Ok(HotkeyTap { stop, thread: Some(thread) }),
+            Err(err) => {
+                _ = thread.join();
+                Err(err)
+            }
+        }
+    }
+}
+
+impl Drop for HotkeyTap {
+    fn drop(&mut self) {
+        self.stop.wake();
+        if let Some(thread) = self.thread.take() {
+            _ = thread.join();
+        }
+    }
+}
+
+fn bindings_by_keycode<T>(hotkeys: impl IntoIterator<Item = (Hotkey, T)>) -> Bindings<T> {
+    let mut bindings = Bindings::<T>::default();
+    for (hotkey, value) in hotkeys {
+        let Some(keycode) = hotkey.key_code.mac_keycode() else {
+            warn!("Ignoring hotkey {hotkey}: Mac keyboards don't have this key");
+            continue;
+        };
+        if hotkey.key_code.is_modifier() {
+            warn!("Ignoring hotkey {hotkey}: a modifier key can't be the key of a hotkey");
+            continue;
+        }
+        let entry = bindings.entry(keycode).or_default();
+        if entry.iter().any(|(bound, _)| bound.modifiers == hotkey.modifiers) {
+            warn!("Ignoring hotkey {hotkey}: it is bound more than once");
+            continue;
+        }
+        entry.push((hotkey, value));
+    }
+    bindings
+}
+
+fn on_key_down<T>(
+    bindings: &Bindings<T>,
+    on_press: &impl Fn(Hotkey, &T),
+    event: &CGEvent,
+) -> Disposition {
+    if CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventAutorepeat) != 0 {
+        return Disposition::Pass;
+    }
+    let keycode = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+    let Some(candidates) = u16::try_from(keycode).ok().and_then(|k| bindings.get(&k)) else {
+        return Disposition::Pass;
+    };
+    let pressed = pressed_modifiers(CGEvent::flags(Some(event)));
+    match candidates.iter().find(|(hotkey, _)| hotkey.modifiers == pressed) {
+        Some((hotkey, value)) => {
+            on_press(*hotkey, value);
+            Disposition::Consume
+        }
+        None => Disposition::Pass,
+    }
+}
+
+/// Device-dependent flags for the left and right modifier keys, from
+/// `IOLLEvent.h`.
+mod device_flags {
+    pub const LEFT_CONTROL: u64 = 0x0000_0001;
+    pub const LEFT_SHIFT: u64 = 0x0000_0002;
+    pub const RIGHT_SHIFT: u64 = 0x0000_0004;
+    pub const LEFT_COMMAND: u64 = 0x0000_0008;
+    pub const RIGHT_COMMAND: u64 = 0x0000_0010;
+    pub const LEFT_ALT: u64 = 0x0000_0020;
+    pub const RIGHT_ALT: u64 = 0x0000_0040;
+    pub const RIGHT_CONTROL: u64 = 0x0000_2000;
+}
+
+fn pressed_modifiers(flags: CGEventFlags) -> Modifiers {
+    use device_flags::*;
+    let groups = [
+        (
+            Modifiers::SHIFT,
+            CGEventFlags::MaskShift,
+            LEFT_SHIFT | RIGHT_SHIFT,
+        ),
+        (
+            Modifiers::CONTROL,
+            CGEventFlags::MaskControl,
+            LEFT_CONTROL | RIGHT_CONTROL,
+        ),
+        (Modifiers::ALT, CGEventFlags::MaskAlternate, LEFT_ALT | RIGHT_ALT),
+        (
+            Modifiers::META,
+            CGEventFlags::MaskCommand,
+            LEFT_COMMAND | RIGHT_COMMAND,
+        ),
+    ];
+    let mut modifiers = Modifiers::empty();
+    for (modifier, mask, device) in groups {
+        if flags.0 & (mask.0 | device) != 0 {
+            modifiers |= modifier;
+        }
+    }
+    modifiers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +459,40 @@ mod tests {
     #[test]
     fn keys_missing_on_mac_parse_without_a_keycode() {
         assert_eq!(hotkey("F24").key_code.mac_keycode(), None);
+    }
+
+    #[test]
+    fn pressed_modifiers_read_either_kind_of_flag() {
+        let flags = CGEventFlags(
+            CGEventFlags::MaskAlternate.0 | CGEventFlags::MaskShift.0 | device_flags::LEFT_SHIFT,
+        );
+        assert_eq!(pressed_modifiers(flags), Modifiers::ALT | Modifiers::SHIFT);
+        let flags = CGEventFlags(device_flags::RIGHT_CONTROL | CGEventFlags::MaskAlphaShift.0);
+        assert_eq!(pressed_modifiers(flags), Modifiers::CONTROL);
+    }
+
+    #[test]
+    fn duplicate_bindings_keep_the_first() {
+        let bindings = bindings_by_keycode([
+            (hotkey("Alt + H"), 1),
+            (hotkey("Option + KeyH"), 2),
+            (hotkey("Alt + Shift + H"), 3),
+            (hotkey("F24"), 4),
+        ]);
+        assert_eq!(bindings.len(), 1);
+        let values: Vec<_> = bindings[&0x04].iter().map(|(_, v)| *v).collect();
+        assert_eq!(values, [1, 3]);
+    }
+
+    #[test]
+    fn modifier_keys_are_not_bound() {
+        let bindings = bindings_by_keycode([
+            (hotkey("ShiftLeft"), 1),
+            (hotkey("Ctrl + AltRight"), 2),
+            (hotkey("CapsLock"), 3),
+            (hotkey("Fn"), 4),
+        ]);
+        assert!(bindings.is_empty());
     }
 
     #[test]
