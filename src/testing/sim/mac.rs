@@ -69,8 +69,9 @@ pub enum Message {
     DestroyWindow(WindowServerId),
     /// From an app: the window has this frame now.
     SetFrame(WindowServerId, CGRect),
-    /// From an app: bring the window to the front.
-    OrderFront(WindowServerId),
+    /// From an app: bring the window in front of every other window, or only
+    /// in front of the app's other windows on screen if `false`.
+    OrderFront(WindowServerId, bool),
     /// From an app: the window was minimized to the Dock, or restored from it.
     /// A restored window comes to the front and its app is activated.
     SetMinimized(WindowServerId, bool),
@@ -297,22 +298,22 @@ impl WindowServer {
                     window.frame = frame;
                 }
             }
-            Message::OrderFront(wsid) => {
+            Message::OrderFront(wsid, in_front_of_all) => {
                 let Some(window) = self.windows.get(&wsid) else {
                     return;
                 };
                 let Some(at) = self.order.iter().position(|&w| w == wsid) else {
                     return;
                 };
-                // The window goes in front of everything if its app is
-                // frontmost, and in front of its app's other windows if not.
-                let pid = window.pid;
-                let to = if self.frontmost == Some(pid) {
+                let (pid, desktop) = (window.pid, window.desktop);
+                self.order.remove(at);
+                let to = if in_front_of_all {
                     0
                 } else {
-                    self.order.iter().position(|w| self.windows[w].pid == pid).unwrap()
+                    let on_screen =
+                        |w: &ServerWindow| w.pid == pid && w.desktop == desktop && !w.minimized;
+                    self.order.iter().position(|w| on_screen(&self.windows[w])).unwrap_or(at)
                 };
-                self.order.remove(at);
                 self.order.insert(to, wsid);
             }
             Message::SetMinimized(wsid, minimized) => {
@@ -707,7 +708,12 @@ impl App {
             Request::PerformAction(Window(id), name) if name == kAXRaiseAction => {
                 let wsid = self.window_mut(id)?.id;
                 self.set_main_window(Some(wsid), out);
-                out.send(Process::WindowServer, Message::OrderFront(wsid));
+                // The window only comes in front of other apps' windows if the
+                // app has been told it is active. This hasn't been checked on
+                // real macOS. Glide waits for the app's activation notification
+                // before it raises, since that is the only event it can wait
+                // on for the change.
+                out.send(Process::WindowServer, Message::OrderFront(wsid, self.active));
                 return Ok(None);
             }
             Request::WindowId(Window(id)) => Value::Number(self.window_mut(id)?.id.0),

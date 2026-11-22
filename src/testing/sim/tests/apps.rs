@@ -9,7 +9,8 @@ use test_log::test;
 
 use super::{Harness, screen};
 use crate::actor::layout::LayoutCommand;
-use crate::testing::sim::{Schedule, WindowTraits};
+use crate::model::Direction;
+use crate::testing::sim::{Action, Schedule, WindowTraits};
 
 /// App A has a window A1, and opens A2 with `traits`. Glide is running and
 /// the system has settled.
@@ -172,5 +173,51 @@ fn raising_a_dialog_gives_it_the_keyboard_focus() {
         sim.run();
         assert_eq!(sim.key_window().as_deref(), Some("D"), "{schedule:?}");
         assert_eq!(sim.tiled(1), ["A1", "A2"], "{schedule:?}");
+    });
+}
+
+// TODO: Fails under every schedule. Glide doesn't wait for B to be activated
+// before raising a dialog, so the raise only puts D in front of B's other
+// windows and D stays behind A1 and A2. Check whether activating the app with
+// a window brings that window forward on real macOS before treating this as a
+// bug.
+#[test]
+#[ignore]
+fn a_raised_dialog_comes_to_the_front() {
+    Schedule::each(|schedule| {
+        let mut sim = dialog_and_two_windows(schedule);
+        sim.command(LayoutCommand::ToggleFocusFloating);
+        sim.run();
+        sim.scene().assert("D").in_front_of("A1").in_front_of("A2");
+    });
+}
+
+#[test]
+fn raising_a_standard_window_waits_for_its_app_to_activate() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        let b = sim.launch_app("B");
+        sim.open_window(b, "B1");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+        assert_eq!(sim.key_window().as_deref(), Some("B1"), "{schedule:?}");
+        // Glide can discover the two apps in either order.
+        let scene = sim.scene();
+        let direction = if scene.frame("A1").origin.x < scene.frame("B1").origin.x {
+            Direction::Left
+        } else {
+            Direction::Right
+        };
+        sim.clear_actions();
+        sim.command(LayoutCommand::MoveFocus(direction));
+        sim.run();
+        assert_eq!(sim.key_window().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.actions(), [Action::Raised("A1".into())], "{schedule:?}");
+        // The raise brings A1 in front of other apps' windows only once A is
+        // active.
+        sim.scene().assert("A1").in_front_of("B1");
     });
 }
