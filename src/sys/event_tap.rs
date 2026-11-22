@@ -1,7 +1,7 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Safe wrapper around listen-only `CGEventTap`s.
+//! Safe wrapper around `CGEventTap`s.
 //!
 //! ## Example
 //!
@@ -25,7 +25,7 @@
 use std::cell::{Cell, OnceCell};
 use std::ffi::c_void;
 use std::fmt;
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::rc::Rc;
 
 use objc2_core_foundation::{
@@ -51,7 +51,7 @@ impl fmt::Display for CreateError {
 
 impl std::error::Error for CreateError {}
 
-/// A listen-only tap on the system event stream.
+/// A tap on the system event stream.
 ///
 /// The tap is attached to the run loop of the thread that creates it, and its
 /// callback is called from that run loop while it is running. Dropping the tap
@@ -94,6 +94,15 @@ struct Callback<F> {
     func: F,
 }
 
+/// What an active tap does with an event it was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    /// Deliver the event on to the rest of the system.
+    Pass,
+    /// Discard the event.
+    Consume,
+}
+
 impl EventTap {
     /// Create a listen-only tap for the given event types on the current
     /// thread's run loop.
@@ -113,6 +122,48 @@ impl EventTap {
     ) -> Result<Self, CreateError>
     where
         F: Fn(CGEventType, &CGEvent) + 'static,
+    {
+        Self::create(
+            location,
+            placement,
+            CGEventTapOptions::ListenOnly,
+            events,
+            move |event_type, event| {
+                callback(event_type, event);
+                Disposition::Pass
+            },
+        )
+    }
+
+    /// Create an active tap for the given event types on the current thread's
+    /// run loop.
+    ///
+    /// The callback decides whether each event is passed on or consumed. The
+    /// system holds up the events the tap subscribed to until the callback
+    /// returns, so it must return quickly.
+    ///
+    /// Otherwise this behaves like [`EventTap::new`].
+    pub fn new_active<F>(
+        location: CGEventTapLocation,
+        placement: CGEventTapPlacement,
+        events: &[CGEventType],
+        callback: F,
+    ) -> Result<Self, CreateError>
+    where
+        F: Fn(CGEventType, &CGEvent) -> Disposition + 'static,
+    {
+        Self::create(location, placement, CGEventTapOptions::Default, events, callback)
+    }
+
+    fn create<F>(
+        location: CGEventTapLocation,
+        placement: CGEventTapPlacement,
+        options: CGEventTapOptions,
+        events: &[CGEventType],
+        callback: F,
+    ) -> Result<Self, CreateError>
+    where
+        F: Fn(CGEventType, &CGEvent) -> Disposition + 'static,
     {
         let mask = events.iter().fold(0 as CGEventMask, |mask, event_type| {
             let bit = 1u64
@@ -138,7 +189,7 @@ impl EventTap {
             CGEvent::tap_create(
                 location,
                 placement,
-                CGEventTapOptions::ListenOnly,
+                options,
                 mask,
                 Some(tap_callback::<F>),
                 callback as *mut c_void,
@@ -229,7 +280,7 @@ unsafe extern "C-unwind" fn tap_callback<F>(
     info: *mut c_void,
 ) -> *mut CGEvent
 where
-    F: Fn(CGEventType, &CGEvent) + 'static,
+    F: Fn(CGEventType, &CGEvent) -> Disposition + 'static,
 {
     // SAFETY: `info` is the `user_info` we passed to `tap_create`, which is a
     // pointer to a `Callback<F>` that is kept alive for as long as this
@@ -264,9 +315,12 @@ where
     let was_in_callback = callback.shared.in_callback.replace(true);
     // SAFETY: The system passes an event that is valid for the duration of the
     // callback. We do not hold on to the reference past this call.
-    (callback.func)(event_type, unsafe { event.as_ref() });
+    let disposition = (callback.func)(event_type, unsafe { event.as_ref() });
     callback.shared.in_callback.set(was_in_callback);
-    // Return the event unchanged to pass it through without transferring
-    // ownership. Listen-only taps ignore the return value.
-    event.as_ptr()
+    match disposition {
+        // Return the event unchanged to pass it through without transferring
+        // ownership. Listen-only taps ignore the return value.
+        Disposition::Pass => event.as_ptr(),
+        Disposition::Consume => ptr::null_mut(),
+    }
 }
