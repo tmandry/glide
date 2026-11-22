@@ -62,7 +62,7 @@ bitflags::bitflags! {
 const MODIFIER_KEYS: [(&str, Modifiers, Modifiers); 4] = [
     ("Ctrl", Modifiers::CONTROL_LEFT, Modifiers::CONTROL_RIGHT),
     ("Alt", Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT),
-    ("Meta", Modifiers::META_LEFT, Modifiers::META_RIGHT),
+    ("Cmd", Modifiers::META_LEFT, Modifiers::META_RIGHT),
     ("Shift", Modifiers::SHIFT_LEFT, Modifiers::SHIFT_RIGHT),
 ];
 
@@ -523,7 +523,7 @@ mod tests {
     fn display_is_canonical() {
         assert_eq!(
             hotkey("Shift + Meta + Option + Ctrl + H").to_string(),
-            "Ctrl + Alt + Meta + Shift + KeyH"
+            "Ctrl + Alt + Cmd + Shift + KeyH"
         );
         assert_eq!(hotkey("1").to_string(), "Digit1");
     }
@@ -533,7 +533,7 @@ mod tests {
         for s in [
             "Alt + KeyH",
             "Ctrl + Alt + Equal",
-            "Meta + Shift + ArrowLeft",
+            "Cmd + Shift + ArrowLeft",
             "PageUp",
         ] {
             assert_eq!(hotkey(s).to_string(), s);
@@ -593,7 +593,7 @@ mod tests {
         for s in [
             "CtrlRight + Alt + KeyK",
             "AltLeft + KeyA",
-            "MetaRight + ShiftLeft + Digit1",
+            "CmdRight + ShiftLeft + Digit1",
         ] {
             assert_eq!(hotkey(s).to_string(), s);
         }
