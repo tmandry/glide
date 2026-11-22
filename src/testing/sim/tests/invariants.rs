@@ -34,6 +34,17 @@ impl Harness {
             panic!("{what}\n{}", self.scene().draw());
         };
 
+        // A focus command moves the selection at most once, to the window it
+        // focuses.
+        if let Some(from) = self.focus_command
+            && self.inputs() == self.inputs_at_settle + 1
+        {
+            let moved_to = &self.selection_history()[from..];
+            if moved_to.len() > 1 {
+                fail(format!("one focus command moved the selection to {moved_to:?}"));
+            }
+        }
+
         let during_mission_control = self.actions_during_mission_control();
         if !during_mission_control.is_empty() {
             fail(format!(

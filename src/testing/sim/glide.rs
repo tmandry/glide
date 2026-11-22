@@ -109,6 +109,9 @@ pub struct Glide {
     /// The apps the WmController has started an actor for.
     known_apps: BTreeSet<pid_t>,
     raise_lock: app::RaiseLock,
+    /// The title of each window the reactor's selection moved to on the
+    /// desktop being shown.
+    selection_history: Vec<String>,
     /// Closes once every app that was running at startup has dropped its
     /// token.
     startup_rx: Option<UnboundedReceiver<()>>,
@@ -159,6 +162,7 @@ impl Glide {
             sm_rx,
             ws_tx,
             raise_lock: app::RaiseLock::default(),
+            selection_history: Vec::new(),
             ws_rx,
             _unread: (wm_rx, status_rx, group_bars_rx, mouse_rx, skylight_rx),
             apps: BTreeMap::new(),
@@ -234,7 +238,8 @@ impl Glide {
         match (actor, message) {
             // The real actors.
             (Actor::Reactor, Message::Reactor(event)) => {
-                self.reactor.handle_event_at_time(event, fake::now())
+                self.reactor.handle_event_at_time(event, fake::now());
+                self.record_selection(&mac.borrow());
             }
             (Actor::RaiseManager, Message::Raise(event)) => {
                 self.raise_manager.handle_message(event)
@@ -373,6 +378,27 @@ impl Glide {
 
     pub fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.reactor.tiled_windows(space)
+    }
+
+    fn record_selection(&mut self, mac: &Mac) {
+        let space = mac.window_server().current_desktop();
+        // The reactor has no layout to select in until it has tiled a window.
+        if self.reactor.tiled_windows(space).is_empty() {
+            return;
+        }
+        let Some(selected) = self.reactor.selected_window(space) else {
+            return;
+        };
+        let Some(title) = selected.wsid().and_then(|wsid| mac.title(wsid)) else {
+            return;
+        };
+        if self.selection_history.last().map(String::as_str) != Some(title) {
+            self.selection_history.push(title.to_owned());
+        }
+    }
+
+    pub fn selection_history(&self) -> &[String] {
+        &self.selection_history
     }
 
     pub fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
