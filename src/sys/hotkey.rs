@@ -4,9 +4,10 @@
 //! Key combinations that trigger commands, and the syntax for writing them.
 //!
 //! A hotkey is written as zero or more modifiers followed by a key, separated
-//! by `+`, for example `Alt + Shift + KeyH`. Key names are the [UI Events
-//! `code` values](https://www.w3.org/TR/uievents-code/), which name physical
-//! key positions on a US QWERTY keyboard.
+//! by `+`, for example `Alt + Shift + KeyH`. A modifier name with `Left` or
+//! `Right` on the end, like `AltLeft`, only matches the key on that side. Key
+//! names are the [UI Events `code` values](https://www.w3.org/TR/uievents-code/),
+//! which name physical key positions on a US QWERTY keyboard.
 
 use std::fmt;
 use std::str::FromStr;
@@ -33,13 +34,64 @@ pub struct Hotkey {
 }
 
 bitflags::bitflags! {
-    /// The modifier keys a hotkey requires.
+    /// A set of modifier keys, with a flag for each side of the keyboard.
+    ///
+    /// In a hotkey, a modifier with both of its flags set accepts the key on
+    /// either side. In the modifiers held during a key press, it means both
+    /// keys are held, or that the event didn't say which one is.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Modifiers: u8 {
-        const SHIFT = 1 << 0;
-        const CONTROL = 1 << 1;
-        const ALT = 1 << 2;
-        const META = 1 << 3;
+        const SHIFT_LEFT = 1 << 0;
+        const SHIFT_RIGHT = 1 << 1;
+        const CONTROL_LEFT = 1 << 2;
+        const CONTROL_RIGHT = 1 << 3;
+        const ALT_LEFT = 1 << 4;
+        const ALT_RIGHT = 1 << 5;
+        const META_LEFT = 1 << 6;
+        const META_RIGHT = 1 << 7;
+
+        const SHIFT = Self::SHIFT_LEFT.bits() | Self::SHIFT_RIGHT.bits();
+        const CONTROL = Self::CONTROL_LEFT.bits() | Self::CONTROL_RIGHT.bits();
+        const ALT = Self::ALT_LEFT.bits() | Self::ALT_RIGHT.bits();
+        const META = Self::META_LEFT.bits() | Self::META_RIGHT.bits();
+    }
+}
+
+/// Each modifier with its left and right flags, in the order they are
+/// displayed.
+const MODIFIER_KEYS: [(&str, Modifiers, Modifiers); 4] = [
+    ("Ctrl", Modifiers::CONTROL_LEFT, Modifiers::CONTROL_RIGHT),
+    ("Alt", Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT),
+    ("Meta", Modifiers::META_LEFT, Modifiers::META_RIGHT),
+    ("Shift", Modifiers::SHIFT_LEFT, Modifiers::SHIFT_RIGHT),
+];
+
+impl Modifiers {
+    /// Return whether a hotkey requiring these modifiers matches a key press
+    /// made while the `held` modifiers were down.
+    ///
+    /// Every modifier the hotkey requires must be held, and no others. A
+    /// modifier that names a side must be held on that side only.
+    pub fn matches(self, held: Modifiers) -> bool {
+        MODIFIER_KEYS.iter().all(|&(_, left, right)| {
+            let both = left | right;
+            let (required, held) = (self & both, held & both);
+            if required == both {
+                !held.is_empty()
+            } else {
+                required == held
+            }
+        })
+    }
+
+    /// Return whether some set of held modifiers matches both `self` and
+    /// `other`.
+    fn overlaps(self, other: Modifiers) -> bool {
+        MODIFIER_KEYS.iter().all(|&(_, left, right)| {
+            let both = left | right;
+            let (a, b) = (self & both, other & both);
+            a == b || (a == both && !b.is_empty()) || (b == both && !a.is_empty())
+        })
     }
 }
 
@@ -53,6 +105,8 @@ pub enum ParseError {
     UnknownKey(String),
     #[error("unknown modifier \"{0}\"")]
     UnknownModifier(String),
+    #[error("modifier \"{0}\" conflicts with an earlier one")]
+    ConflictingModifier(String),
 }
 
 impl KeyCode {
@@ -110,16 +164,39 @@ impl FromStr for Modifiers {
     fn from_str(s: &str) -> Result<Self, ParseError> {
         let mut modifiers = Modifiers::empty();
         for modifier in s.split('+').map(str::trim) {
-            modifiers |= match modifier {
-                "Shift" => Modifiers::SHIFT,
-                "Ctrl" => Modifiers::CONTROL,
-                "Alt" | "Option" => Modifiers::ALT,
-                "Meta" | "Cmd" | "Command" => Modifiers::META,
+            let (name, side) = if let Some(name) = modifier.strip_suffix("Left") {
+                (name, Side::Left)
+            } else if let Some(name) = modifier.strip_suffix("Right") {
+                (name, Side::Right)
+            } else {
+                (modifier, Side::Either)
+            };
+            let (left, right) = match name {
+                "Shift" => (Modifiers::SHIFT_LEFT, Modifiers::SHIFT_RIGHT),
+                "Ctrl" | "Control" => (Modifiers::CONTROL_LEFT, Modifiers::CONTROL_RIGHT),
+                "Alt" | "Option" => (Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT),
+                "Meta" | "Cmd" | "Command" => (Modifiers::META_LEFT, Modifiers::META_RIGHT),
                 _ => return Err(ParseError::UnknownModifier(modifier.to_owned())),
             };
+            let flags = match side {
+                Side::Either => left | right,
+                Side::Left => left,
+                Side::Right => right,
+            };
+            let earlier = modifiers & (left | right);
+            if !earlier.is_empty() && earlier != flags {
+                return Err(ParseError::ConflictingModifier(modifier.to_owned()));
+            }
+            modifiers |= flags;
         }
         Ok(modifiers)
     }
+}
+
+enum Side {
+    Either,
+    Left,
+    Right,
 }
 
 impl FromStr for KeyCode {
@@ -166,21 +243,19 @@ impl fmt::Debug for Hotkey {
 
 impl fmt::Display for Modifiers {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let names = [
-            (Modifiers::CONTROL, "Ctrl"),
-            (Modifiers::ALT, "Alt"),
-            (Modifiers::META, "Meta"),
-            (Modifiers::SHIFT, "Shift"),
-        ];
         let mut first = true;
-        for (modifier, name) in names {
-            if self.contains(modifier) {
-                if !first {
-                    f.write_str(" + ")?;
-                }
-                f.write_str(name)?;
-                first = false;
+        for (name, left, right) in MODIFIER_KEYS {
+            let side = match (self.contains(left), self.contains(right)) {
+                (true, true) => "",
+                (true, false) => "Left",
+                (false, true) => "Right",
+                (false, false) => continue,
+            };
+            if !first {
+                f.write_str(" + ")?;
             }
+            write!(f, "{name}{side}")?;
+            first = false;
         }
         Ok(())
     }
@@ -296,6 +371,23 @@ fn bindings_by_keycode<T>(hotkeys: impl IntoIterator<Item = (Hotkey, T)>) -> Bin
         }
         entry.push((hotkey, value));
     }
+    // A press can match more than one hotkey, such as one that accepts either
+    // side of a modifier and one that names the side. Check the one that names
+    // more sides first.
+    for entry in bindings.values_mut() {
+        entry.sort_by_key(|(hotkey, _)| {
+            (hotkey.modifiers.bits().count_ones(), hotkey.modifiers.bits())
+        });
+        for (i, (a, _)) in entry.iter().enumerate() {
+            for (b, _) in &entry[i + 1..] {
+                if a.modifiers.bits().count_ones() == b.modifiers.bits().count_ones()
+                    && a.modifiers.overlaps(b.modifiers)
+                {
+                    warn!("Hotkeys {a} and {b} can both match a press; {a} takes precedence");
+                }
+            }
+        }
+    }
     bindings
 }
 
@@ -312,7 +404,7 @@ fn on_key_down<T>(
         return Disposition::Pass;
     };
     let pressed = pressed_modifiers(CGEvent::flags(Some(event)));
-    match candidates.iter().find(|(hotkey, _)| hotkey.modifiers == pressed) {
+    match candidates.iter().find(|(hotkey, _)| hotkey.modifiers.matches(pressed)) {
         Some((hotkey, value)) => {
             on_press(*hotkey, value);
             Disposition::Consume
@@ -334,30 +426,54 @@ mod device_flags {
     pub const RIGHT_CONTROL: u64 = 0x0000_2000;
 }
 
+/// Return the modifiers held according to an event's flags.
+///
+/// A modifier whose flags don't say which side is held, as in some synthetic
+/// events, is reported as held on both sides.
 fn pressed_modifiers(flags: CGEventFlags) -> Modifiers {
     use device_flags::*;
-    let groups = [
+    let keys = [
         (
-            Modifiers::SHIFT,
             CGEventFlags::MaskShift,
-            LEFT_SHIFT | RIGHT_SHIFT,
+            LEFT_SHIFT,
+            RIGHT_SHIFT,
+            Modifiers::SHIFT_LEFT,
+            Modifiers::SHIFT_RIGHT,
         ),
         (
-            Modifiers::CONTROL,
             CGEventFlags::MaskControl,
-            LEFT_CONTROL | RIGHT_CONTROL,
+            LEFT_CONTROL,
+            RIGHT_CONTROL,
+            Modifiers::CONTROL_LEFT,
+            Modifiers::CONTROL_RIGHT,
         ),
-        (Modifiers::ALT, CGEventFlags::MaskAlternate, LEFT_ALT | RIGHT_ALT),
         (
-            Modifiers::META,
+            CGEventFlags::MaskAlternate,
+            LEFT_ALT,
+            RIGHT_ALT,
+            Modifiers::ALT_LEFT,
+            Modifiers::ALT_RIGHT,
+        ),
+        (
             CGEventFlags::MaskCommand,
-            LEFT_COMMAND | RIGHT_COMMAND,
+            LEFT_COMMAND,
+            RIGHT_COMMAND,
+            Modifiers::META_LEFT,
+            Modifiers::META_RIGHT,
         ),
     ];
     let mut modifiers = Modifiers::empty();
-    for (modifier, mask, device) in groups {
-        if flags.0 & (mask.0 | device) != 0 {
-            modifiers |= modifier;
+    for (mask, left_flag, right_flag, left, right) in keys {
+        let held_left = flags.0 & left_flag != 0;
+        let held_right = flags.0 & right_flag != 0;
+        if held_left {
+            modifiers |= left;
+        }
+        if held_right {
+            modifiers |= right;
+        }
+        if !held_left && !held_right && flags.contains(mask) {
+            modifiers |= left | right;
         }
     }
     modifiers
@@ -462,13 +578,99 @@ mod tests {
     }
 
     #[test]
-    fn pressed_modifiers_read_either_kind_of_flag() {
+    fn parse_sided_modifiers() {
+        let hk = hotkey("AltLeft + ShiftRight + KeyA");
+        assert_eq!(hk.modifiers, Modifiers::ALT_LEFT | Modifiers::SHIFT_RIGHT);
+        assert_eq!(hotkey("OptionRight + A"), hotkey("AltRight + A"));
+        assert_eq!(hotkey("ControlLeft + A"), hotkey("CtrlLeft + A"));
+        assert_eq!(hotkey("CmdRight + A"), hotkey("MetaRight + A"));
+        assert_eq!(hotkey("CommandLeft + A"), hotkey("MetaLeft + A"));
+        assert_eq!(hotkey("Control + A"), hotkey("Ctrl + A"));
+    }
+
+    #[test]
+    fn sided_modifiers_display_round_trip() {
+        for s in [
+            "CtrlRight + Alt + KeyK",
+            "AltLeft + KeyA",
+            "MetaRight + ShiftLeft + Digit1",
+        ] {
+            assert_eq!(hotkey(s).to_string(), s);
+        }
+    }
+
+    #[test]
+    fn conflicting_sides_are_errors() {
+        for s in [
+            "AltLeft + AltRight + A",
+            "Alt + AltLeft + A",
+            "ShiftRight + Shift + A",
+        ] {
+            assert!(
+                matches!(s.parse::<Hotkey>(), Err(ParseError::ConflictingModifier(_))),
+                "{s}"
+            );
+        }
+        assert_eq!(hotkey("Alt + Option + A"), hotkey("Alt + A"));
+        assert_eq!(hotkey("AltLeft + OptionLeft + A"), hotkey("AltLeft + A"));
+    }
+
+    #[test]
+    fn either_side_matches_any_held() {
+        let alt = Modifiers::ALT;
+        assert!(alt.matches(Modifiers::ALT_LEFT));
+        assert!(alt.matches(Modifiers::ALT_RIGHT));
+        assert!(alt.matches(Modifiers::ALT));
+        assert!(!alt.matches(Modifiers::empty()));
+        assert!(!alt.matches(Modifiers::ALT_LEFT | Modifiers::CONTROL_LEFT));
+    }
+
+    #[test]
+    fn named_side_matches_only_that_side() {
+        let alt_left = Modifiers::ALT_LEFT;
+        assert!(alt_left.matches(Modifiers::ALT_LEFT));
+        assert!(!alt_left.matches(Modifiers::ALT_RIGHT));
+        assert!(!alt_left.matches(Modifiers::ALT));
+        assert!(!alt_left.matches(Modifiers::empty()));
+        assert!(!alt_left.matches(Modifiers::ALT_LEFT | Modifiers::SHIFT_RIGHT));
+        let mixed = Modifiers::ALT_LEFT | Modifiers::SHIFT;
+        assert!(mixed.matches(Modifiers::ALT_LEFT | Modifiers::SHIFT_RIGHT));
+    }
+
+    #[test]
+    fn no_modifiers_match_only_none_held() {
+        assert!(Modifiers::empty().matches(Modifiers::empty()));
+        assert!(!Modifiers::empty().matches(Modifiers::META_LEFT));
+    }
+
+    #[test]
+    fn pressed_modifiers_read_sides() {
         let flags = CGEventFlags(
-            CGEventFlags::MaskAlternate.0 | CGEventFlags::MaskShift.0 | device_flags::LEFT_SHIFT,
+            CGEventFlags::MaskAlternate.0 | CGEventFlags::MaskShift.0 | device_flags::RIGHT_ALT,
         );
-        assert_eq!(pressed_modifiers(flags), Modifiers::ALT | Modifiers::SHIFT);
-        let flags = CGEventFlags(device_flags::RIGHT_CONTROL | CGEventFlags::MaskAlphaShift.0);
+        assert_eq!(pressed_modifiers(flags), Modifiers::ALT_RIGHT | Modifiers::SHIFT);
+        let flags = CGEventFlags(
+            CGEventFlags::MaskControl.0
+                | device_flags::LEFT_CONTROL
+                | device_flags::RIGHT_CONTROL
+                | CGEventFlags::MaskAlphaShift.0,
+        );
         assert_eq!(pressed_modifiers(flags), Modifiers::CONTROL);
+        let flags = CGEventFlags(device_flags::LEFT_COMMAND);
+        assert_eq!(pressed_modifiers(flags), Modifiers::META_LEFT);
+    }
+
+    #[test]
+    fn sided_binding_is_checked_before_either_side() {
+        let bindings = bindings_by_keycode([(hotkey("Alt + H"), 1), (hotkey("AltLeft + H"), 2)]);
+        let first_match = |held: Modifiers| {
+            bindings[&0x04]
+                .iter()
+                .find(|(hk, _)| hk.modifiers.matches(held))
+                .map(|(_, v)| *v)
+        };
+        assert_eq!(first_match(Modifiers::ALT_LEFT), Some(2));
+        assert_eq!(first_match(Modifiers::ALT_RIGHT), Some(1));
     }
 
     #[test]
@@ -493,6 +695,26 @@ mod tests {
             (hotkey("Fn"), 4),
         ]);
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn overlapping_bindings_of_equal_specificity_are_ordered_by_modifiers() {
+        let order = |hotkeys: [&'static str; 2]| {
+            let bindings = bindings_by_keycode(hotkeys.map(|h| (hotkey(h), h)));
+            bindings[&0x04].iter().map(|(_, v)| *v).collect::<Vec<_>>()
+        };
+        let a = "AltLeft + Shift + H";
+        let b = "Alt + ShiftLeft + H";
+        assert_eq!(order([a, b]), order([b, a]));
+    }
+
+    #[test]
+    fn overlaps() {
+        let m = |s: &str| hotkey(&format!("{s} + H")).modifiers;
+        assert!(m("AltLeft + Shift").overlaps(m("Alt + ShiftLeft")));
+        assert!(m("Alt").overlaps(m("AltRight")));
+        assert!(!m("AltLeft").overlaps(m("AltRight")));
+        assert!(!m("Alt").overlaps(m("Alt + Shift")));
     }
 
     #[test]

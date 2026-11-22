@@ -69,6 +69,10 @@ default_keys = false
 # "Alt" and "Option" can be used interchangeably, and refer to the same key
 # (⌥ on Mac keyboards). Likewise "Meta", "Cmd" and "Command" all refer to ⌘.
 #
+# Add "Left" or "Right" to a modifier to match only the key on that side, as in
+# "AltLeft + H". The key on the other side keeps working as usual, so you can
+# still type characters with it.
+#
 # Key names refer to physical key positions on a standard QWERTY keyboard,
 # not the characters produced by your keyboard layout. If you use an
 # alternative layout (e.g., Dvorak, Colemak), use the QWERTY name for the
