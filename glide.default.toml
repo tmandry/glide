@@ -67,7 +67,7 @@ default_keys = false
 # Note: Modifier and key names must be capitalized.
 #
 # "Alt" and "Option" can be used interchangeably, and refer to the same key
-# (⌥ on Mac keyboaards).
+# (⌥ on Mac keyboards). Likewise "Meta", "Cmd" and "Command" all refer to ⌘.
 #
 # Key names refer to physical key positions on a standard QWERTY keyboard,
 # not the characters produced by your keyboard layout. If you use an

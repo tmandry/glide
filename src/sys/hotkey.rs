@@ -84,7 +84,7 @@ impl FromStr for Modifiers {
                 "Shift" => Modifiers::SHIFT,
                 "Ctrl" => Modifiers::CONTROL,
                 "Alt" | "Option" => Modifiers::ALT,
-                "Meta" => Modifiers::META,
+                "Meta" | "Cmd" | "Command" => Modifiers::META,
                 _ => return Err(ParseError::UnknownModifier(modifier.to_owned())),
             };
         }
@@ -207,6 +207,12 @@ mod tests {
     #[test]
     fn option_is_alt() {
         assert_eq!(hotkey("Option + H"), hotkey("Alt + H"));
+    }
+
+    #[test]
+    fn cmd_is_meta() {
+        assert_eq!(hotkey("Cmd + H"), hotkey("Meta + H"));
+        assert_eq!(hotkey("Command + H"), hotkey("Meta + H"));
     }
 
     #[test]
