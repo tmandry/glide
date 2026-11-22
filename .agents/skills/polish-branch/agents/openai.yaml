@@ -1,0 +1,4 @@
+interface:
+  display_name: "Polish Branch"
+  short_description: "Review, fix, and tidy a branch's commits before it's ready"
+  default_prompt: "Use $polish-branch to review this branch, fix what the review finds, and fold the fixes into the commits they belong to."
