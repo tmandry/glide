@@ -77,8 +77,8 @@ default_keys = false
 # Arrow keys use the names: ArrowLeft, ArrowDown, ArrowUp, ArrowRight
 # Example: "Alt + ArrowDown" = { move_focus = "down" }
 #
-# For a comprehensive list of key names, see:
-# https://docs.rs/livesplit-hotkey/0.8.0/livesplit_hotkey/enum.KeyCode.html
+# Key names are the standard key `code` values. For a list, see:
+# https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/Keyboard_event_code_values
 
 # Save the current state to the restore file and exit.
 # Restore this with the --restore option when starting glide.

@@ -639,8 +639,8 @@ fn inspect(mtm: MainThreadMarker) {
     let (tx, rx) = unbounded_channel();
     let hook =
         livesplit_hotkey::Hook::with_consume_preference(ConsumePreference::MustConsume).unwrap();
-    let key = event::Hotkey {
-        key_code: event::KeyCode::KeyI,
+    let key = livesplit_hotkey::Hotkey {
+        key_code: livesplit_hotkey::KeyCode::KeyI,
         modifiers: Modifiers::ALT | Modifiers::SHIFT,
     };
     hook.register(key, move || _ = tx.send(())).unwrap();

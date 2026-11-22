@@ -319,7 +319,7 @@ impl WmController {
             }
         };
         for (key, cmd) in &self.config.config.keys {
-            mgr.register_wm(key.modifiers, key.key_code, cmd.clone());
+            mgr.register_wm(*key, cmd.clone());
         }
         self.hotkeys = Some(mgr);
     }

@@ -52,6 +52,7 @@ clap = { version = "4.5.4", features = ["cargo", "derive"] }
 dirs = "5.0.1"
 hex = "0.4.3"
 indexmap = { version = "2.10.0", features = ["serde"] }
+keycode = "1.0.0"
 livesplit-hotkey = "0.8.1"
 macro_rules_attribute = "0.2.2"
 objc2 = "0.6.2"

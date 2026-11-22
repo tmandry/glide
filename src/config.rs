@@ -15,7 +15,6 @@ use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use livesplit_hotkey::Hotkey;
 use macro_rules_attribute::derive;
 use partial::{PartialConfig, ValidationError};
 use regex::{Regex, RegexBuilder};
@@ -24,6 +23,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::actor::wm_controller::WmCommand;
 use crate::model::LayoutKind;
+use crate::sys::hotkey::Hotkey;
 
 pub fn data_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".glide")
@@ -387,11 +387,14 @@ impl ConfigPartial {
                 WmCommandOrDisable::WmCommand(wm_command) => wm_command,
                 WmCommandOrDisable::Disable(_) => continue,
             };
-            let Ok(key) = Hotkey::from_str(&key) else {
-                return Err(SpannedError {
-                    message: format!("Could not parse hotkey: {key}"),
-                    span: None,
-                });
+            let key = match Hotkey::from_str(&key) {
+                Ok(hotkey) => hotkey,
+                Err(err) => {
+                    return Err(SpannedError {
+                        message: format!("Could not parse hotkey {key:?}: {err}"),
+                        span: None,
+                    });
+                }
             };
             keys.push((key, cmd));
         }
