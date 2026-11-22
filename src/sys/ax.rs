@@ -4,9 +4,10 @@
 //! Everything the app actor needs from the system: the accessibility
 //! interface of its app, and the few other calls it makes.
 //!
-//! The app actor uses the names in this module. In tests they resolve to the
-//! fakes in [`fake`], which have the same shape and forward every call to a
-//! [`fake::System`] the test installs.
+//! The app actor uses the names in this module, and the raise manager reads
+//! the clock here too. In tests they resolve to the fakes in [`fake`], which
+//! have the same shape and forward every call to a [`fake::System`] the test
+//! installs.
 
 #[cfg(test)]
 pub mod fake;
