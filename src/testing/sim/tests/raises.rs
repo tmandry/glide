@@ -307,12 +307,12 @@ fn the_user_activating_an_app_after_a_failed_activation_moves_the_selection() {
         let a = sim.app("A");
         sim.set_ignores_make_key(a, true);
         sim.command(LayoutCommand::ToggleFocusFloating);
-        // Glide's selection and the keyboard focus disagree until the user
-        // acts, so don't check the invariants yet.
+        // Glide gives up on the raise. Its selection and the keyboard focus
+        // disagree until the user acts, so don't check the invariants yet.
         sim.sim.run();
         sim.set_ignores_make_key(a, false);
-        // Glide gives up on the raise, and the user clicks later. The
-        // invariants still don't hold until the user acts.
+        // The user clicks once A's activation would no longer count as part of
+        // the raise.
         sim.sim.wait(Duration::from_secs(2));
 
         sim.click_window("A1");

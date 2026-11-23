@@ -371,9 +371,10 @@ impl Glide {
         }
     }
 
-    /// Whether the raise manager's timer for its active sequence has fired.
-    pub fn raise_timeout_due(&self) -> bool {
-        self.raise_manager.time_to_timeout() == Duration::ZERO
+    /// How long until the raise manager times out the raise it is waiting
+    /// on, if it is waiting on one.
+    pub fn time_to_raise_timeout(&self) -> Option<Duration> {
+        Some(self.raise_manager.time_to_timeout()).filter(|&t| t != Duration::MAX)
     }
 
     fn time_out_raise(&mut self) {

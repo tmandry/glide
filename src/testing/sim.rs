@@ -288,7 +288,8 @@ impl Sim {
 
     // Running the system.
 
-    /// Deliver messages until every inbox is empty.
+    /// Deliver messages until every inbox is empty and nothing is waiting for
+    /// a deadline, moving the clock forward to each deadline in turn.
     pub fn run(&mut self) {
         while self.step() {}
     }
@@ -304,14 +305,19 @@ impl Sim {
                 .map(|(&a, _)| Process::Glide(a)),
         );
         ready.extend(self.glide.woken_apps().map(Process::Glide));
-        if self.glide.raise_timeout_due() {
+        if self.glide.time_to_raise_timeout() == Some(Duration::ZERO) {
             ready.insert(Process::Glide(Actor::RaiseManager));
         }
         ready.extend(self.mac.borrow().ready().map(Process::Mac));
-        let ready: Vec<Process> = ready.into_iter().collect();
         if ready.is_empty() {
-            return false;
+            // Nothing happens until the raise times out.
+            let Some(wait) = self.glide.time_to_raise_timeout() else {
+                return false;
+            };
+            fake::sleep(wait);
+            ready.insert(Process::Glide(Actor::RaiseManager));
         }
+        let ready: Vec<Process> = ready.into_iter().collect();
         self.steps += 1;
         assert!(self.steps < MAX_STEPS, "the system did not settle");
         let process = match &mut self.schedule {
