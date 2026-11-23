@@ -1149,4 +1149,8 @@ impl fake::System for System {
     fn mouse_state(&self) -> MouseState {
         MouseState::Up
     }
+
+    fn sleep(&self, duration: Duration) {
+        fake::advance_clock(duration);
+    }
 }
