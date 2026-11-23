@@ -5,6 +5,7 @@
 
 pub mod alert;
 pub mod group_bar;
+pub mod icon;
 pub mod permission_flow;
 pub mod status_bar;
 

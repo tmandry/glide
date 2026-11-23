@@ -3,22 +3,19 @@
 
 //! Menu bar icon for displaying the current space ID.
 
-use std::ffi::c_void;
-
 use objc2::rc::Retained;
-use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
-};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_core_foundation::CGSize;
-use objc2_foundation::{NSData, NSObject, NSString, ns_string};
+use objc2_foundation::{NSObject, NSString, ns_string};
 use tracing::{Span, debug, error, warn};
 
 use crate::actor::updater;
 use crate::actor::wm_controller::{self, WmCmd, WmCommand, WmEvent};
 use crate::config;
+use crate::ui::icon;
 
 const SAVE_AND_QUIT_TAG: i64 = 1;
 const TOGGLE_GLOBAL_TAG: i64 = 2;
@@ -277,26 +274,8 @@ impl MenuHandler {
 }
 
 fn create_parachute_icon(config: &config::StatusIconExperimental) -> Option<Retained<NSImage>> {
-    // Load the SVG file
-    let svg_data = if config.color {
-        include_str!("../../site/src/assets/parachute-small.svg")
-    } else {
-        include_str!("../../site/src/assets/parachute-nocolor.svg")
-    };
-    let ns_data =
-        unsafe { NSData::dataWithBytes_length(svg_data.as_ptr() as *const c_void, svg_data.len()) };
-
-    let Some(image) = NSImage::initWithData(NSImage::alloc(), &ns_data) else {
-        return None;
-    };
-
-    // Set the image size to be appropriate for menu bar (16x16 points)
+    let image = icon::parachute(config.color)?;
+    // Size the image for the menu bar.
     image.setSize(CGSize { width: 16.0, height: 16.0 });
-
-    if !config.color {
-        // Set as template image so it follows system appearance
-        image.setTemplate(true);
-    }
-
     Some(image)
 }
