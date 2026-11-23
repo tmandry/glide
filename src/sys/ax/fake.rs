@@ -7,7 +7,8 @@
 //! interface sends a request to the app and blocks for the reply, and the
 //! fake does the same through [`System::ax`]. The [`System`] is installed per
 //! thread with [`install`], and decides what apps, elements and attributes
-//! exist.
+//! exist. Each thread also has its own clock, which [`set_clock`] and
+//! [`advance_clock`] move.
 //!
 //! Attributes are read and written by name as [`Value`]s. The typed methods
 //! on [`AXUIElement`] are the ones the real interface has for the attributes
@@ -77,6 +78,8 @@ pub trait System {
     /// The bundle id of a running app, or `None` if `pid` isn't running.
     fn bundle_id(&self, pid: pid_t) -> Option<String>;
     fn mouse_state(&self) -> MouseState;
+    /// Block the thread for `duration`.
+    fn sleep(&self, duration: Duration);
 }
 
 thread_local! {
@@ -385,14 +388,28 @@ pub fn get_mouse_state() -> MouseState {
     system().mouse_state()
 }
 
-/// The time on this thread's clock, which only [`sleep`] moves.
+/// The time on this thread's clock.
 pub fn now() -> Instant {
     let now = CLOCK.get().unwrap_or_else(Instant::now);
     CLOCK.set(Some(now));
     now
 }
 
-/// Move this thread's clock forward by `duration`.
+/// Block the thread for `duration`, through the installed system if there is
+/// one.
 pub fn sleep(duration: Duration) {
+    match SYSTEM.with_borrow(|s| s.clone()) {
+        Some(system) => system.sleep(duration),
+        None => advance_clock(duration),
+    }
+}
+
+/// Set this thread's clock.
+pub fn set_clock(now: Instant) {
+    CLOCK.set(Some(now));
+}
+
+/// Move this thread's clock forward by `duration`.
+pub fn advance_clock(duration: Duration) {
     CLOCK.set(Some(now() + duration));
 }

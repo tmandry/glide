@@ -131,6 +131,9 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// How long we keep attributing an activation to a raise after the raise was
 /// cancelled. The activation is already in flight at that point.
+///
+/// TODO: No simulator scenario fails with this set to zero. Find one that
+/// shows it's needed, or remove it.
 const CANCELLED_ACTIVATION_GRACE: Duration = Duration::from_millis(100);
 
 /// Whether a change of the frontmost app or of an app's main window should

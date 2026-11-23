@@ -12,19 +12,17 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Wake, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use accessibility::AXError;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::Span;
 
 use super::FocusReport;
+use super::app_thread::{AppThread, Call, Event as AppEvent, Reply, Woken};
 use super::mac::{self, Mac, Notification, WorkspaceNotification};
 use crate::actor::layout::LayoutManager;
 use crate::actor::raise::{self, RaiseManager};
@@ -68,20 +66,25 @@ pub enum Message {
     StartupAppsReported,
 }
 
-/// An app actor, run a step at a time.
+/// An app actor, on its own thread.
 struct AppActor {
-    /// The actor's task, until it finishes.
-    task: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    thread: AppThread,
     woken: Arc<Woken>,
+    state: AppState,
 }
 
-/// Records that a task was woken.
-struct Woken(AtomicBool);
-
-impl Wake for Woken {
-    fn wake(self: Arc<Self>) {
-        self.0.store(true, Ordering::Relaxed);
-    }
+enum AppState {
+    /// Waiting for its task to be woken.
+    Idle,
+    /// Waiting for the reply to an accessibility request, until it times out.
+    Requesting {
+        request: mac::AxRequestId,
+        timeout: Instant,
+    },
+    /// Sleeping until `until`.
+    Sleeping { until: Instant },
+    /// Its task has finished.
+    Done,
 }
 
 pub struct Glide {
@@ -225,15 +228,15 @@ impl Glide {
 
     /// Have `actor` handle `message`.
     ///
-    /// An app actor also runs when its task has been woken without a message
-    /// from the simulator, for example by a request the reactor sent on its
-    /// channel or by another app actor releasing the raise lock. `message` is
-    /// `None` then, and the task is polled. The raise manager runs with no
-    /// message when its timeout for the active sequence has passed.
+    /// An app actor also runs without a message from the simulator when the
+    /// reply to its call is due, or when its task has been woken, for example
+    /// by a request the reactor sent on its channel or by another app actor
+    /// releasing the raise lock. `message` is `None` then. The raise manager
+    /// runs with no message when its timeout for the active sequence has
+    /// passed.
     pub fn deliver(&mut self, actor: Actor, message: Option<Message>, mac: &Rc<RefCell<Mac>>) {
-        let _system = fake::install(Rc::new(mac::System(Rc::clone(mac))));
         let message = match (actor, message) {
-            (Actor::App(pid), None) => return self.poll_app(pid),
+            (Actor::App(pid), None) => return self.poll_app(pid, mac),
             (Actor::RaiseManager, None) => return self.time_out_raise(),
             (_, Some(message)) => message,
             (actor, None) => unreachable!("{actor:?} has no message"),
@@ -283,8 +286,14 @@ impl Glide {
                 Actor::App(_),
                 Message::Notification(Notification::Ax { pid, observer, element, name }),
             ) => {
-                fake::notify(observer, pid, element, name);
-                self.poll_app(pid);
+                let Some(app) = self.apps.get(&pid) else {
+                    return;
+                };
+                if let AppState::Done = app.state {
+                    return;
+                }
+                let event = app.thread.run(Some((observer, pid, element, name)));
+                self.on_app_event(pid, event, mac);
             }
 
             // The stand-ins.
@@ -335,45 +344,121 @@ impl Glide {
                 localized_name: Some(name.to_owned()),
             }
         };
-        let Some(task) = app::app_task(
+        let woken = Woken::new();
+        let thread = AppThread::spawn(
             pid,
             info,
             self.ws_tx.clone(),
             startup,
             Arc::clone(&self.raise_lock),
-        ) else {
-            return;
-        };
+            Arc::clone(&woken),
+        );
+        let event = thread.run(None);
         self.apps.insert(
             pid,
             AppActor {
-                task: Some(Box::pin(task)),
-                woken: Arc::new(Woken(AtomicBool::new(true))),
+                thread,
+                woken,
+                state: AppState::Idle,
             },
         );
-        self.poll_app(pid);
+        self.on_app_event(pid, event, mac);
     }
 
-    /// Poll an app actor's task once if it was woken. A task that wakes
-    /// itself while it is polled is left for the schedule to pick again, as
-    /// the real executor goes back to its run loop between polls.
-    fn poll_app(&mut self, pid: pid_t) {
+    /// Run an app actor that is ready: give it the reply to its call once
+    /// that is due, or poll its task if it was woken.
+    fn poll_app(&mut self, pid: pid_t, mac: &Rc<RefCell<Mac>>) {
         let Some(app) = self.apps.get_mut(&pid) else {
             return;
         };
-        if !app.woken.0.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        let Some(task) = &mut app.task else { return };
-        let waker = Waker::from(Arc::clone(&app.woken));
-        if task.as_mut().poll(&mut Context::from_waker(&waker)).is_ready() {
-            app.task = None;
+        let now = fake::now();
+        let event = match std::mem::replace(&mut app.state, AppState::Idle) {
+            AppState::Requesting { request, timeout } => {
+                let mut mac = mac.borrow_mut();
+                let reply = match mac.take_ax_reply(request) {
+                    Some(reply) => reply,
+                    None if timeout <= now => {
+                        mac.cancel_ax_request(request);
+                        Err(AXError::CannotComplete)
+                    }
+                    None => {
+                        app.state = AppState::Requesting { request, timeout };
+                        return;
+                    }
+                };
+                drop(mac);
+                app.thread.reply(Reply::Ax(reply))
+            }
+            AppState::Sleeping { until } if until <= now => app.thread.reply(Reply::Slept),
+            AppState::Idle if app.woken.is_set() => app.thread.run(None),
+            state => {
+                app.state = state;
+                return;
+            }
+        };
+        self.on_app_event(pid, event, mac);
+    }
+
+    /// Handle what an app actor did when it last ran, until it yields or
+    /// waits on a call.
+    fn on_app_event(&mut self, pid: pid_t, mut event: AppEvent, mac: &Rc<RefCell<Mac>>) {
+        let app = self.apps.get_mut(&pid).unwrap();
+        loop {
+            let reply = match event {
+                AppEvent::Yielded { done } => {
+                    app.state = if done { AppState::Done } else { AppState::Idle };
+                    return;
+                }
+                AppEvent::Call(Call::Ax(target, request)) => {
+                    let request = mac.borrow_mut().ax_request(target, request);
+                    let timeout = fake::now() + mac::REQUEST_TIMEOUT;
+                    app.state = AppState::Requesting { request, timeout };
+                    return;
+                }
+                AppEvent::Call(Call::Sleep(duration)) => {
+                    app.state = AppState::Sleeping { until: fake::now() + duration };
+                    return;
+                }
+                AppEvent::Call(Call::MakeKeyWindow(wsid)) => {
+                    mac.borrow_mut().send_window_server(mac::Message::MakeKey(wsid));
+                    Reply::MakeKeyWindow(Ok(()))
+                }
+                AppEvent::Call(Call::BundleId(target)) => {
+                    Reply::BundleId(mac.borrow().bundle_id(target))
+                }
+            };
+            event = app.thread.reply(reply);
         }
     }
 
-    /// Whether the raise manager's timer for its active sequence has fired.
-    pub fn raise_timeout_due(&self) -> bool {
-        self.raise_manager.time_to_timeout() == Duration::ZERO
+    /// Whether an app actor is waiting on a call, and so can't take a
+    /// message.
+    pub fn app_is_calling(&self, pid: pid_t) -> bool {
+        self.apps.get(&pid).is_some_and(|app| {
+            matches!(
+                app.state,
+                AppState::Requesting { .. } | AppState::Sleeping { .. }
+            )
+        })
+    }
+
+    /// When the next request an app actor is waiting on times out, or the
+    /// next sleeping actor wakes.
+    pub fn next_call_due(&self) -> Option<Instant> {
+        self.apps
+            .values()
+            .filter_map(|app| match app.state {
+                AppState::Requesting { timeout, .. } => Some(timeout),
+                AppState::Sleeping { until } => Some(until),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// How long until the raise manager times out the raise it is waiting
+    /// on, if it is waiting on one.
+    pub fn time_to_raise_timeout(&self) -> Option<Duration> {
+        Some(self.raise_manager.time_to_timeout()).filter(|&t| t != Duration::MAX)
     }
 
     fn time_out_raise(&mut self) {
@@ -383,11 +468,20 @@ impl Glide {
     }
 
     /// The app actors that have something to do without being sent a message:
-    /// a request waiting in their channel, or a lock they were waiting for.
-    pub fn woken_apps(&self) -> impl Iterator<Item = Actor> + '_ {
+    /// the reply to their call has come, or their task was woken by a request
+    /// waiting in their channel or a lock they were waiting for.
+    pub fn woken_apps<'a>(&'a self, mac: &'a Mac) -> impl Iterator<Item = Actor> + 'a {
+        let now = fake::now();
         self.apps
             .iter()
-            .filter(|(_, app)| app.task.is_some() && app.woken.0.load(Ordering::Relaxed))
+            .filter(move |(_, app)| match app.state {
+                AppState::Idle => app.woken.is_set(),
+                AppState::Requesting { request, timeout } => {
+                    timeout <= now || mac.has_ax_reply(request)
+                }
+                AppState::Sleeping { until } => until <= now,
+                AppState::Done => false,
+            })
             .map(|(&pid, _)| Actor::App(pid))
     }
 
