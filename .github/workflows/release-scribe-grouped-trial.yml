@@ -25,15 +25,9 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - range: 0.2.17
-            base: v0.2.16
-            target: v0.2.17
-          - range: 0.2.18
-            base: v0.2.17
-            target: v0.2.18
           - range: next
             base: v0.2.18
-            target: refs/remotes/origin/main
+            target: 1093745b263ed68965e7f7b4bd7cef6aa7490591
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,9 +69,6 @@ jobs:
               if [[ -f "$out/notes.md" ]]; then cat "$out/notes.md"; fi
             } >> "$GITHUB_STEP_SUMMARY"
           }
-          if [[ "$RANGE" == next && "$GENERATE" == true ]]; then
-            replay "${TARGET}^1" previous-head
-          fi
           replay "$TARGET" "$RANGE"
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && (github.event_name == 'push' || inputs.generate) }}
