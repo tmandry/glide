@@ -67,7 +67,11 @@ default_keys = false
 # Note: Modifier and key names must be capitalized.
 #
 # "Alt" and "Option" can be used interchangeably, and refer to the same key
-# (⌥ on Mac keyboaards).
+# (⌥ on Mac keyboards). Likewise "Meta", "Cmd" and "Command" all refer to ⌘.
+#
+# Add "Left" or "Right" to a modifier to match only the key on that side, as in
+# "AltLeft + H". The key on the other side keeps working as usual, so you can
+# still type characters with it.
 #
 # Key names refer to physical key positions on a standard QWERTY keyboard,
 # not the characters produced by your keyboard layout. If you use an
@@ -77,8 +81,8 @@ default_keys = false
 # Arrow keys use the names: ArrowLeft, ArrowDown, ArrowUp, ArrowRight
 # Example: "Alt + ArrowDown" = { move_focus = "down" }
 #
-# For a comprehensive list of key names, see:
-# https://docs.rs/livesplit-hotkey/0.8.0/livesplit_hotkey/enum.KeyCode.html
+# Key names are the standard key `code` values. For a list, see:
+# https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/Keyboard_event_code_values
 
 # Save the current state to the restore file and exit.
 # Restore this with the --restore option when starting glide.

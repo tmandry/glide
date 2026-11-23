@@ -1,8 +1,8 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use livesplit_hotkey::{ConsumePreference, Hook};
-pub use livesplit_hotkey::{Hotkey, KeyCode, Modifiers};
+use std::cell::Cell;
+
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
@@ -12,35 +12,36 @@ use objc2_core_graphics::{
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
 
+use super::event_tap::CreateError;
+use super::hotkey::{Hotkey, HotkeyTap};
 use super::screen::CoordinateConverter;
-use crate::actor::reactor::Command;
 use crate::actor::wm_controller::{Sender, WmCommand, WmEvent};
 
+/// Sends a command to the WM controller when one of its hotkeys is pressed.
 pub struct HotkeyManager {
-    hook: Hook,
-    events_tx: Sender,
+    _tap: HotkeyTap,
+}
+
+struct Binding {
+    cmd: WmCommand,
+    presses: Cell<u64>,
 }
 
 impl HotkeyManager {
-    pub fn new(events_tx: Sender) -> Result<Self, livesplit_hotkey::Error> {
-        let hook = Hook::with_consume_preference(ConsumePreference::MustConsume)?;
-        Ok(HotkeyManager { hook, events_tx })
-    }
-
-    pub fn register(&self, modifiers: Modifiers, key_code: KeyCode, cmd: Command) {
-        self.register_wm(modifiers, key_code, WmCommand::ReactorCommand(cmd))
-    }
-
-    pub fn register_wm(&self, modifiers: Modifiers, key_code: KeyCode, cmd: WmCommand) {
-        let events_tx = self.events_tx.clone();
-        let mut seq = 0;
-        self.hook
-            .register(Hotkey { modifiers, key_code }, move || {
-                seq += 1;
-                let span = info_span!("hotkey::press", ?key_code, ?seq);
-                events_tx.send((span, WmEvent::Command(cmd.clone()))).unwrap()
-            })
-            .unwrap();
+    pub fn new(
+        events_tx: Sender,
+        hotkeys: impl IntoIterator<Item = (Hotkey, WmCommand)>,
+    ) -> Result<Self, CreateError> {
+        let bindings = hotkeys
+            .into_iter()
+            .map(|(hotkey, cmd)| (hotkey, Binding { cmd, presses: Cell::new(0) }));
+        let tap = HotkeyTap::new(bindings, move |hotkey, binding| {
+            let seq = binding.presses.get() + 1;
+            binding.presses.set(seq);
+            let span = info_span!("hotkey::press", key_code = ?hotkey.key_code, ?seq);
+            _ = events_tx.send((span, WmEvent::Command(binding.cmd.clone())));
+        })?;
+        Ok(HotkeyManager { _tap: tap })
     }
 }
 

@@ -29,11 +29,12 @@ When defining key bindings in your config file, you must use specific key names 
 - **Letter keys**: Just use the letter capitalized (e.g., `A`, `H`, `J`, `K`, `L`)
 - **Number keys**: Use the number (e.g., `1`, `2`, `3`)
 - **Modifiers**: `Alt`, `Ctrl`, `Shift`, `Cmd` (all must be capitalized)
+- **Left or right modifier**: Add `Left` or `Right` to match only the key on that side, e.g. `AltLeft` or `CmdRight`
 
 :::note[Mac keyboard note]
 Throughout this documentation, "Alt" refers to the Option (⌥) key on Mac keyboards.
 
-For a comprehensive list of all supported key names, see the [livesplit-hotkey documentation](https://docs.rs/livesplit-hotkey/0.8.0/livesplit_hotkey/enum.KeyCode.html).
+Key names are the standard key `code` values. For a comprehensive list, see [MDN's list of code values](https://developer.mozilla.org/en-US/docs/Web/API/UI_Events/Keyboard_event_code_values).
 :::
 
 ### Examples
@@ -52,6 +53,9 @@ For a comprehensive list of all supported key names, see the [livesplit-hotkey d
 
 # Multiple modifiers
 "Alt + Shift + E" = "save_and_exit"
+
+# Only the left Option key, leaving right Option free for typing characters
+"AltLeft + H" = { move_focus = "left" }
 ```
 
 :::note[Key names are layout-independent]

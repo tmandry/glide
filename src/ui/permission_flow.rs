@@ -161,7 +161,7 @@ fn check_input_permissions(mtm: MainThreadMarker) -> Result<(), PermissionNotGra
     // testing on macOS 26. It's also unnecessary once we have accessibility
     // permissions.
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let Err(err) = HotkeyManager::new(tx) else {
+    let Err(err) = HotkeyManager::new(tx, []) else {
         return Ok(());
     };
     error!("Not trusted for input access; err={err:?}");

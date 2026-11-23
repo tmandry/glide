@@ -15,7 +15,6 @@ use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use livesplit_hotkey::Hotkey;
 use macro_rules_attribute::derive;
 use partial::{PartialConfig, ValidationError};
 use regex::{Regex, RegexBuilder};
@@ -24,6 +23,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::actor::wm_controller::WmCommand;
 use crate::model::LayoutKind;
+use crate::sys::hotkey::Hotkey;
 
 pub fn data_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".glide")
@@ -73,7 +73,62 @@ pub struct Config {
 struct ConfigPartial {
     settings: SettingsPartial,
     window_rules: Option<Vec<WindowRule>>,
-    keys: Option<FxHashMap<String, WmCommandOrDisable>>,
+    #[serde(deserialize_with = "deserialize_keys")]
+    keys: Option<FxHashMap<Hotkey, WmCommandOrDisable>>,
+}
+
+/// Deserialize a `[keys]` table, rejecting two entries that bind the same
+/// hotkey under different spellings.
+fn deserialize_keys<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<FxHashMap<Hotkey, WmCommandOrDisable>>, D::Error> {
+    struct KeysVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for KeysVisitor {
+        type Value = FxHashMap<Hotkey, WmCommandOrDisable>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a table of hotkeys")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut spellings = FxHashMap::default();
+            let mut keys = FxHashMap::default();
+            while let Some(hotkey) = map.next_key_seed(NewHotkey(&mut spellings))? {
+                keys.insert(hotkey, map.next_value()?);
+            }
+            Ok(keys)
+        }
+    }
+
+    deserializer.deserialize_map(KeysVisitor).map(Some)
+}
+
+/// Parse a hotkey, failing if `spellings` already has it, and add its
+/// spelling to `spellings`.
+///
+/// Fail while deserializing the key, so the error points at the key.
+struct NewHotkey<'a>(&'a mut FxHashMap<Hotkey, String>);
+
+impl<'de> serde::de::DeserializeSeed<'de> for NewHotkey<'_> {
+    type Value = Hotkey;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Hotkey, D::Error> {
+        let spelling = String::deserialize(deserializer)?;
+        let hotkey = Hotkey::from_str(&spelling).map_err(|err| {
+            serde::de::Error::custom(format!("Could not parse hotkey {spelling:?}: {err}"))
+        })?;
+        if let Some(earlier) = self.0.get(&hotkey) {
+            return Err(serde::de::Error::custom(format!(
+                "{spelling:?} is the same hotkey as {earlier:?}"
+            )));
+        }
+        self.0.insert(hotkey, spelling);
+        Ok(hotkey)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -383,17 +438,10 @@ impl ConfigPartial {
     fn validate(self) -> Result<Config, SpannedError> {
         let mut keys = Vec::new();
         for (key, cmd) in self.keys.unwrap_or_default() {
-            let cmd = match cmd {
-                WmCommandOrDisable::WmCommand(wm_command) => wm_command,
-                WmCommandOrDisable::Disable(_) => continue,
-            };
-            let Ok(key) = Hotkey::from_str(&key) else {
-                return Err(SpannedError {
-                    message: format!("Could not parse hotkey: {key}"),
-                    span: None,
-                });
-            };
-            keys.push((key, cmd));
+            match cmd {
+                WmCommandOrDisable::WmCommand(cmd) => keys.push((key, cmd)),
+                WmCommandOrDisable::Disable(_) => {}
+            }
         }
         Ok(Config {
             settings: self.settings.validate()?,
@@ -730,6 +778,78 @@ mod tests {
         assert!(!config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + KeyH"));
         // But other default keys should still be present
         assert!(config.keys.iter().any(|(hk, _)| hk.to_string() == "Alt + KeyJ"));
+    }
+
+    #[test]
+    fn disable_matches_default_key_written_differently() {
+        let config = Config::parse(
+            r#"
+            [settings]
+            default_keys = true
+
+            [keys]
+            "Option + KeyH" = "disable"
+            "Shift + Alt + H" = "disable"
+            "#,
+        )
+        .unwrap();
+
+        let bound = |name: &str| config.keys.iter().any(|(hk, _)| hk.to_string() == name);
+        assert!(!bound("Alt + KeyH"));
+        assert!(!bound("Alt + Shift + KeyH"));
+        assert!(bound("Alt + KeyJ"));
+    }
+
+    #[test]
+    fn override_replaces_default_key_written_differently() {
+        let config = Config::parse(
+            r#"
+            [settings]
+            default_keys = true
+
+            [keys]
+            "Option + KeyH" = "debug"
+            "#,
+        )
+        .unwrap();
+
+        let bindings: Vec<_> =
+            config.keys.iter().filter(|(hk, _)| hk.to_string() == "Alt + KeyH").collect();
+        assert_eq!(bindings.len(), 1, "{bindings:?}");
+        assert!(format!("{:?}", bindings[0].1).contains("Debug"), "{bindings:?}");
+    }
+
+    #[test]
+    fn invalid_hotkey_is_reported_with_its_location() {
+        let input = r#"
+            [keys]
+            "Alt + Nope" = "debug"
+            "#;
+        let err = Config::parse(input).unwrap_err();
+        assert!(
+            err.message.contains(r#"Could not parse hotkey "Alt + Nope""#),
+            "unexpected error: {}",
+            err.message
+        );
+        let span = err.span.expect("error should have a span");
+        assert!(input[span].contains("Alt + Nope"));
+    }
+
+    #[test]
+    fn same_hotkey_spelled_twice_is_an_error() {
+        let input = r#"
+            [keys]
+            "Alt + H" = "debug"
+            "Option + KeyH" = "debug"
+            "#;
+        let err = Config::parse(input).unwrap_err();
+        assert!(
+            err.message.contains(r#""Option + KeyH" is the same hotkey as "Alt + H""#),
+            "unexpected error: {}",
+            err.message
+        );
+        let span = err.span.expect("error should have a span");
+        assert!(input[span].contains("Option + KeyH"));
     }
 
     #[test]
