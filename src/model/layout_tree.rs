@@ -1169,12 +1169,14 @@ impl tree::Observer for Components {
 mod tests {
     use std::collections::BTreeMap;
 
+    use expect_test::expect;
     use objc2_core_foundation::{CGPoint, CGSize};
     use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::model::LayoutTree;
     use crate::sys::app::pid_t;
+    use crate::testing::scene::Scene;
 
     fn w(pid: pid_t, idx: u32) -> WindowId {
         WindowId::new(pid, idx)
@@ -1700,6 +1702,10 @@ mod tests {
         )
     }
 
+    fn scene(tree: &LayoutTree, layout: LayoutId, screen: CGRect) -> Scene {
+        Scene::of(screen, tree.calculate_layout(layout, screen, &Config::default()))
+    }
+
     #[track_caller]
     fn assert_frames_are(
         left: impl IntoIterator<Item = (WindowId, CGRect)>,
@@ -1768,11 +1774,6 @@ mod tests {
 
     #[test]
     fn balance() {
-        // ┌─────┬─────┐
-        // │     │ b1  │
-        // │ a1  +─────+
-        // │     │ b2  │
-        // └─────┴─────┘
         let mut tree = LayoutTree::new();
         let layout = tree.create_layout();
         let root = tree.root(layout);
@@ -1781,30 +1782,32 @@ mod tests {
         let b1 = tree.add_window_under(layout, a2, WindowId::new(2, 1));
         let _b2 = tree.add_window_under(layout, a2, WindowId::new(2, 2));
         let screen = rect(0, 0, 1000, 1000);
-        let config = &Config::default();
 
         // Skew both levels of the tree.
         tree.resize(a1, 0.2, Direction::Right);
         tree.resize(b1, 0.2, Direction::Down);
-        assert_frames_are(
-            tree.calculate_layout(layout, screen, config),
-            [
-                (WindowId::new(1, 1), rect(0, 0, 700, 1000)),
-                (WindowId::new(2, 1), rect(700, 0, 300, 700)),
-                (WindowId::new(2, 2), rect(700, 700, 300, 300)),
-            ],
-        );
+        expect![[r#"
+            ┌────────────────┬──────┐
+            │ a1             │ b1   │
+            │                │      │
+            │                │      │
+            │                │      │
+            │                │      │
+            │                │      │
+            │                │      │
+            │                ├──────┤
+            │                │ b2   │
+            │                │      │
+            │                │      │
+            └────────────────┴──────┘
+        "#]]
+        .assert_eq(&scene(&tree, layout, screen).draw());
 
         // Balancing the root evens out the nested container too.
         tree.balance(root);
-        assert_frames_are(
-            tree.calculate_layout(layout, screen, config),
-            [
-                (WindowId::new(1, 1), rect(0, 0, 500, 1000)),
-                (WindowId::new(2, 1), rect(500, 0, 500, 500)),
-                (WindowId::new(2, 2), rect(500, 500, 500, 500)),
-            ],
-        );
+        let scene = scene(&tree, layout, screen);
+        scene.assert("a1").same_width_as("b1");
+        scene.assert("b1").above("b2").same_size_as("b2");
     }
 
     #[test]
@@ -1820,31 +1823,16 @@ mod tests {
         let _b2 = tree.add_window_under(layout, group, WindowId::new(2, 2));
         tree.add_window_under(layout, root, WindowId::new(1, 1));
         let screen = rect(0, 0, 1000, 1000);
-        let config = &Config::default();
-
-        let a1_frame = |tree: &mut LayoutTree| {
-            tree.calculate_layout(layout, screen, config)
-                .into_iter()
-                .find(|(wid, _)| *wid == WindowId::new(1, 1))
-                .unwrap()
-                .1
-        };
-        assert_eq!(a1_frame(&mut tree), rect(500, 0, 500, 1000));
+        scene(&tree, layout, screen).assert("b1").left_of("a1").same_width_as("a1");
 
         // The window can't be resized within its group, so its group grows.
         assert!(tree.resize_smart(b1, 0.2));
-        assert_eq!(a1_frame(&mut tree), rect(700, 0, 300, 1000));
+        let scene = scene(&tree, layout, screen);
+        scene.assert("b1").same_size_as("b2").wider_than("a1", 400.0);
     }
 
     #[test]
     fn resize() {
-        // ┌─────┬─────┬─────┐
-        // │     │ b1  │     │
-        // │     +─────+     │
-        // │ a1  │c1│c2│  a3 │
-        // │     +─────+     │
-        // │     │ b3  │     │
-        // └─────┴─────┴─────┘
         let mut tree = LayoutTree::new();
         let layout = tree.create_layout();
         let root = tree.root(layout);
@@ -1859,15 +1847,23 @@ mod tests {
         let screen = rect(0, 0, 3000, 3000);
         let config = &Config::default();
 
-        let orig = vec![
-            (WindowId::new(1, 1), rect(0, 0, 1000, 3000)),
-            (WindowId::new(2, 1), rect(1000, 0, 1000, 1000)),
-            (WindowId::new(3, 1), rect(1000, 1000, 500, 1000)),
-            (WindowId::new(3, 2), rect(1500, 1000, 500, 1000)),
-            (WindowId::new(2, 3), rect(1000, 2000, 1000, 1000)),
-            (WindowId::new(1, 3), rect(2000, 0, 1000, 3000)),
-        ];
-        assert_frames_are(tree.calculate_layout(layout, screen, config), orig.clone());
+        let orig = tree.calculate_layout(layout, screen, config);
+        expect![[r#"
+            ┌───────┬───────┬───────┐
+            │ a1    │ b1    │ a3    │
+            │       │       │       │
+            │       │       │       │
+            │       ├───┬───┤       │
+            │       │ c1│ c2│       │
+            │       │   │   │       │
+            │       │   │   │       │
+            │       ├───┴───┤       │
+            │       │ b3    │       │
+            │       │       │       │
+            │       │       │       │
+            └───────┴───────┴───────┘
+        "#]]
+        .assert_eq(&scene(&tree, layout, screen).draw());
 
         // We may want to have a mode that adjusts sizes so that only the
         // requested edge is resized. Notice that the width is redistributed
@@ -1944,13 +1940,6 @@ mod tests {
 
     #[test]
     fn set_frame_from_resize() {
-        // ┌─────┬─────┬─────┐
-        // │     │ b1  │     │
-        // │     +─────+     │
-        // │ a1  │c1│c2│  a3 │
-        // │     +─────+     │
-        // │     │ b3  │     │
-        // └─────┴─────┴─────┘
         let mut tree = LayoutTree::new();
         let layout = tree.create_layout();
         let root = tree.root(layout);
@@ -1966,15 +1955,10 @@ mod tests {
         let config = &Config::default();
         println!("{}", tree.draw_tree(layout));
 
-        let orig = vec![
-            (WindowId::new(1, 1), rect(0, 0, 1000, 3000)),
-            (WindowId::new(2, 1), rect(1000, 0, 1000, 1000)),
-            (WindowId::new(3, 1), rect(1000, 1000, 500, 1000)),
-            (WindowId::new(3, 2), rect(1500, 1000, 500, 1000)),
-            (WindowId::new(2, 3), rect(1000, 2000, 1000, 1000)),
-            (WindowId::new(1, 3), rect(2000, 0, 1000, 3000)),
-        ];
-        assert_frames_are(tree.calculate_layout(layout, screen, config), orig.clone());
+        let orig = tree.calculate_layout(layout, screen, config);
+        let scene = scene(&tree, layout, screen);
+        scene.assert("a1").left_of("b1").same_width_as("b1").same_width_as("a3");
+        scene.assert("c1").below("b1").above("b3").same_size_as("c2");
 
         // Moves should be rejected and ignored.
         tree.set_frame_from_resize(

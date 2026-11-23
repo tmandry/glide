@@ -37,6 +37,15 @@ This combination leads to some architectural principles:
 
 This list is a work in progress, and we don't always live up to these values today. But understanding the philosophy can help you understand architectural decisions and how the codebase is meant to evolve.
 
+## Release notes
+
+For user-facing changes, include a short description in your PR of what changes
+for users and how to use the feature. This description is input to the release-note
+automation, not the final release note; related changes may be combined and the
+wording edited. See the [release-note guidelines](docs/release-notes.md). You can
+also suggest wording or corrections on the open release PR; the maintainer reviews
+the notes before release.
+
 ## Development process
 
 Glide is very easy to build, run, and test with cargo. Running tests is as simple as
@@ -58,6 +67,38 @@ cargo run
 The first time you do this, you may have to follow instructions to enable
 Accessibility permissions. Instead of enabling them for Glide, enable them for
 whatever application your terminal is running in.
+
+### Layout assertions and snapshots
+
+Tests that check where windows end up can state how the windows relate instead of spelling out pixel frames. A `Scene` (in `src/testing/scene.rs`) is a screen plus labelled windows:
+
+```rust
+scene.assert("a1").left_of("a2").same_size_as("a2");
+scene.assert("b1").wider_than("b2", 20.0);
+```
+
+A failed assertion prints a drawing of the scene along with each window's frame. Use exact frames only when the pixels themselves are what the test is about.
+
+A test can also compare the drawing against a snapshot written inline with [expect-test]:
+
+```rust
+expect![[r#"
+    ┌───────────┬───────────┐
+    │ a1        │ a2        │
+    └───────────┴───────────┘
+"#]]
+.assert_eq(&scene.draw());
+```
+
+Don't draw these by hand. Write `expect![[""]]`, then have the test fill it in:
+
+```
+UPDATE_EXPECT=1 cargo test name_of_the_test
+```
+
+The same command rewrites snapshots after an intended change. Read the diff before committing it, since updating accepts whatever the code produces. Each `expect!` can back only one `assert_eq`.
+
+[expect-test]: https://docs.rs/expect-test
 
 ### Logging
 

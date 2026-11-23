@@ -1,0 +1,55 @@
+name: Release notes evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Generate with Sol on a cache miss and update the isolated draft PR
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: release-scribe-evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/main'
+    environment: release-notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install and cache the reviewed tool
+        uses: baptiste0928/cargo-install@v3
+        with:
+          crate: release-scribe
+          git: https://github.com/tmandry/release-scribe
+          commit: 72a84006567c3d599627fcc11b227f382b9e1651
+          locked: true
+      - name: Verify the tool
+        run: release-scribe --version
+      - name: Collect, optionally generate, and update the evaluation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ inputs.apply && secrets.OPENAI_API_KEY || '' }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$APPLY" = true ]; then args+=(--apply); fi
+          release-scribe evaluate \
+            --repo "$GITHUB_WORKSPACE" \
+            --config .github/release-scribe/config.json \
+            --output "$RUNNER_TEMP/release-scribe" "${args[@]}"

@@ -3,118 +3,484 @@
     "source": "3cb7ff2ef1a56496170bddd41d9f0853412082b1",
     "disposition": "excluded",
     "bullets": [],
-    "reason": "Packaging retries for transient notarization failures; release infrastructure maintenance."
-  },
-  {
-    "source": "2429ea5e546ca50658600f042328a5bb03308075",
-    "disposition": "included",
-    "bullets": [
-      "b3"
-    ],
-    "reason": "One scroll-resize outcome including native sizing constraints and final-frame viewport completion. The new end_user_resize Exposé check in 7bfce35 is superseded by 43b7d90; no separate Mission Control regression claim."
-  },
-  {
-    "source": "52c1e4cda55700db7ebead1d2b8e24dd39253653",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Resize-band regression tests; no independent behavior change."
-  },
-  {
-    "source": "7bfce350886cf2a335ba50cf4bc6b10c6ae90181",
-    "disposition": "included",
-    "bullets": [
-      "b3"
-    ],
-    "reason": "One scroll-resize outcome including native sizing constraints and final-frame viewport completion. The new end_user_resize Exposé check in 7bfce35 is superseded by 43b7d90; no separate Mission Control regression claim."
-  },
-  {
-    "source": "43b7d90604f6c2c8dd3a2c334a3b138d1506aa17",
-    "disposition": "included",
-    "bullets": [
-      "b3"
-    ],
-    "reason": "One scroll-resize outcome including native sizing constraints and final-frame viewport completion. The new end_user_resize Exposé check in 7bfce35 is superseded by 43b7d90; no separate Mission Control regression claim."
-  },
-  {
-    "source": "5c199547806c3dbc56613136fefcce297eda0e9b",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
-  },
-  {
-    "source": "6ef4a0a4e9a9ae1ba16ab2d3cf7c8dc51ee74688",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
-  },
-  {
-    "source": "8ec08d6619ad2ec9310af3e99dbff54b591a1096",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Internal mouse-event API migration. The concrete listen-only change concerns the developer mouse-click diagnostic, and teardown concerns actor shutdown; neither adds a distinct everyday window-management outcome."
-  },
-  {
-    "source": "85a406e73b0f7e9017450311fac30ab934e2ff05",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
-  },
-  {
-    "source": "95bcd96eefba6b8d6b33b14c7709a56cd1bc042e",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
-  },
-  {
-    "source": "4b2008137cf5a9f5c9e64a78bf12164dd9354b88",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Dependency/API migration and internal safe-wrapper refactoring; the later user-visible event-tap recovery is covered separately."
-  },
-  {
-    "source": "31358462703962e7f21a0f3fcee811bc9f9453f8",
-    "disposition": "excluded",
-    "bullets": [],
-    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+    "reason": "Changes only .github/workflows/package.yml to retry packaging after transient notarization failures. This is package-production maintenance, not a change to shipped application behavior."
   },
   {
     "source": "629727cb0215bd48f10b0bfa0f100095221aa017",
     "disposition": "excluded",
     "bullets": [],
-    "reason": "Move layout root ownership to enable the grouped root-container fix; serialized field layout is preserved and no separate user behavior is claimed."
+    "reason": "Moves layout ownership into Components while retaining the serialized representation. This internal preparation does not change layout cleanup behavior."
   },
   {
     "source": "8dd14ab3b9cbbf94da5b45ecc26dbff542bcebac",
     "disposition": "included",
     "bullets": [
-      "b2"
+      "group-layout-cleanup"
     ],
-    "reason": "Fix leftover root containers/groups present in the base culling code; retain the surviving container and its selection/sizing."
+    "reason": "Allows the remaining group to replace an outer layout after a window closes. The supplied 0.2.18 base explicitly skips cleanup of nonempty roots in layout_tree.rs:1057–1081, establishing a shipped limitation. Head retains the fix and regression tests; scroll layouts remain exempt."
   },
   {
     "source": "9a32cabf44c4d270794b04f43e198845939c2e61",
     "disposition": "excluded",
     "bullets": [],
-    "reason": "Equivalent culling control-flow cleanup accompanying the root-container fix; no independent user outcome."
+    "reason": "Replaces recursive promotion with a loop and clarifies comments. The recursion was introduced by the preceding unreleased implementation and is absent from the released base; there is no separate user-facing outcome."
   },
   {
     "source": "4b453bb4d263b5c29e58e7b5dcb68eced691ba2b",
+    "disposition": "included",
+    "bullets": [
+      "group-layout-cleanup"
+    ],
+    "reason": "The merge confirms the net root-cleanup fix and regression tests. Supporting ownership, orientation, and tree-operation changes are grouped into the same outcome; comparison with the base's root exemption establishes the release boundary."
+  },
+  {
+    "source": "2429ea5e546ca50658600f042328a5bb03308075",
+    "disposition": "included",
+    "bullets": [
+      "scroll-edge-resizing"
+    ],
+    "reason": "Removes the mouse-delta resize path and follows application resize notifications instead. The supplied 0.2.18 base contains both paths and uses a listen-only mouse tap, supporting a shipped double-application problem and the correction to respect application size constraints."
+  },
+  {
+    "source": "52c1e4cda55700db7ebead1d2b8e24dd39253653",
     "disposition": "excluded",
     "bullets": [],
-    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+    "reason": "Adds resize-edge hit-test coverage, including narrow windows, without changing production behavior."
+  },
+  {
+    "source": "7bfce350886cf2a335ba50cf4bc6b10c6ae90181",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Guards a direct viewport update introduced by this group's new resize-completion helper. Both the update and guard are removed before release; the helper was absent from the base. This is an unreleased-only intermediate fix."
+  },
+  {
+    "source": "43b7d90604f6c2c8dd3a2c334a3b138d1506aa17",
+    "disposition": "included",
+    "bullets": [
+      "scroll-edge-resizing"
+    ],
+    "reason": "Lets the final resize notification update the viewport. Base reactor.rs:690–706 suppresses viewport updates for size changes, while base layout.rs:1528–1538 recenters through mouse-driven completion, establishing that the final-notification problem predates this work. The regression test verifies that the widened column becomes visible after resizing."
+  },
+  {
+    "source": "5c199547806c3dbc56613136fefcce297eda0e9b",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Redundant aggregate attribution: the merge verifies the resizing changes and tests already represented by the component commits. Head glide.default.toml:233–237 confirms that scroll layout remains experimental and disabled by default."
+  },
+  {
+    "source": "6ef4a0a4e9a9ae1ba16ab2d3cf7c8dc51ee74688",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Introduces an internal event-tap wrapper with callback ownership and run-loop cleanup. It supports later work but provides no independently useful user capability."
+  },
+  {
+    "source": "8ec08d6619ad2ec9310af3e99dbff54b591a1096",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Migrates mouse APIs while preserving event subscriptions and dispatch, adjusts a diagnostic click monitor, and adds teardown cleanup. No separate end-user outcome is established; the later recovery fix is checked against the pre-migration base."
+  },
+  {
+    "source": "85a406e73b0f7e9017450311fac30ab934e2ff05",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Replaces integer error comparisons with CGError::Success and updates the error type while preserving success and error branches. No user-facing behavior change is established."
+  },
+  {
+    "source": "95bcd96eefba6b8d6b33b14c7709a56cd1bc042e",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Migrates the diagnostic focus watcher's run-loop API and converts its existing polling interval. This is developer-tool maintenance."
+  },
+  {
+    "source": "4b2008137cf5a9f5c9e64a78bf12164dd9354b88",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Removes three legacy dependencies after migrating their callers. No user-facing compatibility requirement, default, or performance effect is established."
+  },
+  {
+    "source": "31358462703962e7f21a0f3fcee811bc9f9453f8",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The merge confirms equivalent event forwarding and cursor success checks during the API migration. Its wrapper and dependency changes have no independent release-note outcome."
   },
   {
     "source": "02369817ac37f1b7f63dd58a45099e717be46d53",
     "disposition": "included",
     "bullets": [
-      "b1"
+      "mouse-monitoring-recovery"
     ],
-    "reason": "Restore user-visible mouse focus and scroll behavior after system-disabled event taps. PR #286 explicitly states this problem predates the migration, so it is not excluded as unreleased-only."
+    "reason": "Adds recovery for system-disabled event taps. Head event_tap.rs:290–312 re-enables monitoring when intended, and the mouse actor uses the wrapper. The supplied 0.2.18 base enables its mouse tap once and has no disabled-tap recovery branch, establishing a shipped problem rather than a wrapper regression."
   },
   {
     "source": "ce1593d4eb3ef464fa90e582ae1d47b0cac93788",
+    "disposition": "included",
+    "bullets": [
+      "mouse-monitoring-recovery"
+    ],
+    "reason": "The merge verifies recovery and the guard preserving intentional disables; head retains both. Grouped with the implementation as one mouse-monitoring outcome. Claims about improved keyboard-tap reliability remain separately unresolved."
+  },
+  {
+    "source": "95779195f7d7d97a805b1ddc819d524e1991d48a",
     "disposition": "excluded",
     "bullets": [],
-    "reason": "Merge bookkeeping; individual evidence commits account for the outcome."
+    "reason": "Updates only the documentation site's lockfile for postcss-selector-parser and removes cssesc. The site manifest is unchanged, and no application or published-site behavior change is demonstrated."
+  },
+  {
+    "source": "ce1e9241e95a9e592dde1f24ed9048197c2ad973",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The merge contains the same documentation-site lockfile update and no additional changes. Upstream security claims do not establish a shipped Glide issue requiring release notes."
+  },
+  {
+    "source": "ceb4ff22d11a2526f24056d66e0bd394d9082c8c",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds a manually triggered release-note evaluation workflow that is absent from the base. This is repository automation, not an application capability."
+  },
+  {
+    "source": "7a825ca5213ea196560f5b9a5a924e30bc10a3cb",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds caching and version verification and updates the release-scribe pin. These refine automation introduced in this range without changing Glide behavior."
+  },
+  {
+    "source": "a3711d563b7914a52023cde5b9bd2d56c29f7891",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Expands release-note editorial guidelines and examples. This is contributor guidance, not documentation of a new application capability."
+  },
+  {
+    "source": "fca53289a2d108b685a283217774954329dc9bcb",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes only the pinned release-scribe revision. No effect on Glide users is demonstrated."
+  },
+  {
+    "source": "765c94b3f8d7c714e144ae3381da03257bf089ad",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Replaces release-tool checkout, build, and cache steps with cargo-install. This changes repository automation installation, not Glide installation."
+  },
+  {
+    "source": "ba8d0b758385a666386ac0df747f02a01c6511f2",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds the release-notes environment and updates the tool pin. This scopes automation credentials and execution rather than application permissions."
+  },
+  {
+    "source": "db555743bb63f554fec5fbb70e1ccd92bb5fb942",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The merge contains release-scribe configuration, its workflow, and contributor/editorial guidance. The workflow is absent from the base, and no user-facing Glide outcome is established."
+  },
+  {
+    "source": "bdd4a147a1cd0b3ba4ddf055460ff96e5a1dd4df",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Sets an automation input budget, updates the tool pin, and adds a preflight workflow. The preflight is deleted before release, and the intermediate budget is later increased; none changes the application."
+  },
+  {
+    "source": "df85509a0471da1493dc643728804acb56d23fff",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Updates the evaluation tool pin and deletes the preflight workflow introduced earlier in this range. These are internal automation changes."
+  },
+  {
+    "source": "7f3fa072b297666a5c6f27582c62742b542d83d6",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Raises release-scribe max_input_bytes from 2,000,000 to 4,000,000. This is an evidence budget for note generation, not a Glide runtime limit or user setting."
+  },
+  {
+    "source": "b42e1c17bc93baa10292d8a60bf904fc14df2da6",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The merge changes only the release-scribe input budget and evaluation tool pin. Head confirms the final values; there is no user-facing application outcome."
+  },
+  {
+    "source": "367139e148740566385364f99797ef6b7a337cec",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Exposes an internal handler and adds test-only screen-space mocks while preserving production screen filtering. This supports tests rather than changing released behavior."
+  },
+  {
+    "source": "38da7f9e9c5526c5161be73d63f8511de82e1917",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds a simulated macOS environment beneath the test-only testing module. The scenarios do not establish a production fix."
+  },
+  {
+    "source": "3fb4b9d98159348810f765b415d313745532539e",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds Scene rendering and assertions for tests. Its final module is test-only, so its diagrams are developer tooling rather than a new layout capability."
+  },
+  {
+    "source": "8fa2e8513beb91239f1d0e92be1650341f88898b",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds screen fixtures that construct reactor test events. Shipped display configuration and defaults do not change."
+  },
+  {
+    "source": "c4882e82d081ff271514df3c4e5223f4b420b24a",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Replaces layout-tree test frame assertions and hand-drawn comments with Scene snapshots. No production balancing or layout behavior change is established."
+  },
+  {
+    "source": "37a1d97e645c0f9f84cc5bead5bfcf80dc157ac8",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes layout-manager test helpers and assertions inside a cfg(test) module. The depicted layouts are expectations, not newly available features."
+  },
+  {
+    "source": "b379edfd2d28a433c560075e7a3b6efc08ae9b05",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Replaces reactor test frame comparisons with fills_screen assertions without changing how users' windows are resized."
+  },
+  {
+    "source": "293e6521e22c3094a6f10b75ae62f0141c3228b3",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes assertion failure wording in the test-only Scene implementation. It is not an application diagnostic or sizing fix."
+  },
+  {
+    "source": "bfb989042349fdd184e6e06aaf04e040b9f6c6e1",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Migrates simulated scenarios to Scene relations and drawings. These test-only assertions do not demonstrate a production behavior change."
+  },
+  {
+    "source": "5733cb8ee61b72549d365431cfa27bbbcc7ef3e1",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Moves Scene and simulator support into a testing module declared under cfg(test) in head src/lib.rs. This is test organization only."
+  },
+  {
+    "source": "50242e70c7567ecc96c2e349cb5f1508ff36dfd4",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds pixel-difference resize assertions to test-only Scene support. It does not add a production resize command or change window sizing."
+  },
+  {
+    "source": "b13663b91c73abc1dc9fe4f8a4f1a20faa5a77ed",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Wires real actors to simulated app, controller, and Dock components in test-only support. More faithful simulation and exposed failures are not themselves production fixes."
+  },
+  {
+    "source": "0832f3f05b94fe2f7fdc447e1c776c8afcfa751c",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Documents layout assertions and snapshot updates for contributors. There is no corresponding application capability or user adoption requirement."
+  },
+  {
+    "source": "49ac06a38a05c5e7ac8c76b3c398a6f519d77cdc",
+    "disposition": "unresolved",
+    "bullets": [],
+    "reason": "Described as documenting a Mission Control limitation in the simulator, but its patch and affected lines were not collected. The final test-only module suggests exclusion, but the precise change and any production effect remain unverified."
+  },
+  {
+    "source": "434651d2054d4f76ebb7ac0d3e23ea76e385ea88",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The inspected merge adds test infrastructure, assertion migrations, contributor guidance, internal handler visibility, and test-gated mocks. Head confirms the testing module is cfg(test). No merge-level user outcome is supported; the uninspected follow-up remains separately unresolved."
+  },
+  {
+    "source": "59c2f99253dc0b1c99267a50bf94fc2d7a9129fc",
+    "disposition": "included",
+    "bullets": [
+      "mission-control-space-switches"
+    ],
+    "reason": "Prevents windows without an assigned Space from being tiled during Mission Control. The regression test verifies that a newly opened window does not trigger a switch on exit. The permissive fallback exists in base reactor.rs:1194–1204, establishing a shipped problem; head retains the correction."
+  },
+  {
+    "source": "b3141c49e807a0ee497a05cfc48f92e144882438",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes only simulated accessibility window enumeration to reflect the shown desktop. This improves test fidelity rather than runtime behavior."
+  },
+  {
+    "source": "f292d981932bc72b8441a0b74b46b51465b5a6d7",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Extracts the existing per-app layout update into a helper while retaining discovery and focus updates. It supports the fix without adding an independent user outcome."
+  },
+  {
+    "source": "83b6a554040c428e2ed3fc0f1a59cca86018ac16",
+    "disposition": "included",
+    "bullets": [
+      "mission-control-space-switches"
+    ],
+    "reason": "Refreshes window membership before raising windows when Mission Control closes. A simulation test verifies no desktop switch after dragging the focused window away. Base reactor.rs:790–809 raises the old layout without refreshing, establishing that the problem predates this range; head retains the fix."
+  },
+  {
+    "source": "546607f5d6edf0eeee85dc3bfc67614f1383ac03",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Redundant aggregate attribution: the merge combines the two Mission Control corrections already represented by their implementation commits, plus supporting refactoring and tests. Both corrections remain in head."
+  },
+  {
+    "source": "a1361fbfc728fd085a380c5f45ca21bcd9084793",
+    "disposition": "included",
+    "bullets": [
+      "locked-screen-app-discovery"
+    ],
+    "reason": "Adds discovery after unlocking and when an unknown app activates. The supplied 0.2.18 base discovers apps only at startup and through launch notifications, establishing a released gap. Head wm_controller.rs:189–207 and 277–300 retains both recovery paths."
+  },
+  {
+    "source": "c61f64f3ecd774f9d637df69566ebc0d277d0872",
+    "disposition": "included",
+    "bullets": [
+      "locked-screen-app-discovery"
+    ],
+    "reason": "The merge confirms the same app-discovery correction and is grouped into one outcome. No retries after app-thread initialization failures are claimed; that discussion is not implemented by the inspected patch."
+  },
+  {
+    "source": "9b2371fbc15aec4b7d2bad3a9bfc46579d95de62",
+    "disposition": "unresolved",
+    "bullets": [],
+    "reason": "Introduces Glide-owned hotkey parsing, replacing livesplit_hotkey::Hotkey used by the 0.2.18 base. The parser refactor needs no standalone entry, but reported rejection of formerly accepted key names may require migration guidance. The complete old/new accepted-name comparison is missing."
+  },
+  {
+    "source": "9d607bf59a3dca623bc567c2bff40e39da258d0f",
+    "disposition": "unresolved",
+    "bullets": [],
+    "reason": "Adds Cmd and Command aliases to the new parser. Base documentation already lists Cmd, but base behavior depends on livesplit-hotkey 0.8.1. Its parser must be inspected before classifying this as a shipped documentation mismatch or an unreleased parser regression."
+  },
+  {
+    "source": "d54e69cbba4ec2adffa2ba9072f596ea0dedcb0e",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds an active event-tap API and pass/consume dispositions. This is infrastructure for side-specific shortcuts, not a separate capability or established shipped fix."
+  },
+  {
+    "source": "60b1eacf834ce955c1b86e9dc64190fae7715c18",
+    "disposition": "unresolved",
+    "bullets": [],
+    "reason": "Switches shortcut registration to the replacement manager. The replacement is internal, but a claimed timeout-recovery improvement needs comparison of the new keyboard tap and the released livesplit-hotkey implementation. The supplied code does not establish both recovery paths."
+  },
+  {
+    "source": "59c9864d26a4d7aa1ad5be2aa9ba3633c63da433",
+    "disposition": "included",
+    "bullets": [
+      "side-specific-shortcuts"
+    ],
+    "reason": "Introduces separate left/right modifier flags and suffix parsing, retained in head hotkey.rs:69–84 and 161–190. Head configuration documentation provides the AltLeft example; the base lacks these options, supporting a new feature."
+  },
+  {
+    "source": "14d883071ea8d016394cd8542c0906ee0c2c18d6",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes canonical modifier display from Meta to Cmd. Head still accepts Meta, Cmd, and Command, so no migration requirement or separate user outcome is established."
+  },
+  {
+    "source": "e313f479940c0930c43540648e6ceefc7299562a",
+    "disposition": "included",
+    "bullets": [
+      "default-shortcut-aliases"
+    ],
+    "reason": "Parses shortcut keys before configuration merging so equivalent spellings can override or disable defaults. The 0.2.18 base merges raw strings before parsing while documenting Option and Alt as interchangeable, establishing a shipped bug. Tests verify alternate-spelling overrides and disabling; validation improvements are supporting details."
+  },
+  {
+    "source": "40a032d4f94f20fcc28df858684e79e9160dc130",
+    "disposition": "unresolved",
+    "bullets": [],
+    "reason": "Consumes matching shortcut autorepeats without rerunning commands, as retained in head hotkey.rs:303–307. The released base delegates repeat handling to livesplit-hotkey 0.8.1, whose macOS implementation was not inspected. Whether repeat leakage shipped or arose only in the replacement tap remains unknown."
+  },
+  {
+    "source": "ca99f0201220bc1e4fb03cae4f967657586fbe92",
+    "disposition": "included",
+    "bullets": [
+      "side-specific-shortcuts"
+    ],
+    "reason": "The merge verifies the integrated left/right modifier implementation and configuration instructions, including leaving the opposite Option key available for typing. Grouped with the feature implementation; incidental dependencies and registration changes receive no separate bullet."
+  },
+  {
+    "source": "35331eba74e94d6809a0ebd571c5d94c431f6501",
+    "disposition": "included",
+    "bullets": [
+      "secure-input-warning"
+    ],
+    "reason": "Adds Secure Input detection and change notifications, retained in head session.rs:91–138. Grouped with the warning interface as a diagnostic feature, not a fix for Secure Input itself. Supported-version notification behavior remains a reviewer question."
+  },
+  {
+    "source": "cc47f50bfd95fdb73263f71db64252e65d3dc693",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Extracts shared parachute-image loading. This supports warning and alert changes without providing an independent user-facing outcome."
+  },
+  {
+    "source": "e1b0f3dc9ada517d9268d353b2a0d4f80f80dc0d",
+    "disposition": "included",
+    "bullets": [
+      "secure-input-warning"
+    ],
+    "reason": "Adds the warning icon, named menu item, and troubleshooting dialog. Head status.rs:122–132 limits the warning to configurations with key bindings, and status_bar.rs verifies the interface. The base lacks this state, supporting a new diagnostic capability."
+  },
+  {
+    "source": "3ecdb8fc0d843582d71520f5be597568d43c2ec1",
+    "disposition": "included",
+    "bullets": [
+      "alert-parachute-icon"
+    ],
+    "reason": "Assigns the parachute icon in the shared alert helper, retained in head alert.rs:15–20. The base helper lacks explicit icon assignment. Fullscreen-Space alert behavior was already present and is not claimed as new."
+  },
+  {
+    "source": "712a0522ecb5c75b0c6f57663657c1bf28aed4a0",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Clarifies that function and page keys use Fn as usual. No bindings, commands, or defaults change, and no new functionality is established."
+  },
+  {
+    "source": "e91cf79c2385eb6443c4e12a27d0ecbe1195fe2a",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes contributor branch-polishing instructions about backup deletion and reporting old commit IDs. It has no demonstrated application effect."
+  },
+  {
+    "source": "1093745b263ed68965e7f7b4bd7cef6aa7490591",
+    "disposition": "included",
+    "bullets": [
+      "secure-input-warning"
+    ],
+    "reason": "The merge confirms the Secure Input warning and troubleshooting action remain in head. Head glide.default.toml:54–55 enables the status icon by default. Grouped with the implementation; exact published-release boundary confirmation remains in the reviewer checklist."
+  },
+  {
+    "source": "87d1f1ac86ce711afe67a4622b67ff38073e5d79",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds a contributor script for checking formatting, builds, and tests in a temporary worktree. The script is absent from the base and does not change Glide behavior."
+  },
+  {
+    "source": "2aec519efcfe8fe32a9ffa51bc3ad83eda6d589c",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Adds an agent workflow for reviewing and rewriting development branches. Its skill and interface metadata are contributor tooling, not an application capability."
+  },
+  {
+    "source": "900f1a901f0969abfee95f238739e1317e72873b",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Changes contributor guidance for splitting capabilities, squashing fixes, and checking commits. These history conventions do not affect released Glide behavior."
+  },
+  {
+    "source": "d4f68680d93b727c080dee9e3a1293acdb050466",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The merge is limited to the branch-polishing skill, its metadata, agent guidance, and the validation script. It adds no user-facing application outcome."
+  },
+  {
+    "source": "31845bf742ba8b8ab5d3787b465e7cecbcd84a5e",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "Isolates the contributor script's default build output in target/check-each-commit. The affected script was introduced in this range and is absent from the released base, so this is not a shipped application regression."
+  },
+  {
+    "source": "d62508579845fe441f89999119261ea13fe9ff2f",
+    "disposition": "excluded",
+    "bullets": [],
+    "reason": "The merge changes only the contributor script's build-directory behavior already accounted for above. It has no separate user-facing outcome, and the script did not exist at the release base."
   }
 ]

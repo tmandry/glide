@@ -48,14 +48,16 @@ accessibility-sys = { version = "0.3.0", git = "https://github.com/tmandry/acces
 anyhow = "1.0.83"
 ascii_tree = "0.1.1"
 bitflags = "2.4.1"
+block2 = "0.6.2"
 clap = { version = "4.5.4", features = ["cargo", "derive"] }
 dirs = "5.0.1"
 hex = "0.4.3"
 indexmap = { version = "2.10.0", features = ["serde"] }
-livesplit-hotkey = "0.8.1"
+keycode = "1.0.0"
 macro_rules_attribute = "0.2.2"
 objc2 = "0.6.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "block2",
     "NSAlert",
     "NSApplication",
     "NSButton",
@@ -159,6 +161,7 @@ test-log = { version = "0.2.16", default-features = false, features = [
     "trace",
 ] }
 tiny_http = "0.12.0"
+expect-test = "1.5.1"
 
 [package.metadata.packager]
 productName = "Glide"

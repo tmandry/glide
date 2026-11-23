@@ -147,7 +147,7 @@ mod tests {
     use super::super::testing::{Apps, make_windows};
     use super::super::{Event, ExposeActive, LayoutManager, Quiet, Reactor, SpaceId, WindowId};
     use crate::sys::screen::CoordinateConverter;
-    use crate::sys::window_server::WindowsOnScreen;
+    use crate::sys::window_server::{WindowServerInfo, WindowsOnScreen};
 
     #[test]
     fn it_tracks_frontmost_app_and_main_window_correctly() {
@@ -333,6 +333,16 @@ mod tests {
         let mut reactor = Reactor::new_for_test(LayoutManager::new_for_test());
         let pid = 3;
         let windows = make_windows(2);
+        let on_screen = windows
+            .iter()
+            .map(|info| WindowServerInfo {
+                id: info.sys_id.unwrap(),
+                pid,
+                layer: 0,
+                frame: info.frame,
+                spaces: vec![],
+            })
+            .collect::<Vec<_>>();
         let space = SpaceId::new(1);
         reactor.handle_event(ScreenParametersChanged {
             frames: vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
@@ -366,7 +376,7 @@ mod tests {
 
         reactor.handle_event(SpaceChanged(
             vec![Some(space)],
-            WindowsOnScreen::new(vec![]),
+            WindowsOnScreen::new(on_screen),
             ExposeActive(false),
         ));
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(3, 1)));

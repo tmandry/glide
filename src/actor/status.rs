@@ -6,12 +6,15 @@
 use std::sync::Arc;
 
 use objc2::MainThreadMarker;
-use tracing::instrument;
+use objc2_app_kit::NSRunningApplication;
+use tracing::{info, instrument, warn};
 
 use crate::actor::updater::{self, UpdateStatus};
 use crate::actor::wm_controller;
 use crate::config::Config;
+use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::screen::{SpaceId, get_active_space_number};
+use crate::sys::session::{SecureInput, on_secure_input_change, secure_input};
 use crate::ui::status_bar::StatusIcon;
 use crate::{actor, trace_call};
 
@@ -35,6 +38,7 @@ pub struct Status {
     wm_tx: wm_controller::Sender,
     updater_tx: updater::Sender,
     update_status: Option<UpdateStatus>,
+    secure_input: Option<SecureInput>,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -56,6 +60,7 @@ impl Status {
             wm_tx,
             updater_tx,
             update_status: None,
+            secure_input: None,
         };
         this.apply_config();
         this.update_toggle_title(true);
@@ -76,16 +81,55 @@ impl Status {
         }
         self.update_space();
         self.show_update_status();
+        self.show_secure_input();
     }
 
     pub async fn run(mut self) {
         if self.icon.is_none() {
             return;
         }
-        while let Some((span, event)) = self.rx.recv().await {
-            let _guard = span.enter();
-            self.handle_event(event);
+        let (secure_input_tx, mut secure_input_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _secure_input_notifiers = on_secure_input_change(move || _ = secure_input_tx.send(()))
+            .inspect_err(|err| warn!("Can't watch for Secure Input changes: {err:?}"));
+        self.check_secure_input();
+        loop {
+            tokio::select! {
+                event = self.rx.recv() => {
+                    let Some((span, event)) = event else { break };
+                    let _guard = span.enter();
+                    self.handle_event(event);
+                }
+                Some(()) = secure_input_rx.recv() => self.check_secure_input(),
+            }
         }
+    }
+
+    fn check_secure_input(&mut self) {
+        let state = secure_input();
+        if state == self.secure_input {
+            return;
+        }
+        match state {
+            Some(SecureInput { likely_holder }) => {
+                info!(?likely_holder, "Secure Input is on; hotkeys are blocked")
+            }
+            None => info!("Secure Input is off"),
+        }
+        self.secure_input = state;
+        self.show_secure_input();
+    }
+
+    fn show_secure_input(&mut self) {
+        let Some(icon) = &mut self.icon else { return };
+        let blocked = self.secure_input.filter(|_| !self.config.keys.is_empty());
+        let details = blocked.map(|SecureInput { likely_holder }| {
+            let app = likely_holder
+                .and_then(NSRunningApplication::with_process_id)
+                .and_then(|app| app.localized_name())
+                .map(|name| name.to_string());
+            secure_input_details(app.as_deref())
+        });
+        icon.set_secure_input_warning(details.as_deref());
     }
 
     #[instrument(skip(self))]
@@ -156,5 +200,37 @@ impl Status {
         } else {
             "Start Managing Space"
         });
+    }
+}
+
+fn secure_input_details(app: Option<&str>) -> String {
+    let what = "Secure Input is on, so macOS is keeping your keyboard shortcuts from \
+        Glide. Apps turn it on while you type into a password field, and it \
+        normally turns off again when you leave the field.";
+    let fix = match app {
+        Some(app) => format!(
+            "Probably turned on by:\n{app}\n\nIf it stays on, switch to that app and \
+            click into and back out of a password field, or quit it."
+        ),
+        None => "If it stays on, find the app with a password field open and click out \
+            of the field, or quit that app."
+            .to_owned(),
+    };
+    format!("{what}\n\n{fix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secure_input_details_name_the_likely_app() {
+        let details = secure_input_details(Some("Google Chrome"));
+        assert!(
+            details.contains("Probably turned on by:\nGoogle Chrome\n"),
+            "{details}"
+        );
+        let details = secure_input_details(None);
+        assert!(!details.contains("Probably"), "{details}");
     }
 }

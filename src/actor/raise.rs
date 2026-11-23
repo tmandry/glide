@@ -138,7 +138,7 @@ impl RaiseManager {
         }
     }
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             active_sequence: None,
             queued_sequences: VecDeque::new(),
@@ -147,7 +147,7 @@ impl RaiseManager {
         }
     }
 
-    fn handle_message(&mut self, msg: Event) {
+    pub(crate) fn handle_message(&mut self, msg: Event) {
         match msg {
             Event::RaiseRequest(request) => {
                 debug!(
