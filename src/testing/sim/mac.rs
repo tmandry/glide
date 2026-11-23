@@ -73,7 +73,8 @@ pub enum Message {
     /// in front of the app's other windows on screen if `false`.
     OrderFront(WindowServerId, bool),
     /// From an app: the window was minimized to the Dock, or restored from it.
-    /// A restored window comes to the front and its app is activated.
+    /// A restored window comes to the front, its app is activated, and its
+    /// desktop is shown.
     SetMinimized(WindowServerId, bool),
     /// Give the window the keyboard focus, activating its app.
     MakeKey(WindowServerId),
@@ -325,13 +326,16 @@ impl WindowServer {
                     return;
                 };
                 window.minimized = minimized;
-                let pid = window.pid;
+                let (pid, desktop) = (window.pid, window.desktop);
                 if !minimized {
                     if let Some(at) = self.order.iter().position(|&w| w == wsid) {
                         self.order.remove(at);
                         self.order.insert(0, wsid);
                     }
                     self.activate(pid, out);
+                    if let Some(index) = self.desktops.iter().position(|&d| Some(d) == desktop) {
+                        self.show_desktop(index, out);
+                    }
                 }
             }
             Message::MakeKey(wsid) => {

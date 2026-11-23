@@ -315,3 +315,23 @@ fn switching_desktops_raises_nothing_when_the_order_already_matches() {
         );
     });
 }
+
+// TODO: Fails once A1 is minimized, as in `apps::minimize_and_restore`. See
+// https://github.com/tmandry/glide/issues/209.
+#[test]
+#[ignore]
+fn restoring_a_window_shows_its_desktop() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        sim.minimize_window("A1");
+        sim.run();
+        sim.switch_desktop(2);
+        sim.run();
+
+        sim.restore_window("A1");
+        sim.run();
+        assert_eq!(sim.current_desktop(), 1, "{schedule:?}");
+        assert_eq!(sim.key_window().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.selected().as_deref(), Some("A1"), "{schedule:?}");
+    });
+}
