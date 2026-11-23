@@ -30,11 +30,13 @@ use std::time::Duration;
 use objc2_core_foundation::CGRect;
 
 use self::glide::{Actor, Glide};
-pub use self::mac::Action;
+pub use self::mac::{Action, WindowTraits};
 use self::mac::{Mac, Notification};
+pub use crate::actor::app::Quiet;
 use crate::actor::layout::LayoutCommand;
 use crate::actor::reactor;
 use crate::sys::app::pid_t;
+use crate::sys::ax::fake;
 use crate::testing::scene::Scene;
 
 /// Something with an inbox and its own event loop.
@@ -66,6 +68,12 @@ impl Schedule {
     /// than 1.
     pub fn each(scenario: impl Fn(Schedule) + Sync) {
         Schedule::sweep(16, scenario);
+    }
+
+    /// Like [`Schedule::each`] with 8 seeded schedules, for a scenario that is
+    /// run many times to vary something else as well.
+    pub fn sample(scenario: impl Fn(Schedule) + Sync) {
+        Schedule::sweep(8, scenario);
     }
 
     fn sweep(seeds: u64, scenario: impl Fn(Schedule) + Sync) {
@@ -116,6 +124,15 @@ fn env_u64(name: &str) -> Option<u64> {
     )
 }
 
+/// A change of keyboard focus as one of Glide's app actors reported it: an
+/// app became active, or a window became its app's main window, with the
+/// [`Quiet`] value the actor gave the change.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FocusReport {
+    App(String, Quiet),
+    Window(String, Quiet),
+}
+
 pub struct Sim {
     mac: Rc<RefCell<Mac>>,
     glide: Glide,
@@ -164,10 +181,35 @@ impl Sim {
         self.user().open_window(pid, title);
     }
 
+    /// Have an app open a window, telling Glide about the new main window
+    /// before the window's creation.
+    pub fn open_window_main_first(&mut self, pid: pid_t, title: &str) {
+        self.user().open_window_main_first(pid, title);
+    }
+
+    /// Open a window that adjusts the frame it is given, as `traits` say.
+    pub fn open_window_with(&mut self, pid: pid_t, title: &str, traits: WindowTraits) {
+        self.user().open_window_with(pid, title, traits);
+    }
+
     pub fn close_window(&mut self, title: &str) {
         let mut mac = self.user();
         let wsid = mac.window_titled(title);
         mac.close_window(wsid);
+    }
+
+    /// Minimize a window to the Dock.
+    pub fn minimize_window(&mut self, title: &str) {
+        let mut mac = self.user();
+        let wsid = mac.window_titled(title);
+        mac.minimize_window(wsid);
+    }
+
+    /// Restore a minimized window from the Dock.
+    pub fn restore_window(&mut self, title: &str) {
+        let mut mac = self.user();
+        let wsid = mac.window_titled(title);
+        mac.restore_window(wsid);
     }
 
     pub fn click_window(&mut self, title: &str) {
@@ -200,6 +242,24 @@ impl Sim {
     /// request.
     pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
         self.mac.borrow_mut().set_app_delay(pid, delay);
+    }
+
+    /// Make Glide's requests to give one of an app's windows the keyboard
+    /// focus silently do nothing, as activations sometimes do, or work again.
+    pub fn set_ignores_make_key(&mut self, pid: pid_t, ignores: bool) {
+        self.mac.borrow_mut().set_ignores_make_key(pid, ignores);
+    }
+
+    /// Let time pass, then let what was waiting for it run until every inbox
+    /// is empty.
+    pub fn wait(&mut self, duration: Duration) {
+        fake::sleep(duration);
+        self.run();
+    }
+
+    /// The pid of the app with this name.
+    pub fn app(&self, name: &str) -> pid_t {
+        self.mac.borrow().app_named(name)
     }
 
     pub fn open_mission_control(&mut self) {
@@ -338,6 +398,14 @@ impl Sim {
         }
         let wid = self.glide.selected_window(space)?;
         Some(mac.title(wid.wsid()?)?.to_owned())
+    }
+
+    /// What Glide's app actors told the reactor about the keyboard focus, in
+    /// the order the reactor heard it. This is the app actors' output, for
+    /// scenarios about how they attribute focus changes; other scenarios check
+    /// what the user sees.
+    pub fn focus_reports_from_app_actors(&self) -> &[FocusReport] {
+        self.glide.reported_focus()
     }
 
     /// Each window Glide's selection moved to, in order, on whichever desktop

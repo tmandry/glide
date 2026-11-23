@@ -11,8 +11,12 @@ use crate::actor::layout::LayoutCommand;
 use crate::model::Direction;
 use crate::sys::app::pid_t;
 
+mod apps;
+mod frames;
 mod harness;
 mod invariants;
+mod lifecycle;
+mod raises;
 mod slow;
 
 fn screen() -> CGRect {
@@ -23,6 +27,7 @@ fn screen() -> CGRect {
 /// desktop 2. Desktop 1 is shown and Glide is running.
 struct TwoDesktops {
     sim: Harness,
+    a: pid_t,
     b: pid_t,
 }
 
@@ -41,7 +46,7 @@ impl TwoDesktops {
         sim.start_glide();
         sim.run();
         sim.clear_actions();
-        TwoDesktops { sim, b }
+        TwoDesktops { sim, a, b }
     }
 }
 
@@ -146,7 +151,7 @@ fn leaving_mission_control_onto_another_desktop() {
 /// Mission Control shows desktop 2 and app B opens B3 there. Mission Control
 /// is then closed onto desktop 1.
 fn window_created_in_mission_control(schedule: Schedule) {
-    let TwoDesktops { mut sim, b } = TwoDesktops::new(schedule);
+    let TwoDesktops { mut sim, b, .. } = TwoDesktops::new(schedule);
     sim.open_mission_control();
     sim.run();
     sim.switch_desktop(2);
@@ -241,5 +246,72 @@ fn a_window_moved_with_no_drag_is_put_back() {
         sim.set_window_frame("A1", moved);
         sim.run();
         assert_eq!(sim.scene().draw(), before, "{schedule:?}");
+    });
+}
+
+#[test]
+fn another_app_launching_does_not_disturb_the_layout() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        sim.open_window(a, "A2");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+
+        let b = sim.launch_app("B");
+        sim.run();
+        sim.open_window(b, "B1");
+        sim.open_window(b, "B2");
+        sim.run();
+        assert_eq!(sim.tiled(1), ["A1", "A2", "B1", "B2"], "{schedule:?}");
+        sim.scene()
+            .assert("A1")
+            .same_size_as("A2")
+            .same_size_as("B1")
+            .same_size_as("B2");
+    });
+}
+
+#[test]
+fn the_layout_returns_after_another_app_window_comes_and_goes() {
+    Schedule::each(|schedule| {
+        let mut sim = Harness::new(schedule, screen(), 1);
+        let a = sim.launch_app("A");
+        sim.open_window(a, "A1");
+        sim.open_window(a, "A2");
+        let b = sim.launch_app("B");
+        sim.run();
+        sim.click_window("A2");
+        sim.run();
+        sim.start_glide();
+        sim.run();
+        let before = sim.scene().draw();
+
+        sim.open_window(b, "B1");
+        sim.run();
+        sim.close_window("B1");
+        sim.run();
+        sim.click_window("A2");
+        sim.run();
+        assert_eq!(sim.scene().draw(), before, "{schedule:?}");
+    });
+}
+
+#[test]
+fn switching_desktops_raises_nothing_when_the_order_already_matches() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        sim.switch_desktop(2);
+        sim.run();
+        sim.switch_desktop(1);
+        sim.run();
+        let raised = |a: &Action| matches!(a, Action::Raised(_));
+        assert!(
+            !sim.actions().iter().any(raised),
+            "{schedule:?}: {:?}",
+            sim.actions()
+        );
     });
 }

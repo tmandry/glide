@@ -1298,7 +1298,7 @@ pub(crate) fn app_task(
     ))
 }
 
-const SET_WINDOW_FRAME_RETRIES: usize = 3;
+pub(crate) const SET_WINDOW_FRAME_RETRIES: usize = 3;
 const SET_WINDOW_FRAME_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 fn set_window_frame_once(window: &AXUIElement, frame: CGRect) -> Result<(), accessibility::Error> {

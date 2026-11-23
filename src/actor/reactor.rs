@@ -294,7 +294,7 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How many times in a row we write the same frame to a window before giving
 /// up, and how long a pause resets the count.
-const MAX_FRAME_ATTEMPTS: u32 = 5;
+pub(crate) const MAX_FRAME_ATTEMPTS: u32 = 5;
 const FRAME_ATTEMPT_RESET: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]

@@ -25,7 +25,7 @@
 //! [`Mac::next_notification`].
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -33,10 +33,11 @@ use accessibility::AXError;
 use accessibility_sys::{
     kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
     kAXFrontmostAttribute, kAXMainWindowAttribute, kAXMainWindowChangedNotification,
-    kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute, kAXSizeAttribute,
-    kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute,
-    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification, kAXWindowMovedNotification,
-    kAXWindowResizedNotification, kAXWindowRole, kAXWindowsAttribute,
+    kAXMinimizedAttribute, kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute,
+    kAXSizeAttribute, kAXStandardWindowSubrole, kAXSubroleAttribute, kAXTitleAttribute,
+    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification,
+    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
+    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole, kAXWindowsAttribute,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
@@ -68,8 +69,12 @@ pub enum Message {
     DestroyWindow(WindowServerId),
     /// From an app: the window has this frame now.
     SetFrame(WindowServerId, CGRect),
-    /// From an app: bring the window to the front.
-    OrderFront(WindowServerId),
+    /// From an app: bring the window in front of every other window, or only
+    /// in front of the app's other windows on screen if `false`.
+    OrderFront(WindowServerId, bool),
+    /// From an app: the window was minimized to the Dock, or restored from it.
+    /// A restored window comes to the front and its app is activated.
+    SetMinimized(WindowServerId, bool),
     /// Give the window the keyboard focus, activating its app.
     MakeKey(WindowServerId),
     /// From the user: click the window. It comes to the front and takes the
@@ -117,6 +122,47 @@ pub enum WorkspaceNotification {
     ActiveSpaceChanged,
 }
 
+/// How a window behaves, beyond what every window does.
+#[derive(Debug, Clone, Default)]
+pub struct WindowTraits {
+    /// The smallest size the app lets the window have.
+    pub min_size: Option<CGSize>,
+    /// The app only lets the window have a size that is a multiple of this,
+    /// as a terminal does with its character cells.
+    pub size_increment: Option<CGSize>,
+    /// The window's accessibility subrole, such as `AXDialog`. A standard
+    /// window if unset.
+    pub subrole: Option<&'static str>,
+}
+
+impl WindowTraits {
+    /// The size the app gives a window that is asked to have `size`: at least
+    /// the minimum, then rounded down to a multiple of the increment, or up
+    /// if that would go below the minimum.
+    fn adjust_size(&self, size: CGSize) -> CGSize {
+        let min = self.min_size.unwrap_or(CGSize::new(0.0, 0.0));
+        let size = CGSize::new(size.width.max(min.width), size.height.max(min.height));
+        let Some(step) = self.size_increment else {
+            return size;
+        };
+        let round = |length: f64, step: f64, min: f64| {
+            if step <= 0.0 {
+                return length;
+            }
+            let rounded = (length / step).floor() * step;
+            if rounded < min {
+                rounded + step
+            } else {
+                rounded
+            }
+        };
+        CGSize::new(
+            round(size.width, step.width, min.width),
+            round(size.height, step.height, min.height),
+        )
+    }
+}
+
 /// Something a process was asked to do to a window through accessibility.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -155,6 +201,9 @@ pub struct WindowServer {
     order: Vec<WindowServerId>,
     frontmost: Option<pid_t>,
     next_wsid: u32,
+    /// The apps whose windows silently don't take the keyboard focus when a
+    /// process outside macOS asks.
+    ignores_make_key: BTreeSet<pid_t>,
 }
 
 struct ServerWindow {
@@ -162,6 +211,8 @@ struct ServerWindow {
     frame: CGRect,
     /// Unset until the window's app puts it on screen.
     desktop: Option<SpaceId>,
+    /// A minimized window is in no on-screen list.
+    minimized: bool,
 }
 
 impl WindowServer {
@@ -174,6 +225,7 @@ impl WindowServer {
             order: Vec::new(),
             frontmost: None,
             next_wsid: 1,
+            ignores_make_key: BTreeSet::new(),
         }
     }
 
@@ -188,6 +240,7 @@ impl WindowServer {
                 pid,
                 frame: CGRect::ZERO,
                 desktop: None,
+                minimized: false,
             },
         );
         wsid
@@ -249,28 +302,45 @@ impl WindowServer {
                     window.frame = frame;
                 }
             }
-            Message::OrderFront(wsid) => {
+            Message::OrderFront(wsid, in_front_of_all) => {
                 let Some(window) = self.windows.get(&wsid) else {
                     return;
                 };
                 let Some(at) = self.order.iter().position(|&w| w == wsid) else {
                     return;
                 };
-                // The window goes in front of everything if its app is
-                // frontmost, and in front of its app's other windows if not.
-                let pid = window.pid;
-                let to = if self.frontmost == Some(pid) {
+                let (pid, desktop) = (window.pid, window.desktop);
+                self.order.remove(at);
+                let to = if in_front_of_all {
                     0
                 } else {
-                    self.order.iter().position(|w| self.windows[w].pid == pid).unwrap()
+                    let on_screen =
+                        |w: &ServerWindow| w.pid == pid && w.desktop == desktop && !w.minimized;
+                    self.order.iter().position(|w| on_screen(&self.windows[w])).unwrap_or(at)
                 };
-                self.order.remove(at);
                 self.order.insert(to, wsid);
+            }
+            Message::SetMinimized(wsid, minimized) => {
+                let Some(window) = self.windows.get_mut(&wsid) else {
+                    return;
+                };
+                window.minimized = minimized;
+                let pid = window.pid;
+                if !minimized {
+                    if let Some(at) = self.order.iter().position(|&w| w == wsid) {
+                        self.order.remove(at);
+                        self.order.insert(0, wsid);
+                    }
+                    self.activate(pid, out);
+                }
             }
             Message::MakeKey(wsid) => {
                 let Some(window) = self.windows.get(&wsid) else {
                     return;
                 };
+                if self.ignores_make_key.contains(&window.pid) {
+                    return;
+                }
                 let (pid, desktop) = (window.pid, window.desktop);
                 self.activate(pid, out);
                 // The desktop of the window with the keyboard focus is shown.
@@ -301,8 +371,10 @@ impl WindowServer {
             }
             Message::FocusFrontWindow => {
                 let desktop = Some(self.current_desktop());
-                let Some(&front) = self.order.iter().find(|w| self.windows[w].desktop == desktop)
-                else {
+                let shown = |w: &&WindowServerId| {
+                    self.windows[*w].desktop == desktop && !self.windows[*w].minimized
+                };
+                let Some(&front) = self.order.iter().find(shown) else {
                     return;
                 };
                 let pid = self.windows[&front].pid;
@@ -368,7 +440,7 @@ impl WindowServer {
         let desktop = Some(self.current_desktop());
         self.order
             .iter()
-            .filter(|w| self.windows[w].desktop == desktop)
+            .filter(|w| self.windows[w].desktop == desktop && !self.windows[w].minimized)
             .filter_map(|&w| self.info(w))
             .collect()
     }
@@ -402,6 +474,8 @@ struct AppWindow {
     id: WindowServerId,
     title: String,
     frame: CGRect,
+    traits: WindowTraits,
+    minimized: bool,
     /// Whether the app has been told the window is on the desktop being
     /// shown. Accessibility only lists the app's windows that are.
     shown: bool,
@@ -446,18 +520,32 @@ impl App {
         }
     }
 
-    /// Show a new window, which becomes the main window.
-    fn open_window(&mut self, id: WindowServerId, title: &str, out: &mut Outbox) {
+    /// Show a new window, which becomes the main window. The app reports the
+    /// new main window before the window's creation if `main_first` is set.
+    fn open_window(
+        &mut self,
+        id: WindowServerId,
+        title: &str,
+        traits: WindowTraits,
+        main_first: bool,
+        out: &mut Outbox,
+    ) {
         let offset = 30.0 * f64::from(id.0);
-        let frame = CGRect::new(CGPoint::new(offset, offset), CGSize::new(400.0, 300.0));
+        let size = traits.adjust_size(CGSize::new(400.0, 300.0));
+        let frame = CGRect::new(CGPoint::new(offset, offset), size);
         self.windows.push(AppWindow {
             id,
             title: title.to_owned(),
             frame,
+            traits,
+            minimized: false,
             // The app puts the window on the desktop it believes is shown.
             // The window server says where it really went.
             shown: true,
         });
+        if main_first {
+            self.set_main_window(Some(id), out);
+        }
         self.notify(
             ElementId::Application,
             kAXWindowCreatedNotification,
@@ -486,8 +574,34 @@ impl App {
         }
     }
 
-    /// Close a window. The most recent remaining window becomes the main
-    /// window.
+    /// Minimize a window to the Dock, or restore it. Minimizing the main
+    /// window makes the most recent window that isn't minimized the main
+    /// window, and a restored window becomes the main window.
+    fn set_minimized(&mut self, wsid: WindowServerId, minimized: bool, out: &mut Outbox) {
+        let Some(window) = self.windows.iter_mut().find(|w| w.id == wsid) else {
+            return;
+        };
+        if window.minimized == minimized {
+            return;
+        }
+        window.minimized = minimized;
+        let name = if minimized {
+            kAXWindowMiniaturizedNotification
+        } else {
+            kAXWindowDeminiaturizedNotification
+        };
+        self.notify(element(wsid), name, element(wsid), out);
+        out.send(Process::WindowServer, Message::SetMinimized(wsid, minimized));
+        if !minimized {
+            self.set_main_window(Some(wsid), out);
+        } else if self.main_window == Some(wsid) {
+            let next = self.windows.iter().rev().find(|w| !w.minimized);
+            self.set_main_window(next.map(|w| w.id), out);
+        }
+    }
+
+    /// Close a window. The most recent remaining window that isn't minimized
+    /// becomes the main window.
     fn close_window(&mut self, wsid: WindowServerId, out: &mut Outbox) {
         self.windows.retain(|w| w.id != wsid);
         self.notify(
@@ -498,7 +612,8 @@ impl App {
         );
         self.observers.retain(|&(_, on, _)| on != element(wsid));
         if self.main_window == Some(wsid) {
-            self.set_main_window(self.windows.last().map(|w| w.id), out);
+            let next = self.windows.iter().rev().find(|w| !w.minimized);
+            self.set_main_window(next.map(|w| w.id), out);
         }
         out.send(Process::WindowServer, Message::DestroyWindow(wsid));
     }
@@ -555,8 +670,11 @@ impl App {
                 let window = self.window_mut(id)?;
                 match &*name {
                     kAXRoleAttribute => Value::String(kAXWindowRole.into()),
-                    kAXSubroleAttribute => Value::String(kAXStandardWindowSubrole.into()),
+                    kAXSubroleAttribute => Value::String(
+                        window.traits.subrole.unwrap_or(kAXStandardWindowSubrole).into(),
+                    ),
                     kAXTitleAttribute => Value::String(window.title.clone()),
+                    kAXMinimizedAttribute => Value::Bool(window.minimized),
                     kAXPositionAttribute => Value::Point(window.frame.origin),
                     kAXSizeAttribute => Value::Size(window.frame.size),
                     FRAME_ATTRIBUTE => Value::Rect(window.frame),
@@ -578,7 +696,7 @@ impl App {
                         kAXWindowMovedNotification
                     }
                     (kAXSizeAttribute, Value::Size(size)) => {
-                        window.frame.size = size;
+                        window.frame.size = window.traits.adjust_size(size);
                         kAXWindowResizedNotification
                     }
                     _ => return Err(AXError::AttributeUnsupported),
@@ -597,7 +715,12 @@ impl App {
             Request::PerformAction(Window(id), name) if name == kAXRaiseAction => {
                 let wsid = self.window_mut(id)?.id;
                 self.set_main_window(Some(wsid), out);
-                out.send(Process::WindowServer, Message::OrderFront(wsid));
+                // The window only comes in front of other apps' windows if the
+                // app has been told it is active. This hasn't been checked on
+                // real macOS. Glide waits for the app's activation notification
+                // before it raises, since that is the only event it can wait
+                // on for the change.
+                out.send(Process::WindowServer, Message::OrderFront(wsid, self.active));
                 return Ok(None);
             }
             Request::WindowId(Window(id)) => Value::Number(self.window_mut(id)?.id.0),
@@ -683,9 +806,35 @@ impl Mac {
 
     /// Have an app open a window.
     pub fn open_window(&mut self, pid: pid_t, title: &str) -> WindowServerId {
+        self.open_window_ordered(pid, title, WindowTraits::default(), false)
+    }
+
+    /// Have an app open a window, reporting the new main window before the
+    /// window's creation.
+    pub fn open_window_main_first(&mut self, pid: pid_t, title: &str) -> WindowServerId {
+        self.open_window_ordered(pid, title, WindowTraits::default(), true)
+    }
+
+    /// Have an app open a window that behaves as `traits` say.
+    pub fn open_window_with(
+        &mut self,
+        pid: pid_t,
+        title: &str,
+        traits: WindowTraits,
+    ) -> WindowServerId {
+        self.open_window_ordered(pid, title, traits, false)
+    }
+
+    fn open_window_ordered(
+        &mut self,
+        pid: pid_t,
+        title: &str,
+        traits: WindowTraits,
+        main_first: bool,
+    ) -> WindowServerId {
         let wsid = self.window_server.new_window(pid);
         let app = self.apps.get_mut(&pid).expect("app is not running");
-        app.open_window(wsid, title, &mut self.out);
+        app.open_window(wsid, title, traits, main_first, &mut self.out);
         self.route();
         wsid
     }
@@ -698,6 +847,26 @@ impl Mac {
             .expect("window does not exist");
         app.close_window(wsid, &mut self.out);
         self.route();
+    }
+
+    /// Minimize a window to the Dock.
+    pub fn minimize_window(&mut self, wsid: WindowServerId) {
+        let app = Self::app_of(&mut self.apps, wsid);
+        app.set_minimized(wsid, true, &mut self.out);
+        self.route();
+    }
+
+    /// Restore a minimized window from the Dock.
+    pub fn restore_window(&mut self, wsid: WindowServerId) {
+        let app = Self::app_of(&mut self.apps, wsid);
+        app.set_minimized(wsid, false, &mut self.out);
+        self.route();
+    }
+
+    fn app_of(apps: &mut BTreeMap<pid_t, App>, wsid: WindowServerId) -> &mut App {
+        apps.values_mut()
+            .find(|app| app.windows.iter().any(|w| w.id == wsid))
+            .expect("window does not exist")
     }
 
     /// Click a window on screen.
@@ -727,6 +896,16 @@ impl Mac {
     /// does when it beachballs, or start again.
     pub fn set_app_hung(&mut self, pid: pid_t, hung: bool) {
         self.apps.get_mut(&pid).expect("app is not running").hung = hung;
+    }
+
+    /// Make requests from outside macOS to give one of an app's windows the
+    /// keyboard focus silently do nothing, or work again.
+    pub fn set_ignores_make_key(&mut self, pid: pid_t, ignores: bool) {
+        if ignores {
+            self.window_server.ignores_make_key.insert(pid);
+        } else {
+            self.window_server.ignores_make_key.remove(&pid);
+        }
     }
 
     /// Make an app take `delay` to handle each message and accessibility
@@ -868,6 +1047,13 @@ impl Mac {
 
     pub fn bundle_id(&self, pid: pid_t) -> Option<String> {
         self.apps.get(&pid).map(|app| format!("com.example.{}", app.name))
+    }
+
+    pub fn app_named(&self, name: &str) -> pid_t {
+        let mut apps = self.apps.values().filter(|app| app.name == name);
+        let app = apps.next().unwrap_or_else(|| panic!("no app named {name}"));
+        assert!(apps.next().is_none(), "more than one app named {name}");
+        app.pid
     }
 
     pub fn app_name(&self, pid: pid_t) -> Option<&str> {
