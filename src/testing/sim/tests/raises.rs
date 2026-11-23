@@ -357,3 +357,29 @@ fn raise_of_a_closing_window_settles() {
         });
     }
 }
+/// Glide raises a window of one app and focuses a window of another, and the
+/// first app is slow enough that Glide may give up on it.
+#[test]
+fn a_slow_app_in_a_raise_across_apps_does_not_take_the_focus() {
+    for delay in [50, 150, 300, 1000] {
+        Schedule::each(|schedule| {
+            let mut sim = row(schedule, &[("A", &["A1"]), ("B", &["B1"]), ("C", &["C1"])]);
+            sim.expect_floating("C1");
+            sim.command(LayoutCommand::ToggleWindowFloating);
+            sim.run();
+            sim.click_window("B1");
+            sim.run();
+            sim.command(LayoutCommand::ToggleFocusFloating);
+            sim.run();
+
+            // Going back to the tiled windows raises A1 and focuses B1.
+            let a = sim.app("A");
+            sim.set_app_delay(a, Duration::from_millis(delay));
+            sim.command(LayoutCommand::ToggleFocusFloating);
+            sim.run();
+            let context = format!("{schedule:?} with {delay}ms");
+            assert_eq!(sim.key_window().as_deref(), Some("B1"), "{context}");
+            assert_eq!(sim.selected().as_deref(), Some("B1"), "{context}");
+        });
+    }
+}
