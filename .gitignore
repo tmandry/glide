@@ -8,7 +8,7 @@
 *.swo
 
 # macOS
-.DS_Store/
+.DS_Store
 
 # Agents
 .claude/settings.local.json
