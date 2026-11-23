@@ -188,8 +188,8 @@ fn raises_across_apps_end_on_the_last_one() {
 
 #[test]
 #[ignore]
-// TODO: Fails under MacFirst for [Right, Left, Right] with 15 steps between
-// commands. The focus raise for the first command is reported as a user focus
+// TODO: Fails under Seeded(17), which needs `GLIDE_SIM_SEED_FACTOR=3`, for
+// [Right, Left, Right] with 15 steps between commands. The focus raise for the first command is reported as a user focus
 // change, and it reaches the reactor after the second command has moved the
 // selection on. It selects the first window again, so the third command starts
 // from the wrong window and the last window requested never gets the focus.
@@ -235,12 +235,24 @@ fn only_the_last_window_of_a_raise_is_reported() {
             assert_eq!(a_raises.len(), 2, "{context}: {raised:?}");
             assert_eq!(a_raises[1], selected, "{context}: {raised:?}");
 
-            // Only the selected window's change is reported as the user's.
+            // Only the selected window's change is reported as the user's. The
+            // two apps' actors report in either order.
             let other = if selected == "A1" { "A2" } else { "A1" };
+            let reports = &sim.focus_reports_from_app_actors()[reports..];
+            let (from_a, from_b): (Vec<_>, Vec<_>) =
+                reports.iter().cloned().partition(|report| match report {
+                    FocusReport::App(name, _) | FocusReport::Window(name, _) => {
+                        name.starts_with('A')
+                    }
+                });
             assert_eq!(
-                sim.focus_reports_from_app_actors()[reports..],
+                from_b,
+                [FocusReport::Window("B1".into(), Quiet::Yes)],
+                "{context}"
+            );
+            assert_eq!(
+                from_a,
                 [
-                    FocusReport::Window("B1".into(), Quiet::Yes),
                     FocusReport::App("A".into(), Quiet::Yes),
                     FocusReport::Window(other.into(), Quiet::Yes),
                     FocusReport::Window(selected.into(), Quiet::No),
@@ -265,10 +277,11 @@ fn an_activation_after_its_deadline_is_not_quiet() {
         let reports = sim.focus_reports_from_app_actors().len();
 
         // A is slow enough that A's activation comes after Glide has given up
-        // on the raise. Depending on the schedule, Glide gives up before or
-        // after A has raised A1 and A2.
+        // on the raise, but not so slow that Glide gives up before asking for
+        // it. Depending on the schedule, Glide gives up before or after A has
+        // raised A1 and A2.
         let a = sim.app("A");
-        sim.set_app_delay(a, Duration::from_secs(1));
+        sim.set_app_delay(a, Duration::from_millis(75));
         sim.command(LayoutCommand::ToggleFocusFloating);
         sim.run();
 

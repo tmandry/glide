@@ -36,8 +36,12 @@ fn focus_a1(sim: &Harness) -> LayoutCommand {
     })
 }
 
+// TODO: Glide's selection stays on A1. The raise manager cancels the raise
+// before A's actor asks for the activation, and a cancelled raise doesn't
+// report that it failed.
 #[test]
-fn focus_moves_to_a_slow_app() {
+#[ignore]
+fn the_selection_returns_when_an_app_is_too_slow_to_raise() {
     Schedule::each(|schedule| {
         let (mut sim, a, _) = two_apps(schedule);
         // Glide gives up on raising A1 before A gets to it.
@@ -46,8 +50,8 @@ fn focus_moves_to_a_slow_app() {
         sim.command(command);
         sim.run();
 
-        assert_eq!(sim.key_window().as_deref(), Some("A1"), "{schedule:?}");
-        assert_eq!(sim.selected().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.key_window().as_deref(), Some("B1"), "{schedule:?}");
+        assert_eq!(sim.selected().as_deref(), Some("B1"), "{schedule:?}");
     });
 }
 

@@ -10,9 +10,11 @@
 //! run under different interleavings.
 //!
 //! [`mac`] models the macOS processes and knows nothing about Glide. [`glide`]
-//! runs Glide's actors against it. This module only moves messages between
-//! them.
+//! runs Glide's actors against it, with each app actor on its own thread as in
+//! Glide. This module moves messages between them and keeps the clock: when
+//! nothing is ready, it moves the clock to the next deadline.
 
+mod app_thread;
 mod glide;
 mod mac;
 
@@ -250,11 +252,15 @@ impl Sim {
         self.mac.borrow_mut().set_ignores_make_key(pid, ignores);
     }
 
-    /// Let time pass, then let what was waiting for it run until every inbox
-    /// is empty.
+    /// Let everything that is due run, as [`Sim::run`] does, and let at least
+    /// `duration` pass.
     pub fn wait(&mut self, duration: Duration) {
-        fake::sleep(duration);
+        let until = fake::now() + duration;
         self.run();
+        if fake::now() < until {
+            fake::set_clock(until);
+            self.run();
+        }
     }
 
     /// The pid of the app with this name.
@@ -302,20 +308,27 @@ impl Sim {
             self.inboxes
                 .iter()
                 .filter(|(_, q)| !q.is_empty())
+                .filter(|&(&a, _)| !matches!(a, Actor::App(pid) if self.glide.app_is_calling(pid)))
                 .map(|(&a, _)| Process::Glide(a)),
         );
-        ready.extend(self.glide.woken_apps().map(Process::Glide));
+        ready.extend(self.glide.woken_apps(&self.mac.borrow()).map(Process::Glide));
         if self.glide.time_to_raise_timeout() == Some(Duration::ZERO) {
             ready.insert(Process::Glide(Actor::RaiseManager));
         }
         ready.extend(self.mac.borrow().ready().map(Process::Mac));
         if ready.is_empty() {
-            // Nothing happens until the raise times out.
-            let Some(wait) = self.glide.time_to_raise_timeout() else {
+            // Nothing happens until the next deadline.
+            let now = fake::now();
+            let deadlines = [
+                self.glide.time_to_raise_timeout().map(|wait| now + wait),
+                self.glide.next_call_due(),
+                self.mac.borrow().next_deadline(),
+            ];
+            let Some(next) = deadlines.into_iter().flatten().min() else {
                 return false;
             };
-            fake::sleep(wait);
-            ready.insert(Process::Glide(Actor::RaiseManager));
+            fake::set_clock(next);
+            return true;
         }
         let ready: Vec<Process> = ready.into_iter().collect();
         self.steps += 1;
@@ -333,7 +346,12 @@ impl Sim {
         };
         match process {
             Process::Glide(actor) => {
-                let message = self.inboxes.get_mut(&actor).and_then(|inbox| inbox.pop_front());
+                // An app actor waiting on a call gets the reply first.
+                let calling = matches!(actor, Actor::App(pid) if self.glide.app_is_calling(pid));
+                let message = match calling {
+                    true => None,
+                    false => self.inboxes.get_mut(&actor).and_then(|inbox| inbox.pop_front()),
+                };
                 self.glide.deliver(actor, message, &self.mac);
             }
             Process::Mac(process) => {

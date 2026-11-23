@@ -15,19 +15,18 @@
 //! - A window server query reads the window server before returning.
 //! - An app gets the id of a window it creates from the window server.
 //!
-//! An accessibility request blocks its caller until the app replies. The app
-//! gets to the request after everything already in its inbox, so
-//! [`Mac::ax_request`] has the app handle its inbox and then the request.
+//! An app takes its delay to handle each message. An accessibility request is
+//! a message too, so the app gets to it after everything already in its
+//! inbox, and its caller blocks until the reply comes or the request times
+//! out.
 //!
 //! A [`Notification`] is for a process observing macOS from outside. The model
 //! knows nothing about Glide; the caller picks which process handles its next
 //! message with [`Mac::step`] and takes notifications with
 //! [`Mac::next_notification`].
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use accessibility::AXError;
 use accessibility_sys::{
@@ -45,12 +44,11 @@ use crate::sys::app::pid_t;
 use crate::sys::ax::fake::{
     self, ENHANCED_USER_INTERFACE_ATTRIBUTE, ElementId, FRAME_ATTRIBUTE, ObserverId, Request, Value,
 };
-use crate::sys::event::MouseState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 /// How long an accessibility request waits for a reply.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// A macOS process that is sent messages.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,6 +87,9 @@ pub enum Message {
     /// desktop being shown.
     FocusFrontWindow,
 
+    /// To an app, from a process outside macOS: an accessibility request.
+    Ax(AxRequestId, Request),
+
     // To an app, from the window server.
     Activate,
     Deactivate,
@@ -98,6 +99,10 @@ pub enum Message {
     /// longer is.
     WindowShown(WindowServerId, bool),
 }
+
+/// Names an accessibility request sent with [`Mac::ax_request`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AxRequestId(u64);
 
 /// Something a process observing macOS is told.
 #[derive(Debug, Clone, PartialEq)]
@@ -385,7 +390,8 @@ impl WindowServer {
                 self.activate(pid, out);
                 out.send(Process::App(pid), Message::BecomeMain(front));
             }
-            Message::Activate
+            Message::Ax(..)
+            | Message::Activate
             | Message::Deactivate
             | Message::BecomeMain(_)
             | Message::WindowShown(..) => {
@@ -472,6 +478,8 @@ pub struct App {
     hung: bool,
     /// How long the app takes to handle each message and request.
     delay: Duration,
+    /// When the app finishes handling the message at the front of its inbox.
+    front_done: Option<Instant>,
 }
 
 struct AppWindow {
@@ -767,6 +775,9 @@ pub struct Mac {
     /// What apps were asked to do to windows through accessibility, with
     /// whether Mission Control was open at the time.
     actions: Vec<(Action, bool)>,
+    next_request: u64,
+    /// The replies to accessibility requests the apps have handled.
+    ax_replies: BTreeMap<AxRequestId, Result<Option<Value>, AXError>>,
 }
 
 impl Mac {
@@ -780,6 +791,8 @@ impl Mac {
             inboxes: BTreeMap::new(),
             notifications: VecDeque::new(),
             actions: Vec::new(),
+            next_request: 0,
+            ax_replies: BTreeMap::new(),
         }
     }
 
@@ -801,6 +814,7 @@ impl Mac {
                 observers: Vec::new(),
                 hung: false,
                 delay: Duration::ZERO,
+                front_done: None,
             },
         );
         self.window_server.launch(pid, &mut self.out);
@@ -899,7 +913,10 @@ impl Mac {
     /// Make an app stop handling messages and accessibility requests, as it
     /// does when it beachballs, or start again.
     pub fn set_app_hung(&mut self, pid: pid_t, hung: bool) {
-        self.apps.get_mut(&pid).expect("app is not running").hung = hung;
+        let app = self.apps.get_mut(&pid).expect("app is not running");
+        if std::mem::replace(&mut app.hung, hung) != hung {
+            self.start_front(Process::App(pid));
+        }
     }
 
     /// Make requests from outside macOS to give one of an app's windows the
@@ -916,6 +933,8 @@ impl Mac {
     /// request, as a busy app does.
     pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
         self.apps.get_mut(&pid).expect("app is not running").delay = delay;
+        // The message the app is on starts again with the new delay.
+        self.start_front(Process::App(pid));
     }
 
     pub fn open_mission_control(&mut self) {
@@ -957,47 +976,77 @@ impl Mac {
         while let Some(sent) = self.out.0.pop_front() {
             match sent {
                 Sent::Message(to, message) => {
-                    self.inboxes.entry(to).or_default().push_back(message)
+                    let inbox = self.inboxes.entry(to).or_default();
+                    inbox.push_back(message);
+                    if inbox.len() == 1 {
+                        self.start_front(to);
+                    }
                 }
                 Sent::Notification(notification) => self.notifications.push_back(notification),
             }
         }
     }
 
-    /// The processes with a message waiting that can handle it.
+    /// Have an app start on the message at the front of its inbox, which it
+    /// finishes after its delay. A hung app doesn't start.
+    fn start_front(&mut self, process: Process) {
+        let Process::App(pid) = process else { return };
+        let waiting = self.inboxes.get(&process).is_some_and(|inbox| !inbox.is_empty());
+        if let Some(app) = self.apps.get_mut(&pid) {
+            app.front_done = (waiting && !app.hung).then(|| fake::now() + app.delay);
+        }
+    }
+
+    /// When a process finishes the message at the front of its inbox, if it
+    /// has started on it.
+    fn front_done(&self, process: Process) -> Option<Instant> {
+        match process {
+            Process::App(pid) => self.apps.get(&pid)?.front_done,
+            Process::WindowServer => Some(fake::now()),
+        }
+    }
+
+    /// The processes that have finished handling their next message.
     pub fn ready(&self) -> impl Iterator<Item = Process> + '_ {
+        let now = fake::now();
         self.inboxes
             .iter()
             .filter(|(_, inbox)| !inbox.is_empty())
             .map(|(&p, _)| p)
-            .filter(|&p| !self.is_hung(p))
+            .filter(move |&p| self.front_done(p).is_some_and(|done| done <= now))
     }
 
-    fn is_hung(&self, process: Process) -> bool {
-        match process {
-            Process::App(pid) => self.apps.get(&pid).is_some_and(|app| app.hung),
-            Process::WindowServer => false,
-        }
+    /// When the next app finishes the message it is handling.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.inboxes
+            .iter()
+            .filter(|(_, inbox)| !inbox.is_empty())
+            .filter_map(|(&p, _)| self.front_done(p))
+            .filter(|&t| t > fake::now())
+            .min()
     }
 
     /// Have `process` handle its next message. Return false if it has none.
     pub fn step(&mut self, process: Process) -> bool {
-        if self.is_hung(process) {
+        if !self.ready().any(|p| p == process) {
             return false;
         }
-        let Some(message) = self.inboxes.get_mut(&process).and_then(|inbox| inbox.pop_front())
-        else {
-            return false;
-        };
+        let message = self.inboxes.get_mut(&process).unwrap().pop_front().unwrap();
         match process {
             Process::WindowServer => self.window_server.handle(message, &mut self.out),
             Process::App(pid) => {
                 if let Some(app) = self.apps.get_mut(&pid) {
-                    fake::sleep(app.delay);
-                    app.handle(message, &mut self.out);
+                    match message {
+                        Message::Ax(id, request) => {
+                            let reply = app.ax(request, &mut self.out);
+                            self.ax_replies.insert(id, reply);
+                        }
+                        message => app.handle(message, &mut self.out),
+                    }
                 }
             }
         }
+        self.start_front(process);
         self.route();
         true
     }
@@ -1019,11 +1068,15 @@ impl Mac {
         self.route();
     }
 
-    /// Send an app an accessibility request and wait for the reply. A hung
-    /// app never replies, and the request fails once it times out.
-    pub fn ax_request(&mut self, pid: pid_t, request: Request) -> Result<Option<Value>, AXError> {
+    /// Send an app an accessibility request, which it handles after what is
+    /// already in its inbox. Take the reply with [`Mac::take_ax_reply`] once
+    /// the app has finished with it.
+    pub fn ax_request(&mut self, pid: pid_t, request: Request) -> AxRequestId {
+        let id = AxRequestId(self.next_request);
+        self.next_request += 1;
         let Some(app) = self.apps.get(&pid) else {
-            return Err(AXError::CannotComplete);
+            self.ax_replies.insert(id, Err(AXError::CannotComplete));
+            return id;
         };
         let action: Option<(fn(String) -> Action, u32)> = match &request {
             Request::SetAttribute(ElementId::Window(id), ..) => Some((Action::Wrote, *id)),
@@ -1035,18 +1088,33 @@ impl Mac {
         {
             self.actions.push((action(window.title.clone()), self.dock.mission_control));
         }
-        if app.hung {
-            fake::sleep(REQUEST_TIMEOUT);
-            return Err(AXError::CannotComplete);
-        }
-        // The app gets to the request after what is already in its inbox.
-        while self.step(Process::App(pid)) {}
-
-        let app = self.apps.get_mut(&pid).unwrap();
-        fake::sleep(app.delay);
-        let reply = app.ax(request, &mut self.out);
+        self.out.send(Process::App(pid), Message::Ax(id, request));
         self.route();
-        reply
+        id
+    }
+
+    /// Take the reply to a request once the app has finished with it.
+    pub fn take_ax_reply(&mut self, id: AxRequestId) -> Option<Result<Option<Value>, AXError>> {
+        self.ax_replies.remove(&id)
+    }
+
+    /// Whether the reply to a request can be taken.
+    pub fn has_ax_reply(&self, id: AxRequestId) -> bool {
+        self.ax_replies.contains_key(&id)
+    }
+
+    /// Give up on a request the app hasn't answered.
+    pub fn cancel_ax_request(&mut self, id: AxRequestId) {
+        self.ax_replies.remove(&id);
+        let processes: Vec<Process> = self.inboxes.keys().copied().collect();
+        for process in processes {
+            let inbox = self.inboxes.get_mut(&process).unwrap();
+            let was_front = matches!(inbox.front(), Some(Message::Ax(i, _)) if *i == id);
+            inbox.retain(|message| !matches!(message, Message::Ax(i, _) if *i == id));
+            if was_front {
+                self.start_front(process);
+            }
+        }
     }
 
     pub fn bundle_id(&self, pid: pid_t) -> Option<String> {
@@ -1126,31 +1194,5 @@ impl Mac {
         let window = matches.next().unwrap_or_else(|| panic!("no window titled {title}"));
         assert!(matches.next().is_none(), "more than one window titled {title}");
         window.id
-    }
-}
-
-/// Connects the fake accessibility interface to a [`Mac`].
-pub struct System(pub Rc<RefCell<Mac>>);
-
-impl fake::System for System {
-    fn ax(&self, pid: pid_t, request: Request) -> Result<Option<Value>, AXError> {
-        self.0.borrow_mut().ax_request(pid, request)
-    }
-
-    fn make_key_window(&self, _pid: pid_t, wsid: WindowServerId) -> Result<(), ()> {
-        self.0.borrow_mut().send_window_server(Message::MakeKey(wsid));
-        Ok(())
-    }
-
-    fn bundle_id(&self, pid: pid_t) -> Option<String> {
-        self.0.borrow().bundle_id(pid)
-    }
-
-    fn mouse_state(&self) -> MouseState {
-        MouseState::Up
-    }
-
-    fn sleep(&self, duration: Duration) {
-        fake::advance_clock(duration);
     }
 }
