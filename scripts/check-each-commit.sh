@@ -10,9 +10,8 @@
 #     scripts/check-each-commit.sh origin/main "$(jj log -r @ --no-graph -T commit_id)"
 #
 # Each commit in BASE..TIP is checked out in a temporary worktree, so the
-# current checkout and its uncommitted changes are left alone. The build shares
-# this checkout's target directory to avoid rebuilding from scratch for every
-# commit.
+# current checkout and its uncommitted changes are left alone. The build uses
+# its own target directory, target/check-each-commit, reused across runs.
 
 set -uo pipefail
 
@@ -33,7 +32,7 @@ cleanup() {
 trap cleanup EXIT
 git worktree add --quiet --detach "$tmp/tree" "$tip" || exit 1
 
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target/check-each-commit}
 failed=0
 for commit in $commits; do
     summary=$(git log -1 --format='%h %s' "$commit")
