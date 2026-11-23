@@ -3,33 +3,44 @@
 
 //! Menu bar icon for displaying the current space ID.
 
+use std::cell::RefCell;
+
+use block2::RcBlock;
 use objc2::rc::Retained;
+use objc2::runtime::Bool;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSAlert, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSObject, NSString, ns_string};
 use tracing::{Span, debug, error, warn};
 
 use crate::actor::updater;
 use crate::actor::wm_controller::{self, WmCmd, WmCommand, WmEvent};
 use crate::config;
-use crate::ui::icon;
+use crate::ui::{alert, icon};
 
 const SAVE_AND_QUIT_TAG: i64 = 1;
 const TOGGLE_GLOBAL_TAG: i64 = 2;
 const TOGGLE_SPACE_TAG: i64 = 3;
 const SHOW_DOCS_TAG: i64 = 4;
 const INSTALL_UPDATE_TAG: i64 = 5;
+const SECURE_INPUT_TAG: i64 = 6;
 
 pub struct StatusIcon {
     status_item: Retained<NSStatusItem>,
     mtm: MainThreadMarker,
-    _menu_handler: Retained<MenuHandler>,
+    menu_handler: Retained<MenuHandler>,
+    icon: Option<Retained<NSImage>>,
+    /// The icon to show while Secure Input is blocking hotkeys.
+    warning_icon: Option<Retained<NSImage>>,
     toggle_item: Retained<NSMenuItem>,
     space_toggle_item: Retained<NSMenuItem>,
     update_item: Retained<NSMenuItem>,
+    secure_input_item: Retained<NSMenuItem>,
+    secure_input_separator: Retained<NSMenuItem>,
 }
 
 impl StatusIcon {
@@ -43,11 +54,15 @@ impl StatusIcon {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
 
-        // Create parachute icon
+        let icon = create_parachute_icon(config);
+        let warning_icon = match &icon {
+            Some(icon) => with_warning_badge(icon, config.color),
+            None => warning_symbol(),
+        };
         if let Some(button) = status_item.button(mtm)
-            && let Some(parachute_image) = create_parachute_icon(config)
+            && let Some(icon) = &icon
         {
-            button.setImage(Some(&parachute_image));
+            button.setImage(Some(icon));
         }
 
         let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("Glide"));
@@ -56,6 +71,23 @@ impl StatusIcon {
         menu.setAutoenablesItems(false);
 
         let menu_handler = MenuHandler::new(mtm, wm_tx, updater_tx);
+
+        let secure_input_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                ns_string!("Shortcuts Paused by Secure Input…"),
+                Some(sel!(handleAction:)),
+                ns_string!(""),
+            )
+        };
+        unsafe { secure_input_item.setTarget(Some(&*menu_handler)) };
+        secure_input_item.setTag(SECURE_INPUT_TAG as isize);
+        secure_input_item.setImage(warning_symbol().as_deref());
+        secure_input_item.setHidden(true);
+        menu.addItem(&secure_input_item);
+        let secure_input_separator = NSMenuItem::separatorItem(mtm);
+        secure_input_separator.setHidden(true);
+        menu.addItem(&secure_input_separator);
 
         let space_toggle_ns_title = ns_string!("Enable Space");
         let space_toggle_item = unsafe {
@@ -140,10 +172,14 @@ impl StatusIcon {
         Self {
             status_item,
             mtm,
-            _menu_handler: menu_handler,
+            menu_handler,
+            icon,
+            warning_icon,
             toggle_item,
             space_toggle_item,
             update_item,
+            secure_input_item,
+            secure_input_separator,
         }
     }
 
@@ -185,6 +221,23 @@ impl StatusIcon {
     pub fn set_space_toggle_enabled(&mut self, enabled: bool) {
         self.space_toggle_item.setEnabled(enabled);
     }
+
+    /// Show that Secure Input is blocking hotkeys, with `details` explaining it
+    /// in an alert the menu opens, or go back to normal if `None`.
+    pub fn set_secure_input_warning(&mut self, details: Option<&str>) {
+        let shown = details.is_some();
+        *self.menu_handler.ivars().secure_input_details.borrow_mut() = details.map(str::to_owned);
+        self.secure_input_item.setHidden(!shown);
+        self.secure_input_separator.setHidden(!shown);
+        let image = if shown {
+            &self.warning_icon
+        } else {
+            &self.icon
+        };
+        if let Some(button) = self.status_item.button(self.mtm) {
+            button.setImage(image.as_deref());
+        }
+    }
 }
 
 impl Drop for StatusIcon {
@@ -198,6 +251,7 @@ impl Drop for StatusIcon {
 struct MenuHandlerIvars {
     wm_tx: wm_controller::Sender,
     updater_tx: updater::Sender,
+    secure_input_details: RefCell<Option<String>>,
 }
 
 define_class!(
@@ -243,6 +297,14 @@ define_class!(
                         error!("Updater is not running");
                     }
                 }
+                SECURE_INPUT_TAG => {
+                    let details = self.ivars().secure_input_details.borrow().clone();
+                    let Some(details) = details else { return };
+                    let alert = NSAlert::new(MainThreadMarker::from(self));
+                    alert.setMessageText(ns_string!("Keyboard Shortcuts Are Paused"));
+                    alert.setInformativeText(&NSString::from_str(&details));
+                    alert::run_modal(&alert);
+                }
                 SHOW_DOCS_TAG => {
                     debug!("Opening docs in browser");
                     if let Err(e) = std::process::Command::new("/usr/bin/open")
@@ -268,9 +330,76 @@ impl MenuHandler {
         updater_tx: updater::Sender,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm);
-        let this = this.set_ivars(MenuHandlerIvars { wm_tx, updater_tx });
+        let this = this.set_ivars(MenuHandlerIvars {
+            wm_tx,
+            updater_tx,
+            secure_input_details: RefCell::new(None),
+        });
         unsafe { msg_send![super(this), init] }
     }
+}
+
+fn warning_symbol() -> Option<Retained<NSImage>> {
+    NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        ns_string!("exclamationmark.triangle"),
+        Some(ns_string!("Keyboard shortcuts are paused")),
+    )
+}
+
+/// Return `icon` with a warning triangle drawn to its right.
+///
+/// With `color`, draw the triangle in its multicolor form and leave `icon` as
+/// it is. Otherwise, return a template image, so the menu bar tints both.
+fn with_warning_badge(icon: &Retained<NSImage>, color: bool) -> Option<Retained<NSImage>> {
+    const GAP: f64 = 2.0;
+
+    let triangle = if color {
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("exclamationmark.triangle.fill"),
+            None,
+        )?
+        .imageWithSymbolConfiguration(
+            &NSImageSymbolConfiguration::configurationPreferringMulticolor(),
+        )?
+    } else {
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("exclamationmark.triangle"),
+            None,
+        )?
+    };
+
+    let icon_size = icon.size();
+    let natural = triangle.size();
+    let triangle_height = icon_size.height * 0.875;
+    let triangle_size = CGSize {
+        width: natural.width * triangle_height / natural.height,
+        height: triangle_height,
+    };
+    let size = CGSize {
+        width: icon_size.width + GAP + triangle_size.width,
+        height: icon_size.height,
+    };
+    let triangle_origin = CGPoint {
+        x: icon_size.width + GAP,
+        y: (icon_size.height - triangle_height) / 2.0,
+    };
+
+    let icon = icon.clone();
+    let draw = RcBlock::new(move |_rect: CGRect| -> Bool {
+        icon.drawInRect(CGRect {
+            origin: CGPoint::ZERO,
+            size: icon_size,
+        });
+        triangle.drawInRect(CGRect {
+            origin: triangle_origin,
+            size: triangle_size,
+        });
+        Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw);
+    image.setTemplate(!color);
+    image.setAccessibilityDescription(Some(ns_string!("Glide: keyboard shortcuts are paused")));
+    Some(image)
 }
 
 fn create_parachute_icon(config: &config::StatusIconExperimental) -> Option<Retained<NSImage>> {
