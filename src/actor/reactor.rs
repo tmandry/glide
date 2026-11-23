@@ -262,6 +262,7 @@ pub struct Reactor {
     screens: Vec<Screen>,
     active_screen_idx: Option<u16>,
     main_window_tracker: MainWindowTracker,
+    next_raise_sequence: u64,
     in_drag: bool,
     expose_active: bool,
     /// The window the user is currently resizing with the mouse, if any.
@@ -453,6 +454,7 @@ impl Reactor {
             screens: vec![],
             active_screen_idx: None,
             main_window_tracker: MainWindowTracker::default(),
+            next_raise_sequence: 1,
             in_drag: false,
             expose_active: false,
             resizing_window: None,
@@ -1305,6 +1307,8 @@ impl Reactor {
                 .push(wid);
         }
 
+        let sequence_id = self.next_raise_sequence;
+        self.next_raise_sequence += 1;
         let focus_window_with_warp = focus_window.map(|wid| {
             let warp = if self.config.settings.mouse_follows_focus && !from_mouse {
                 self.windows.get(&wid).map(|w| w.frame_monotonic.mid())
@@ -1320,6 +1324,7 @@ impl Reactor {
             raise_windows: windows_by_app_and_screen.into_values().collect(),
             focus_window: focus_window_with_warp,
             app_handles,
+            sequence_id,
         });
 
         _ = self.raise_manager_tx.send((Span::current(), msg));
@@ -2119,9 +2124,7 @@ pub mod tests {
         let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
         match msg {
             raise::Event::RaiseRequest(RaiseRequest {
-                raise_windows,
-                focus_window,
-                app_handles: _,
+                raise_windows, focus_window, ..
             }) => {
                 assert_eq!(raise_windows, vec![desired]);
                 assert!(focus_window.is_none());
@@ -3129,9 +3132,7 @@ pub mod tests {
         let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
         match msg {
             raise::Event::RaiseRequest(RaiseRequest {
-                raise_windows,
-                focus_window,
-                app_handles: _,
+                raise_windows, focus_window, ..
             }) => {
                 let raise_windows: HashSet<Vec<WindowId>> = raise_windows.into_iter().collect();
                 let expected = [
