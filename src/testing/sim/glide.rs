@@ -18,6 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Wake, Waker};
+use std::time::Duration;
 
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -88,6 +89,7 @@ pub struct Glide {
     space_manager: SpaceManager,
     window_server: WindowServer,
 
+    reactor_tx: reactor::Sender,
     reactor_rx: reactor::Receiver,
     raise_rx: UnboundedReceiver<(Span, raise::Event)>,
     sm_tx: space_manager::Sender,
@@ -107,6 +109,9 @@ pub struct Glide {
     /// The apps the WmController has started an actor for.
     known_apps: BTreeSet<pid_t>,
     raise_lock: app::RaiseLock,
+    /// The title of each window the reactor's selection moved to on the
+    /// desktop being shown.
+    selection_history: Vec<String>,
     /// Closes once every app that was running at startup has dropped its
     /// token.
     startup_rx: Option<UnboundedReceiver<()>>,
@@ -135,7 +140,7 @@ impl Glide {
         let space_manager = SpaceManager::new(
             false,
             config,
-            reactor_tx,
+            reactor_tx.clone(),
             ws_tx.clone(),
             wm_tx.clone(),
             status_tx,
@@ -150,12 +155,14 @@ impl Glide {
             raise_manager: RaiseManager::new(),
             space_manager,
             window_server,
+            reactor_tx,
             reactor_rx,
             raise_rx,
             sm_tx,
             sm_rx,
             ws_tx,
             raise_lock: app::RaiseLock::default(),
+            selection_history: Vec::new(),
             ws_rx,
             _unread: (wm_rx, status_rx, group_bars_rx, mouse_rx, skylight_rx),
             apps: BTreeMap::new(),
@@ -183,6 +190,9 @@ impl Glide {
             self.known_apps.insert(pid);
             let startup = Some(startup_tx.clone());
             self.sent.push((Actor::App(pid), Message::Start { startup }));
+        }
+        if let Some(pid) = window_server.frontmost_app() {
+            self.reactor_event(reactor::Event::ApplicationGloballyActivated(pid));
         }
     }
 
@@ -215,18 +225,21 @@ impl Glide {
     /// An app actor also runs when its task has been woken without a message
     /// from the simulator, for example by a request the reactor sent on its
     /// channel or by another app actor releasing the raise lock. `message` is
-    /// `None` then, and the task is polled.
+    /// `None` then, and the task is polled. The raise manager runs with no
+    /// message when its timeout for the active sequence has passed.
     pub fn deliver(&mut self, actor: Actor, message: Option<Message>, mac: &Rc<RefCell<Mac>>) {
         let _system = fake::install(Rc::new(mac::System(Rc::clone(mac))));
         let message = match (actor, message) {
             (Actor::App(pid), None) => return self.poll_app(pid),
+            (Actor::RaiseManager, None) => return self.time_out_raise(),
             (_, Some(message)) => message,
             (actor, None) => unreachable!("{actor:?} has no message"),
         };
         match (actor, message) {
             // The real actors.
             (Actor::Reactor, Message::Reactor(event)) => {
-                self.reactor.handle_event_at_time(event, fake::now())
+                self.reactor.handle_event_at_time(event, fake::now());
+                self.record_selection(&mac.borrow());
             }
             (Actor::RaiseManager, Message::Raise(event)) => {
                 self.raise_manager.handle_message(event)
@@ -341,6 +354,17 @@ impl Glide {
         }
     }
 
+    /// Whether the raise manager's timer for its active sequence has fired.
+    pub fn raise_timeout_due(&self) -> bool {
+        self.raise_manager.time_to_timeout() == Duration::ZERO
+    }
+
+    fn time_out_raise(&mut self) {
+        if let Some(sequence_id) = self.raise_manager.take_timeout() {
+            self.reactor_tx.send(reactor::Event::RaiseTimeout { sequence_id });
+        }
+    }
+
     /// The app actors that have something to do without being sent a message:
     /// a request waiting in their channel, or a lock they were waiting for.
     pub fn woken_apps(&self) -> impl Iterator<Item = Actor> + '_ {
@@ -354,5 +378,30 @@ impl Glide {
 
     pub fn tiled_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.reactor.tiled_windows(space)
+    }
+
+    fn record_selection(&mut self, mac: &Mac) {
+        let space = mac.window_server().current_desktop();
+        // The reactor has no layout to select in until it has tiled a window.
+        if self.reactor.tiled_windows(space).is_empty() {
+            return;
+        }
+        let Some(selected) = self.reactor.selected_window(space) else {
+            return;
+        };
+        let Some(title) = selected.wsid().and_then(|wsid| mac.title(wsid)) else {
+            return;
+        };
+        if self.selection_history.last().map(String::as_str) != Some(title) {
+            self.selection_history.push(title.to_owned());
+        }
+    }
+
+    pub fn selection_history(&self) -> &[String] {
+        &self.selection_history
+    }
+
+    pub fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
+        self.reactor.selected_window(space)
     }
 }

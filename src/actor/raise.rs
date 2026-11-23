@@ -129,7 +129,7 @@ impl RaiseManager {
 
     /// How long until the active sequence times out, or `Duration::MAX` if
     /// there is none to time out.
-    fn time_to_timeout(&self) -> Duration {
+    pub(crate) fn time_to_timeout(&self) -> Duration {
         match &self.active_sequence {
             Some(sequence) if !sequence.timed_out => {
                 let elapsed = ax::now().saturating_duration_since(sequence.started_at);

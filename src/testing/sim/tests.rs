@@ -5,8 +5,15 @@ use expect_test::expect;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use test_log::test;
 
-use super::{Action, Schedule, Sim};
+use self::harness::Harness;
+use super::{Action, Schedule};
+use crate::actor::layout::LayoutCommand;
+use crate::model::Direction;
 use crate::sys::app::pid_t;
+
+mod harness;
+mod invariants;
+mod slow;
 
 fn screen() -> CGRect {
     CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))
@@ -15,13 +22,13 @@ fn screen() -> CGRect {
 /// App A has windows A1 and A2 on desktop 1, and app B has B1 and B2 on
 /// desktop 2. Desktop 1 is shown and Glide is running.
 struct TwoDesktops {
-    sim: Sim,
+    sim: Harness,
     b: pid_t,
 }
 
 impl TwoDesktops {
     fn new(schedule: Schedule) -> TwoDesktops {
-        let mut sim = Sim::new(schedule, screen(), 2);
+        let mut sim = Harness::new(schedule, screen(), 2);
         let a = sim.launch_app("A");
         sim.open_window(a, "A1");
         sim.open_window(a, "A2");
@@ -57,7 +64,7 @@ fn windows_are_tiled_on_the_desktop_they_are_on() {
 #[test]
 fn a_new_window_is_tiled_next_to_the_others() {
     Schedule::each(|schedule| {
-        let mut sim = Sim::new(schedule, screen(), 1);
+        let mut sim = Harness::new(schedule, screen(), 1);
         let a = sim.launch_app("A");
         sim.open_window(a, "A1");
         sim.run();
@@ -198,4 +205,41 @@ fn focused_window_dragged_to_another_desktop(schedule: Schedule) {
 #[test]
 fn focused_window_dragged_to_another_desktop_in_mission_control() {
     Schedule::each(focused_window_dragged_to_another_desktop);
+}
+
+#[test]
+fn a_focus_command_gives_the_window_the_keyboard_focus() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        assert_eq!(sim.key_window().as_deref(), Some("A2"), "{schedule:?}");
+
+        sim.command(LayoutCommand::MoveFocus(Direction::Left));
+        sim.run();
+        assert_eq!(sim.key_window().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.selected().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.actions(), [Action::Raised("A1".into())], "{schedule:?}");
+    });
+}
+
+#[test]
+fn glide_selects_the_window_the_user_clicks() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        sim.click_window("A1");
+        sim.run();
+        assert_eq!(sim.selected().as_deref(), Some("A1"), "{schedule:?}");
+        assert_eq!(sim.actions(), [], "{schedule:?}");
+    });
+}
+
+#[test]
+fn a_window_moved_with_no_drag_is_put_back() {
+    Schedule::each(|schedule| {
+        let TwoDesktops { mut sim, .. } = TwoDesktops::new(schedule);
+        let before = sim.scene().draw();
+        let moved = CGRect::new(CGPoint::new(40., 60.), CGSize::new(500., 1000.));
+        sim.set_window_frame("A1", moved);
+        sim.run();
+        assert_eq!(sim.scene().draw(), before, "{schedule:?}");
+    });
 }

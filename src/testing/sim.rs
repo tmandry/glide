@@ -19,18 +19,21 @@ mod mac;
 #[cfg(test)]
 mod tests;
 
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use objc2_core_foundation::CGRect;
 
 use self::glide::{Actor, Glide};
 pub use self::mac::Action;
 use self::mac::{Mac, Notification};
+use crate::actor::layout::LayoutCommand;
+use crate::actor::reactor;
 use crate::sys::app::pid_t;
 use crate::testing::scene::Scene;
 
@@ -122,6 +125,8 @@ pub struct Sim {
     /// own.
     inboxes: BTreeMap<Actor, VecDeque<glide::Message>>,
     steps: usize,
+    /// How many inputs the user has given.
+    inputs: usize,
 }
 
 /// How many steps a scenario may take before it counts as never settling.
@@ -138,40 +143,79 @@ impl Sim {
             schedule,
             inboxes: BTreeMap::new(),
             steps: 0,
+            inputs: 0,
         }
     }
 
     // What the user does. One process handles each of these right away; call
     // `run` to let the rest of the system react.
 
+    /// Count an input from the user and return macOS to act on it.
+    fn user(&mut self) -> RefMut<'_, Mac> {
+        self.inputs += 1;
+        self.mac.borrow_mut()
+    }
+
     pub fn launch_app(&mut self, name: &str) -> pid_t {
-        self.mac.borrow_mut().launch_app(name)
+        self.user().launch_app(name)
     }
 
     pub fn open_window(&mut self, pid: pid_t, title: &str) {
-        self.mac.borrow_mut().open_window(pid, title);
+        self.user().open_window(pid, title);
     }
 
     pub fn close_window(&mut self, title: &str) {
-        let mut mac = self.mac.borrow_mut();
+        let mut mac = self.user();
         let wsid = mac.window_titled(title);
         mac.close_window(wsid);
     }
 
+    pub fn click_window(&mut self, title: &str) {
+        let mut mac = self.user();
+        let wsid = mac.window_titled(title);
+        mac.click_window(wsid);
+    }
+
+    /// Move or resize a window with the mouse.
+    pub fn set_window_frame(&mut self, title: &str, frame: CGRect) {
+        let mut mac = self.user();
+        let wsid = mac.window_titled(title);
+        mac.set_window_frame(wsid, frame);
+    }
+
+    /// Give Glide a layout command, as a key binding would.
+    pub fn command(&mut self, command: LayoutCommand) {
+        assert!(self.glide_running);
+        self.inputs += 1;
+        let event = reactor::Event::Command(reactor::Command::Layout(command));
+        self.send(Actor::Reactor, glide::Message::Reactor(event));
+    }
+
+    /// Make an app stop responding, or start again.
+    pub fn set_app_hung(&mut self, pid: pid_t, hung: bool) {
+        self.mac.borrow_mut().set_app_hung(pid, hung);
+    }
+
+    /// Make an app take `delay` to handle each message and accessibility
+    /// request.
+    pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
+        self.mac.borrow_mut().set_app_delay(pid, delay);
+    }
+
     pub fn open_mission_control(&mut self) {
-        self.mac.borrow_mut().open_mission_control();
+        self.user().open_mission_control();
     }
 
     pub fn close_mission_control(&mut self) {
-        self.mac.borrow_mut().close_mission_control();
+        self.user().close_mission_control();
     }
 
     pub fn switch_desktop(&mut self, number: usize) {
-        self.mac.borrow_mut().switch_desktop(number);
+        self.user().switch_desktop(number);
     }
 
     pub fn drag_window_to_desktop(&mut self, title: &str, number: usize) {
-        let mut mac = self.mac.borrow_mut();
+        let mut mac = self.user();
         let wsid = mac.window_titled(title);
         mac.drag_window_to_desktop(wsid, number);
     }
@@ -200,6 +244,9 @@ impl Sim {
                 .map(|(&a, _)| Process::Glide(a)),
         );
         ready.extend(self.glide.woken_apps().map(Process::Glide));
+        if self.glide.raise_timeout_due() {
+            ready.insert(Process::Glide(Actor::RaiseManager));
+        }
         ready.extend(self.mac.borrow().ready().map(Process::Mac));
         let ready: Vec<Process> = ready.into_iter().collect();
         if ready.is_empty() {
@@ -278,6 +325,35 @@ impl Sim {
             scene.window(title(w.id), w.frame)
         });
         scene.front_to_back(on_screen.iter().map(|w| title(w.id)))
+    }
+
+    /// The title of the window Glide has selected on the desktop being
+    /// shown.
+    pub fn selected(&mut self) -> Option<String> {
+        let mac = self.mac.borrow();
+        let space = mac.window_server().current_desktop();
+        // Glide has no layout to select in until it has tiled a window there.
+        if self.glide.tiled_windows(space).is_empty() {
+            return None;
+        }
+        let wid = self.glide.selected_window(space)?;
+        Some(mac.title(wid.wsid()?)?.to_owned())
+    }
+
+    /// Each window Glide's selection moved to, in order, on whichever desktop
+    /// was being shown.
+    pub fn selection_history(&self) -> &[String] {
+        self.glide.selection_history()
+    }
+
+    /// How many inputs the user has given so far.
+    pub fn inputs(&self) -> usize {
+        self.inputs
+    }
+
+    /// The title of the window with the keyboard focus.
+    pub fn key_window(&self) -> Option<String> {
+        self.mac.borrow().key_window().map(str::to_owned)
     }
 
     /// The desktop being shown, counting from 1.

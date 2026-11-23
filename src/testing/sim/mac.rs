@@ -27,6 +27,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
+use std::time::Duration;
 
 use accessibility::AXError;
 use accessibility_sys::{
@@ -46,6 +47,9 @@ use crate::sys::ax::fake::{
 use crate::sys::event::MouseState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+
+/// How long an accessibility request waits for a reply.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// A macOS process that is sent messages.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,6 +72,9 @@ pub enum Message {
     OrderFront(WindowServerId),
     /// Give the window the keyboard focus, activating its app.
     MakeKey(WindowServerId),
+    /// From the user: click the window. It comes to the front and takes the
+    /// keyboard focus.
+    Click(WindowServerId),
     /// From the Dock: show another desktop, counting from 1.
     ShowDesktop(usize),
     /// From the Dock: put the window on another desktop, counting from 1.
@@ -271,6 +278,18 @@ impl WindowServer {
                     self.show_desktop(index, out);
                 }
             }
+            Message::Click(wsid) => {
+                let Some(window) = self.windows.get(&wsid) else {
+                    return;
+                };
+                let pid = window.pid;
+                self.activate(pid, out);
+                out.send(Process::App(pid), Message::BecomeMain(wsid));
+                if let Some(at) = self.order.iter().position(|&w| w == wsid) {
+                    self.order.remove(at);
+                    self.order.insert(0, wsid);
+                }
+            }
             Message::ShowDesktop(number) => self.show_desktop(number - 1, out),
             Message::MoveToDesktop(wsid, number) => {
                 let desktop = self.desktops[number - 1];
@@ -303,6 +322,10 @@ impl WindowServer {
 
     pub fn screen(&self) -> CGRect {
         self.screen
+    }
+
+    pub fn frontmost_app(&self) -> Option<pid_t> {
+        self.frontmost
     }
 
     pub fn current_desktop(&self) -> SpaceId {
@@ -369,6 +392,10 @@ pub struct App {
     enhanced_user_interface: bool,
     /// The notifications observers asked for, each on one element.
     observers: Vec<(ObserverId, ElementId, &'static str)>,
+    /// Whether the app has stopped handling messages and requests.
+    hung: bool,
+    /// How long the app takes to handle each message and request.
+    delay: Duration,
 }
 
 struct AppWindow {
@@ -439,6 +466,24 @@ impl App {
         );
         self.set_main_window(Some(id), out);
         out.send(Process::WindowServer, Message::OrderIn(id, frame));
+    }
+
+    /// Move or resize a window as the user would by dragging it.
+    fn set_frame(&mut self, wsid: WindowServerId, frame: CGRect, out: &mut Outbox) {
+        let Some(window) = self.windows.iter_mut().find(|w| w.id == wsid) else {
+            return;
+        };
+        let old = std::mem::replace(&mut window.frame, frame);
+        if old == frame {
+            return;
+        }
+        out.send(Process::WindowServer, Message::SetFrame(wsid, frame));
+        if old.origin != frame.origin {
+            self.notify(element(wsid), kAXWindowMovedNotification, element(wsid), out);
+        }
+        if old.size != frame.size {
+            self.notify(element(wsid), kAXWindowResizedNotification, element(wsid), out);
+        }
     }
 
     /// Close a window. The most recent remaining window becomes the main
@@ -627,6 +672,8 @@ impl Mac {
                 active: false,
                 enhanced_user_interface: false,
                 observers: Vec::new(),
+                hung: false,
+                delay: Duration::ZERO,
             },
         );
         self.window_server.launch(pid, &mut self.out);
@@ -651,6 +698,41 @@ impl Mac {
             .expect("window does not exist");
         app.close_window(wsid, &mut self.out);
         self.route();
+    }
+
+    /// Click a window on screen.
+    pub fn click_window(&mut self, wsid: WindowServerId) {
+        let on_screen = self.window_server.windows_on_screen();
+        assert!(
+            on_screen.iter().any(|w| w.id == wsid),
+            "{wsid:?} is not on screen"
+        );
+        self.out.send(Process::WindowServer, Message::Click(wsid));
+        self.route();
+    }
+
+    /// Move or resize a window with the mouse, which is released by the time
+    /// anything else sees the new frame.
+    pub fn set_window_frame(&mut self, wsid: WindowServerId, frame: CGRect) {
+        let app = self
+            .apps
+            .values_mut()
+            .find(|app| app.windows.iter().any(|w| w.id == wsid))
+            .expect("window does not exist");
+        app.set_frame(wsid, frame, &mut self.out);
+        self.route();
+    }
+
+    /// Make an app stop handling messages and accessibility requests, as it
+    /// does when it beachballs, or start again.
+    pub fn set_app_hung(&mut self, pid: pid_t, hung: bool) {
+        self.apps.get_mut(&pid).expect("app is not running").hung = hung;
+    }
+
+    /// Make an app take `delay` to handle each message and accessibility
+    /// request, as a busy app does.
+    pub fn set_app_delay(&mut self, pid: pid_t, delay: Duration) {
+        self.apps.get_mut(&pid).expect("app is not running").delay = delay;
     }
 
     pub fn open_mission_control(&mut self) {
@@ -699,13 +781,27 @@ impl Mac {
         }
     }
 
-    /// The processes with a message waiting.
+    /// The processes with a message waiting that can handle it.
     pub fn ready(&self) -> impl Iterator<Item = Process> + '_ {
-        self.inboxes.iter().filter(|(_, inbox)| !inbox.is_empty()).map(|(&p, _)| p)
+        self.inboxes
+            .iter()
+            .filter(|(_, inbox)| !inbox.is_empty())
+            .map(|(&p, _)| p)
+            .filter(|&p| !self.is_hung(p))
+    }
+
+    fn is_hung(&self, process: Process) -> bool {
+        match process {
+            Process::App(pid) => self.apps.get(&pid).is_some_and(|app| app.hung),
+            Process::WindowServer => false,
+        }
     }
 
     /// Have `process` handle its next message. Return false if it has none.
     pub fn step(&mut self, process: Process) -> bool {
+        if self.is_hung(process) {
+            return false;
+        }
         let Some(message) = self.inboxes.get_mut(&process).and_then(|inbox| inbox.pop_front())
         else {
             return false;
@@ -714,6 +810,7 @@ impl Mac {
             Process::WindowServer => self.window_server.handle(message, &mut self.out),
             Process::App(pid) => {
                 if let Some(app) = self.apps.get_mut(&pid) {
+                    fake::sleep(app.delay);
                     app.handle(message, &mut self.out);
                 }
             }
@@ -739,18 +836,12 @@ impl Mac {
         self.route();
     }
 
-    /// Send an app an accessibility request and wait for the reply.
-    ///
-    /// TODO: A real request fails if the app takes too long to reply. Let
-    /// the caller make a request fail that way.
+    /// Send an app an accessibility request and wait for the reply. A hung
+    /// app never replies, and the request fails once it times out.
     pub fn ax_request(&mut self, pid: pid_t, request: Request) -> Result<Option<Value>, AXError> {
-        if !self.apps.contains_key(&pid) {
+        let Some(app) = self.apps.get(&pid) else {
             return Err(AXError::CannotComplete);
-        }
-        // The app gets to the request after what is already in its inbox.
-        while self.step(Process::App(pid)) {}
-
-        let app = self.apps.get_mut(&pid).unwrap();
+        };
         let action: Option<(fn(String) -> Action, u32)> = match &request {
             Request::SetAttribute(ElementId::Window(id), ..) => Some((Action::Wrote, *id)),
             Request::PerformAction(ElementId::Window(id), _) => Some((Action::Raised, *id)),
@@ -761,6 +852,15 @@ impl Mac {
         {
             self.actions.push((action(window.title.clone()), self.dock.mission_control));
         }
+        if app.hung {
+            fake::sleep(REQUEST_TIMEOUT);
+            return Err(AXError::CannotComplete);
+        }
+        // The app gets to the request after what is already in its inbox.
+        while self.step(Process::App(pid)) {}
+
+        let app = self.apps.get_mut(&pid).unwrap();
+        fake::sleep(app.delay);
         let reply = app.ax(request, &mut self.out);
         self.route();
         reply
@@ -779,6 +879,43 @@ impl Mac {
     }
 
     // What a test can see. Nothing in the system has this view.
+
+    /// The title of the window with the keyboard focus: the main window of
+    /// the app the window server has frontmost.
+    pub fn key_window(&self) -> Option<&str> {
+        let app = self.apps.get(&self.window_server.frontmost?)?;
+        self.title(app.main_window?)
+    }
+
+    pub fn any_app_hung(&self) -> bool {
+        self.apps.values().any(|app| app.hung)
+    }
+
+    pub fn mission_control_open(&self) -> bool {
+        self.dock.mission_control
+    }
+
+    /// The notifications each observer asked for on each window, sorted, with
+    /// the window's title.
+    pub fn window_notifications(&self) -> Vec<(String, Vec<&'static str>)> {
+        let mut asked: BTreeMap<(String, ObserverId), Vec<&'static str>> = BTreeMap::new();
+        for app in self.apps.values() {
+            for &(observer, on, name) in &app.observers {
+                let ElementId::Window(id) = on else { continue };
+                let Some(window) = app.windows.iter().find(|w| w.id.0 == id) else {
+                    continue;
+                };
+                asked.entry((window.title.clone(), observer)).or_default().push(name);
+            }
+        }
+        asked
+            .into_iter()
+            .map(|((title, _), mut names)| {
+                names.sort();
+                (title, names)
+            })
+            .collect()
+    }
 
     pub fn actions(&self) -> &[(Action, bool)] {
         &self.actions
