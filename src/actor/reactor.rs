@@ -262,6 +262,9 @@ pub struct Reactor {
     screens: Vec<Screen>,
     active_screen_idx: Option<u16>,
     main_window_tracker: MainWindowTracker,
+    /// The window the last raise sent to the raise manager focuses, with the
+    /// raise's sequence id, if the raise moved the selection to it.
+    last_focus_request: Option<(WindowId, u64)>,
     next_raise_sequence: u64,
     in_drag: bool,
     expose_active: bool,
@@ -454,6 +457,7 @@ impl Reactor {
             screens: vec![],
             active_screen_idx: None,
             main_window_tracker: MainWindowTracker::default(),
+            last_focus_request: None,
             next_raise_sequence: 1,
             in_drag: false,
             expose_active: false,
@@ -922,14 +926,24 @@ impl Reactor {
                 _ = self.raise_manager_tx.send((Span::current(), msg));
             }
             Event::RaiseRequestFailed { windows, sequence_id, quiet } => {
-                let msg = raise::Event::RaiseRequestFailed { windows, sequence_id };
+                let msg = raise::Event::RaiseRequestFailed {
+                    windows: windows.clone(),
+                    sequence_id,
+                };
                 _ = self.raise_manager_tx.send((Span::current(), msg));
+                let spaces: Vec<_> = self.screens.iter().flat_map(|screen| screen.space).collect();
+                // The failure can come long after the raise, once the user has
+                // moved on to another window.
+                let focused = windows.last().copied();
+                let still_selected = focused.is_some()
+                    && focused.map(|wid| (wid, sequence_id)) == self.last_focus_request
+                    && spaces.iter().any(|&space| self.layout.selected_window_on(space) == focused);
                 if quiet == Quiet::No
+                    && still_selected
                     && let Some(main_window) = self.main_window()
                 {
                     // The raise didn't move the focus, so bring the layout
                     // selection back to the window that has it.
-                    let spaces = self.screens.iter().flat_map(|screen| screen.space).collect();
                     self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
                 }
             }
@@ -993,6 +1007,9 @@ impl Reactor {
             }
         }
         if let Some(raised_window) = raised_window {
+            // The selection follows the focus now, so a failure reported for
+            // an earlier raise has nothing to move it back from.
+            self.last_focus_request = None;
             let spaces = self.screens.iter().flat_map(|screen| screen.space).collect();
             self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
             self.update_active_screen();
@@ -1309,6 +1326,14 @@ impl Reactor {
 
         let sequence_id = self.next_raise_sequence;
         self.next_raise_sequence += 1;
+        // Only a focus request that also moved the selection is one the
+        // selection can be moved back from.
+        let spaces: Vec<_> = self.screens.iter().flat_map(|screen| screen.space).collect();
+        if let Some(wid) = focus_window
+            && spaces.iter().any(|&space| self.layout.selected_window_on(space) == Some(wid))
+        {
+            self.last_focus_request = Some((wid, sequence_id));
+        }
         let focus_window_with_warp = focus_window.map(|wid| {
             let warp = if self.config.settings.mouse_follows_focus && !from_mouse {
                 self.windows.get(&wid).map(|w| w.frame_monotonic.mid())

@@ -36,11 +36,7 @@ fn focus_a1(sim: &Harness) -> LayoutCommand {
     })
 }
 
-// TODO: Glide's selection stays on A1. The raise manager cancels the raise
-// before A's actor asks for the activation, and a cancelled raise doesn't
-// report that it failed.
 #[test]
-#[ignore]
 fn the_selection_returns_when_an_app_is_too_slow_to_raise() {
     Schedule::each(|schedule| {
         let (mut sim, a, _) = two_apps(schedule);

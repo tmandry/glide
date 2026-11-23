@@ -370,6 +370,16 @@ impl State {
                     debug!("Raise request cancelled");
                     this.borrow_mut().expire_pending_activation();
                 }
+                Err(RaiseError::RaiseCancelledBeforeActivating) => {
+                    // Nothing was asked of the app, so the focus is where it
+                    // was. Tell the reactor, so it can move the selection back.
+                    debug!("Raise request cancelled before activating");
+                    this.borrow().send_event(Event::RaiseRequestFailed {
+                        windows: wids,
+                        sequence_id,
+                        quiet,
+                    });
+                }
                 Err(e) => {
                     debug!("Raise request failed: {e}");
                     // Windows we didn't get to will never report completion,
@@ -772,6 +782,8 @@ impl State {
 enum RaiseError {
     #[error("raise request cancelled")]
     RaiseCancelled,
+    #[error("raise request cancelled before asking for the activation")]
+    RaiseCancelledBeforeActivating,
     #[error("accessibility error: {0}")]
     AXError(#[from] accessibility::Error),
 }
@@ -790,7 +802,7 @@ impl State {
         // raise a different app, we check the raise token for cancellation.
         let check_cancel = || {
             if token.is_cancelled() {
-                return Err(RaiseError::RaiseCancelled);
+                return Err(RaiseError::RaiseCancelledBeforeActivating);
             }
             Ok(())
         };
@@ -843,6 +855,9 @@ impl State {
         // notification soon and we'll match out against it, incorrectly marking
         // it as quiet. Otherwise nothing bad happens.
         let is_frontmost: bool = trace("is_frontmost", &this.app, || this.app.frontmost())?.value();
+        // Check for cancellation again in case the request took too long, so
+        // a cancelled raise lets go of the lock sooner.
+        check_cancel()?;
 
         // Make this the key window. This ensures that the window has focus and
         // can receive keyboard events, and activates the app if it isn't
@@ -854,8 +869,10 @@ impl State {
         // make_key_window, but try to avoid that because we would not have the
         // same guarantees with NSRunningApplication, which dispatches a request
         // to the application and does not wait for it to complete.
-        let make_key_result =
-            ax::make_key_window(this.pid, WindowServerId::try_from(&*this.window(first)?.elem)?);
+        let wsid = WindowServerId::try_from(&*this.window(first)?.elem)?;
+        // Check for cancellation again in case the requests took too long.
+        check_cancel()?;
+        let make_key_result = ax::make_key_window(this.pid, wsid);
         if make_key_result.is_err() {
             warn!(?this.pid, "Failed to activate app");
         }

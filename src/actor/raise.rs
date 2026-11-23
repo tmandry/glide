@@ -207,8 +207,7 @@ impl RaiseManager {
                         // Cancel the raises that hung, then install a fresh
                         // token. The focus raise is sent next (in
                         // process_active_sequence) and must use a live token, or
-                        // the app rejects it as cancelled and never reports
-                        // completion, blocking the manager permanently.
+                        // the app gives up on it before raising anything.
                         sequence.raise_token.cancel();
                         sequence.raise_token = CancellationToken::new();
                         // Restart the timeout window so the focus phase gets its
@@ -654,8 +653,7 @@ mod tests {
 
             // Time out the regular raise. This cancels the sequence's token, but
             // the focus raise sent afterward must use a live token; otherwise the
-            // app rejects it as cancelled and never reports completion, blocking
-            // the manager forever.
+            // app gives up on it before raising anything.
             raise_manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
 
             let requests = collect_requests(&mut app_rx);
