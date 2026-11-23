@@ -51,9 +51,10 @@ workflow.
    on a shared type) and also uses it. Split the capability into its own
    `refactor:` or `internal:` commit first.
 
-4. **Rewrite.** Tag a backup first: `git branch -f backup/BRANCH HEAD`. Write
-   each fix's changes as a patch script, or keep the hunks, so they can be
-   applied at a rebase stop. Then run the rebase non-interactively:
+4. **Rewrite.** Note the old tip's commit hash (`git rev-parse HEAD`), and tag
+   a backup: `git branch -f backup/BRANCH HEAD`. Write each fix's changes as a
+   patch script, or keep the hunks, so they can be applied at a rebase stop.
+   Then run the rebase non-interactively:
 
    ```sh
    GIT_SEQUENCE_EDITOR="cp /path/to/todo.txt" git rebase -i BASE
@@ -75,6 +76,11 @@ workflow.
    tests. Fix any commit that fails, and say whether any commit adds build
    warnings.
 
+   Once both checks pass, delete the backup with `git branch -D backup/BRANCH`.
+   The old commits stay in the reflog, so the old tip's hash still works for
+   diffing or restoring. If a check fails and you can't fix it, keep the
+   backup and say so.
+
 6. **Publish, if asked.** Only push if the user asked for it, or asked to update
    a PR. The history was rewritten, so use
    `git push --force-with-lease=BRANCH:OLD_SHA`, where `OLD_SHA` is the commit
@@ -84,8 +90,9 @@ workflow.
 
 7. **Report.** List the new commits, what each fix was and where it went, the
    findings you disagreed with and why, how many review rounds ran and how the
-   last one ended, and the result of the per-commit check. Mention the backup,
-   so the user can delete it or restore from it.
+   last one ended, and the result of the per-commit check. Give the old tip's
+   commit hash, so the user can compare against it (`git diff OLD_TIP HEAD`)
+   or restore it (`git reset --hard OLD_TIP`).
 
 ## With jj
 
@@ -109,6 +116,7 @@ then lands on no branch. The last step below puts Git back on the branch.
   (`jj new`), so `@-` holds it.
 - **Backup:** record the operation ID (`jj op log -n 1 --no-graph -T 'id.short()'`)
   and the tip's commit ID. `jj op restore OP_ID` undoes the whole rewrite.
+  There's no backup branch to delete; report both IDs instead.
 - **Squash fixes:** try `jj absorb --from FIX` first. It moves each hunk into
   the nearest ancestor that last changed those lines, which is usually the
   commit the fix belongs to; check where each hunk went with `jj log -p`.

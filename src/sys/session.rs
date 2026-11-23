@@ -1,14 +1,16 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Identify the current login session.
+//! Identify the current login session, and read its Secure Input state.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{mem, ptr};
 
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
-use objc2_core_graphics::CGSessionCopyCurrentDictionary;
+use objc2_core_graphics::{CGError, CGSessionCopyCurrentDictionary};
 use serde::{Deserialize, Serialize};
+
+use super::window_server::{GlobalNotifier, on_global_event};
 
 /// An opaque identifier for a login session.
 ///
@@ -84,6 +86,61 @@ pub fn boot_time() -> Option<SystemTime> {
     let secs = u64::try_from(tv.tv_sec).ok()?;
     let micros = u32::try_from(tv.tv_usec).ok()?;
     Some(UNIX_EPOCH + Duration::new(secs, micros * 1000))
+}
+
+/// Secure Event Input, which keeps keystrokes from reaching event taps.
+///
+/// Apps turn it on while the user types into a password field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecureInput {
+    /// The process that most recently turned Secure Input on, as the window
+    /// server reports it.
+    ///
+    /// This can be stale: it isn't updated when a process that isn't the
+    /// frontmost app turns Secure Input on.
+    pub likely_holder: Option<libc::pid_t>,
+}
+
+const SECURE_INPUT_PID_KEY: &str = "kCGSSessionSecureInputPID";
+
+/// Return the Secure Input state, or `None` if it is off.
+pub fn secure_input() -> Option<SecureInput> {
+    // SAFETY: The function takes no arguments and only reads system state.
+    if unsafe { IsSecureEventInputEnabled() } == 0 {
+        return None;
+    }
+    let likely_holder = current_session_dict().and_then(|dict| {
+        let pid = dict
+            .get(&CFString::from_static_str(SECURE_INPUT_PID_KEY))?
+            .downcast::<CFNumber>()
+            .ok()?
+            .as_i32()?;
+        (pid > 0).then_some(pid)
+    });
+    Some(SecureInput { likely_holder })
+}
+
+/// The window server events sent when Secure Input turns on for the session,
+/// and when it turns off. Neither is sent when another process turns it on
+/// while it is already on. Found by watching the events sent on macOS 26.
+const SECURE_INPUT_ON_EVENT: u32 = 752;
+const SECURE_INPUT_OFF_EVENT: u32 = 753;
+
+/// Call `callback` on the current thread whenever Secure Input turns on or
+/// off, until the returned notifiers are dropped.
+pub fn on_secure_input_change(
+    callback: impl Fn() + Clone + 'static,
+) -> Result<[GlobalNotifier; 2], CGError> {
+    let on_callback = callback.clone();
+    Ok([
+        on_global_event(SECURE_INPUT_ON_EVENT, move |_, _| on_callback())?,
+        on_global_event(SECURE_INPUT_OFF_EVENT, move |_, _| callback())?,
+    ])
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn IsSecureEventInputEnabled() -> u8;
 }
 
 #[cfg(test)]
