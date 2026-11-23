@@ -36,12 +36,17 @@ impl Harness {
         };
 
         // A focus command moves the selection at most once, to the window it
-        // focuses.
+        // focuses, and back again if the raise fails.
         if let Some(from) = self.focus_command
             && self.inputs() == self.inputs_at_settle + 1
         {
-            let moved_to = &self.selection_history()[from..];
-            if moved_to.len() > 1 {
+            let history = self.selection_history();
+            let moved_to = &history[from..];
+            let moved_back = moved_to.len() == 2
+                && from > 0
+                && moved_to[1] == history[from - 1]
+                && mac.key_window() == Some(moved_to[1].as_str());
+            if moved_to.len() > 1 && !moved_back {
                 fail(format!("one focus command moved the selection to {moved_to:?}"));
             }
         }

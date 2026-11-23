@@ -47,6 +47,9 @@ pub struct RaiseRequest {
     pub raise_windows: Vec<Vec<WindowId>>,
     /// The window to raise and focus last.
     pub focus_window: Option<(WindowId, Option<CGPoint>)>,
+    /// The id of the sequence that carries out this request, which the
+    /// reactor chooses.
+    pub sequence_id: u64,
     pub app_handles: HashMap<i32, AppThreadHandle>,
 }
 
@@ -63,7 +66,6 @@ pub struct RaiseManager {
     active_sequence: Option<ActiveSequence>,
     /// Queued sequences waiting to be processed
     queued_sequences: VecDeque<RaiseRequest>,
-    next_sequence_id: u64,
     mouse_tx: Option<mouse::Sender>,
 }
 
@@ -122,7 +124,6 @@ impl RaiseManager {
         Self {
             active_sequence: None,
             queued_sequences: VecDeque::new(),
-            next_sequence_id: 1,
             mouse_tx: None,
         }
     }
@@ -158,9 +159,13 @@ impl RaiseManager {
                     request.raise_windows.len()
                 );
 
-                // Drop duplicate requests that have no effect.
-                if self.queued_sequences.back().is_some_and(|last| last.matches(&request)) {
+                // Drop duplicate requests that have no effect. The queued one
+                // takes the newer id.
+                if let Some(last) = self.queued_sequences.back_mut()
+                    && last.matches(&request)
+                {
                     debug!("Dropping raise request identical to the queued one");
+                    last.sequence_id = request.sequence_id;
                 } else {
                     self.queued_sequences.push_back(request);
                 }
@@ -202,8 +207,7 @@ impl RaiseManager {
                         // Cancel the raises that hung, then install a fresh
                         // token. The focus raise is sent next (in
                         // process_active_sequence) and must use a live token, or
-                        // the app rejects it as cancelled and never reports
-                        // completion, blocking the manager permanently.
+                        // the app gives up on it before raising anything.
                         sequence.raise_token.cancel();
                         sequence.raise_token = CancellationToken::new();
                         // Restart the timeout window so the focus phase gets its
@@ -243,11 +247,9 @@ impl RaiseManager {
             raise_windows,
             focus_window,
             app_handles,
+            sequence_id,
         }: RaiseRequest,
     ) {
-        let sequence_id = self.next_sequence_id;
-        self.next_sequence_id += 1;
-
         // Send all raise requests with completion notification
         let mut pending_raises = HashSet::default();
         let raise_token = CancellationToken::new();
@@ -381,6 +383,7 @@ mod tests {
     }
 
     fn create_layout_response(
+        sequence_id: u64,
         raise_windows: Vec<WindowId>,
         focus_window: Option<(WindowId, Option<CGPoint>)>,
         app_handles: HashMap<i32, AppThreadHandle>,
@@ -389,6 +392,7 @@ mod tests {
             raise_windows: raise_windows.into_iter().map(|w| vec![w]).collect(),
             focus_window,
             app_handles,
+            sequence_id,
         })
     }
 
@@ -447,6 +451,7 @@ mod tests {
             let (app_handles, _app_rx) = create_test_app_handles();
 
             let msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), None)),
                 app_handles,
@@ -470,6 +475,7 @@ mod tests {
             let (app_handles, _app_rx) = create_test_app_handles();
 
             let layout_msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), None)),
                 app_handles,
@@ -507,7 +513,8 @@ mod tests {
             let mut raise_manager = RaiseManager::new();
             let (app_handles, _app_rx) = create_test_app_handles();
 
-            let layout_msg = create_layout_response(vec![WindowId::new(1, 1)], None, app_handles);
+            let layout_msg =
+                create_layout_response(1, vec![WindowId::new(1, 1)], None, app_handles);
 
             raise_manager.handle_message(layout_msg);
 
@@ -536,6 +543,7 @@ mod tests {
             let (app_handles, mut app_rx) = create_test_app_handles();
 
             let layout_msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), Some(CGPoint::new(100.0, 200.0)))),
                 app_handles,
@@ -593,6 +601,7 @@ mod tests {
             let (app_handles, mut app_rx) = create_test_app_handles();
 
             let layout_msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), None)),
                 app_handles,
@@ -635,6 +644,7 @@ mod tests {
             let (app_handles, mut app_rx) = create_test_app_handles();
 
             let layout_msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles,
@@ -643,8 +653,7 @@ mod tests {
 
             // Time out the regular raise. This cancels the sequence's token, but
             // the focus raise sent afterward must use a live token; otherwise the
-            // app rejects it as cancelled and never reports completion, blocking
-            // the manager forever.
+            // app gives up on it before raising anything.
             raise_manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
 
             let requests = collect_requests(&mut app_rx);
@@ -682,6 +691,7 @@ mod tests {
             let (app_handles, _app_rx) = create_test_app_handles();
             let request = || {
                 create_layout_response(
+                    1,
                     vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                     Some((WindowId::new(1, 3), None)),
                     app_handles.clone(),
@@ -712,11 +722,13 @@ mod tests {
 
             // Send two layout responses - second should be queued
             let msg1 = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles.clone(),
             );
             let msg2 = create_layout_response(
+                2,
                 vec![WindowId::new(1, 3)],
                 Some((WindowId::new(1, 4), None)),
                 app_handles.clone(),
@@ -796,6 +808,7 @@ mod tests {
             let (app_handles, mut app_rx) = create_test_app_handles();
 
             let msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles.clone(),
@@ -831,6 +844,7 @@ mod tests {
             let (app_handles, mut app_rx) = create_test_app_handles();
 
             let msg = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles.clone(),
@@ -860,16 +874,19 @@ mod tests {
             // 2. Second has no regular raises, only focus (will start immediately when first completes)
             // 3. Third has one regular raise + focus
             let msg1 = create_layout_response(
+                1,
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles.clone(),
             );
             let msg2 = create_layout_response(
+                2,
                 vec![],
                 Some((WindowId::new(1, 3), None)),
                 app_handles.clone(),
             );
             let msg3 = create_layout_response(
+                3,
                 vec![WindowId::new(1, 4)],
                 Some((WindowId::new(1, 5), None)),
                 app_handles.clone(),
@@ -973,6 +990,7 @@ mod tests {
                 raise_windows: batched_windows,
                 focus_window: Some((WindowId::new(1, 7), None)),
                 app_handles,
+                sequence_id: 1,
             });
 
             // Handle the batched raise request

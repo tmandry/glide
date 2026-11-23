@@ -1604,6 +1604,12 @@ impl LayoutManager {
         ron::ser::to_string(&self).unwrap()
     }
 
+    /// The window selected on `space`, if it has a layout.
+    pub(super) fn selected_window_on(&self, space: SpaceId) -> Option<WindowId> {
+        let layout = self.try_layout(space)?;
+        self.tree.window_at(self.tree.selection(layout))
+    }
+
     // This seems a bit messy, but it's simpler and more robust to write some
     // reactor tests as integration tests with this actor.
     #[cfg(test)]

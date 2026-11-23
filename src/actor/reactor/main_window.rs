@@ -299,7 +299,7 @@ mod tests {
         reactor.handle_event(ApplicationGloballyActivated(1));
         reactor.handle_events(apps.make_app_with_opts(
             1,
-            make_windows(2),
+            make_windows(3),
             Some(WindowId::new(1, 1)),
             true,
         ));
@@ -309,18 +309,34 @@ mod tests {
             Direction::Right,
         ))));
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 2)));
+        let (_, sequence_id) = reactor.last_focus_request.unwrap();
 
         // A quiet raise failing says nothing about where the focus is.
         reactor.handle_event(RaiseRequestFailed {
             windows: vec![WindowId::new(1, 2)],
-            sequence_id: 1,
+            sequence_id,
             quiet: Quiet::Yes,
+        });
+        assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 2)));
+
+        // A failure for a raise the selection has moved on from leaves it
+        // alone, and so does one from an earlier raise of the same window.
+        reactor.handle_event(RaiseRequestFailed {
+            windows: vec![WindowId::new(1, 3)],
+            sequence_id,
+            quiet: Quiet::No,
+        });
+        assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 2)));
+        reactor.handle_event(RaiseRequestFailed {
+            windows: vec![WindowId::new(1, 2)],
+            sequence_id: sequence_id - 1,
+            quiet: Quiet::No,
         });
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 2)));
 
         reactor.handle_event(RaiseRequestFailed {
             windows: vec![WindowId::new(1, 2)],
-            sequence_id: 1,
+            sequence_id,
             quiet: Quiet::No,
         });
         assert_eq!(reactor.layout.selected_window(space), Some(WindowId::new(1, 1)));
