@@ -11,6 +11,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -68,12 +70,10 @@ pub fn init_logging() {
 }
 
 fn panic_report(info: &PanicHookInfo) -> String {
-    let payload = info
-        .payload()
-        .downcast_ref::<String>()
-        .map(|s| &**s)
-        .or(info.payload().downcast_ref::<&str>().map(|s| &**s))
-        .unwrap_or("Unknown error");
+    let mut timestamp = String::new();
+    let _ = SystemTime.format_time(&mut Writer::new(&mut timestamp));
+    let pid = std::process::id();
+    let payload = info.payload_as_str().unwrap_or("Unknown error");
     let location = info
         .location()
         .map(|l| format!(" at {}:{}", l.file(), l.line()))
@@ -85,7 +85,9 @@ fn panic_report(info: &PanicHookInfo) -> String {
         None => format!("{thread_id:?}"),
     };
     let backtrace = Backtrace::force_capture();
-    format!("thread {thread_info} panicked{location}:\n{payload}\nstack backtrace:\n{backtrace}\n")
+    format!(
+        "{timestamp} PANIC pid={pid}: thread {thread_info} panicked{location}:\n{payload}\nstack backtrace:\n{backtrace}\n"
+    )
 }
 
 pub fn tree_layer() -> tracing_tree::HierarchicalLayer<fn() -> Stderr, UtcDateTime> {
