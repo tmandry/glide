@@ -18,6 +18,7 @@ use tracing::{Span, debug, trace, warn};
 
 use crate::actor::app::{AppThreadHandle, Quiet, Request};
 use crate::actor::{mouse, reactor};
+use crate::sys::ax;
 use crate::sys::timer::Timer;
 use crate::sys::window_server::WindowId;
 
@@ -94,23 +95,8 @@ impl RaiseManager {
         raise_manager.mouse_tx = mouse_tx;
         let mut timeout_timer = Timer::manual();
 
-        let sequence_timeout = |sequence: &ActiveSequence| {
-            if !sequence.timed_out {
-                let elapsed = sequence.started_at.elapsed();
-                TIMEOUT_DURATION.saturating_sub(elapsed)
-            } else {
-                Duration::MAX
-            }
-        };
-
         loop {
-            // Calculate next timeout timer if we have an active sequence.
-            let timeout = if let Some(sequence) = &raise_manager.active_sequence {
-                sequence_timeout(sequence)
-            } else {
-                Duration::MAX
-            };
-            timeout_timer.set_next_fire(timeout);
+            timeout_timer.set_next_fire(raise_manager.time_to_timeout());
 
             tokio::select! {
                 // Handle messages from reactor
@@ -121,17 +107,11 @@ impl RaiseManager {
 
                 // Handle timeout - send timeout event to reactor
                 _ = timeout_timer.next() => {
-                    // Send timeout event for the active sequence
-                    if let Some(sequence) = &mut raise_manager.active_sequence {
-                        if sequence_timeout(sequence) <= Duration::ZERO {
-                            // Send timeout event to reactor; this will get
-                            // relayed back to us. We send these events through
-                            // the reactor so that we can record/replay them.
-                            sequence.timed_out = true;
-                            events_tx.send(
-                                reactor::Event::RaiseTimeout { sequence_id: sequence.sequence_id }
-                            );
-                        }
+                    if let Some(sequence_id) = raise_manager.take_timeout() {
+                        // Send timeout event to reactor; this will get relayed
+                        // back to us. We send these events through the reactor
+                        // so that we can record/replay them.
+                        events_tx.send(reactor::Event::RaiseTimeout { sequence_id });
                     }
                 }
             }
@@ -145,6 +125,29 @@ impl RaiseManager {
             next_sequence_id: 1,
             mouse_tx: None,
         }
+    }
+
+    /// How long until the active sequence times out, or `Duration::MAX` if
+    /// there is none to time out.
+    fn time_to_timeout(&self) -> Duration {
+        match &self.active_sequence {
+            Some(sequence) if !sequence.timed_out => {
+                let elapsed = ax::now().saturating_duration_since(sequence.started_at);
+                TIMEOUT_DURATION.saturating_sub(elapsed)
+            }
+            _ => Duration::MAX,
+        }
+    }
+
+    /// Mark the active sequence as timed out if its time is up, and return its
+    /// id.
+    pub(crate) fn take_timeout(&mut self) -> Option<u64> {
+        if self.time_to_timeout() > Duration::ZERO {
+            return None;
+        }
+        let sequence = self.active_sequence.as_mut()?;
+        sequence.timed_out = true;
+        Some(sequence.sequence_id)
     }
 
     pub(crate) fn handle_message(&mut self, msg: Event) {
@@ -206,7 +209,7 @@ impl RaiseManager {
                         // Restart the timeout window so the focus phase gets its
                         // own timeout. Otherwise a hung focus raise could never
                         // time out again and would block all future raises.
-                        sequence.started_at = Instant::now();
+                        sequence.started_at = ax::now();
                         sequence.timed_out = false;
                     }
                 }
@@ -294,7 +297,7 @@ impl RaiseManager {
                 focus_batch,
                 app_handles,
                 raise_token,
-                started_at: Instant::now(),
+                started_at: ax::now(),
                 timed_out: false,
             });
         }
@@ -346,7 +349,7 @@ impl RaiseManager {
         if sequence.pending_raises.is_empty() && sequence.focus_batch.is_none() {
             trace!(
                 "Raise sequence completed after {:?}",
-                sequence.started_at.elapsed(),
+                ax::now().saturating_duration_since(sequence.started_at),
             );
             self.active_sequence = None;
             changed = true;
