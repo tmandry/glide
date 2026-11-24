@@ -1,23 +1,41 @@
 // Copyright The Glide Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::fs::File;
-use std::io::{Stderr, stderr};
+use std::backtrace::Backtrace;
+use std::io::{Stderr, Write, stderr};
+use std::panic::PanicHookInfo;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tracing::info;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 use tracing_timing::{Histogram, group};
 use tracing_tree::time::UtcDateTime;
 
+fn log_dir() -> PathBuf {
+    dirs::home_dir().unwrap().join("Library/Logs/Glide")
+}
+
 pub fn init_logging() {
-    let pid = std::process::id();
-    // let logfile = tracing_appender::rolling::never("/tmp", format!("glide.{pid}.log"));
-    let logfile = File::create(format!("/tmp/glide.{pid}.log")).unwrap();
+    let log_dir = log_dir();
+    // The appender lists the directory to prune old logs before creating it.
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let logfile = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("glide")
+        .filename_suffix("log")
+        .max_log_files(3)
+        .build(&log_dir)
+        .unwrap();
     let (file_appender, file_appender_guard) = tracing_appender::non_blocking(logfile);
+    let panic_writer = file_appender.clone();
     let (err_appender, err_appender_guard) = tracing_appender::non_blocking(stderr());
     let original_hook = std::panic::take_hook();
     tracing_subscriber::registry()
@@ -30,9 +48,18 @@ pub fn init_logging() {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(file_appender).with_ansi(false))
         .init();
+    info!(
+        "Glide {} started with pid {}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
 
     let appender_guards = Mutex::new(Some((file_appender_guard, err_appender_guard)));
     std::panic::set_hook(Box::new(move |info| {
+        // Bypass the subscriber, which may be what panicked.
+        if let Err(e) = panic_writer.clone().write_all(panic_report(info).as_bytes()) {
+            eprintln!("Failed to write panic report to the log: {e}");
+        }
         // Because we abort and don't unwind on panic, make sure to flush the
         // appenders before that happens.
         if let Ok(mut guards) = appender_guards.try_lock() {
@@ -40,6 +67,27 @@ pub fn init_logging() {
         }
         original_hook(info);
     }));
+}
+
+fn panic_report(info: &PanicHookInfo) -> String {
+    let mut timestamp = String::new();
+    let _ = SystemTime.format_time(&mut Writer::new(&mut timestamp));
+    let pid = std::process::id();
+    let payload = info.payload_as_str().unwrap_or("Unknown error");
+    let location = info
+        .location()
+        .map(|l| format!(" at {}:{}", l.file(), l.line()))
+        .unwrap_or_default();
+    let thread = std::thread::current();
+    let thread_id = thread.id();
+    let thread_info = match thread.name() {
+        Some(name) => format!("'{name}' {thread_id:?}"),
+        None => format!("{thread_id:?}"),
+    };
+    let backtrace = Backtrace::force_capture();
+    format!(
+        "{timestamp} PANIC pid={pid}: thread {thread_info} panicked{location}:\n{payload}\nstack backtrace:\n{backtrace}\n"
+    )
 }
 
 pub fn tree_layer() -> tracing_tree::HierarchicalLayer<fn() -> Stderr, UtcDateTime> {
