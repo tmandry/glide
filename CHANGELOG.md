@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.2.19](https://github.com/tmandry/glide/compare/v0.2.18...v0.2.19) (2026-11-24)
+
+
+### Features
+
+* Bind hotkeys to the left or right modifier key ([59c9864](https://github.com/tmandry/glide/commit/59c9864d26a4d7aa1ad5be2aa9ba3633c63da433))
+* Show when Secure Input is blocking hotkeys ([e1b0f3d](https://github.com/tmandry/glide/commit/e1b0f3dc9ada517d9268d353b2a0d4f80f80dc0d))
+
+
+### Bug Fixes
+
+* Accept Cmd and Command as names for the Meta modifier ([9d607bf](https://github.com/tmandry/glide/commit/9d607bf59a3dca623bc567c2bff40e39da258d0f))
+* Don't switch desktops after dragging the focused window away in Mission Control ([83b6a55](https://github.com/tmandry/glide/commit/83b6a554040c428e2ed3fc0f1a59cca86018ac16))
+* Don't tile a window opened in Mission Control onto the wrong desktop ([59c2f99](https://github.com/tmandry/glide/commit/59c2f99253dc0b1c99267a50bf94fc2d7a9129fc))
+* Keep autorepeats of a bound hotkey from reaching the focused app ([40a032d](https://github.com/tmandry/glide/commit/40a032d4f94f20fcc28df858684e79e9160dc130))
+* Let disabled and overridden keys match defaults written differently ([e313f47](https://github.com/tmandry/glide/commit/e313f479940c0930c43540648e6ceefc7299562a))
+* Manage apps that launched while the screen was locked ([c61f64f](https://github.com/tmandry/glide/commit/c61f64f3ecd774f9d637df69566ebc0d277d0872))
+* Manage apps that launched while the screen was locked ([a1361fb](https://github.com/tmandry/glide/commit/a1361fbfc728fd085a380c5f45ca21bcd9084793))
+* Re-enable an event tap the system has disabled ([ce1593d](https://github.com/tmandry/glide/commit/ce1593d4eb3ef464fa90e582ae1d47b0cac93788))
+* Re-enable an event tap the system has disabled ([0236981](https://github.com/tmandry/glide/commit/02369817ac37f1b7f63dd58a45099e717be46d53))
+* Remove the leftover container when the root is left with only one child ([4b453bb](https://github.com/tmandry/glide/commit/4b453bb4d263b5c29e58e7b5dcb68eced691ba2b))
+* Scroll the viewport after the last frame of a resize ([43b7d90](https://github.com/tmandry/glide/commit/43b7d90604f6c2c8dd3a2c334a3b138d1506aa17))
+
+
+### Improvements
+
+* Add timestamp and pid to panic logs ([06d10d8](https://github.com/tmandry/glide/commit/06d10d80be3e8a3c8f51cd50000369e3859e81dd))
+* Rotate logs daily in ~/Library/Logs/Glide ([f93f7fd](https://github.com/tmandry/glide/commit/f93f7fdb6097055481ed4adb03b7f49b39489e27))
+* Show the parachute icon in Glide's alerts ([3ecdb8f](https://github.com/tmandry/glide/commit/3ecdb8fc0d843582d71520f5be597568d43c2ec1))
+* Write panic reports to the server log ([728a9a3](https://github.com/tmandry/glide/commit/728a9a3738cb11ec8429512b68df18133aebdbae))
+
+
+### Documentation
+
+* Describe layout assertions and updating snapshots ([0832f3f](https://github.com/tmandry/glide/commit/0832f3f05b94fe2f7fdc447e1c776c8afcfa751c))
+* Retain calibrated release-note guidelines ([a3711d5](https://github.com/tmandry/glide/commit/a3711d563b7914a52023cde5b9bd2d56c29f7891))
+
 ## [0.2.18](https://github.com/tmandry/glide/compare/v0.2.17...v0.2.18) (2026-11-04)
 
 This release improves reliability when using Mission Control, moving windows
