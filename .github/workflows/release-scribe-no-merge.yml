@@ -1,0 +1,13 @@
+name: Release notes evaluation guard
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions: {}
+jobs:
+  no-merge:
+    if: github.head_ref == 'release-scribe/evaluation'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo '::error::This PR is a release-notes evaluation. Do not merge.'
+          exit 1
