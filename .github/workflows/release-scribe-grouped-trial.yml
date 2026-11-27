@@ -1,0 +1,88 @@
+name: Grouped release notes trial
+
+on:
+  push:
+    branches: [scribe/grouped-trial]
+  workflow_dispatch:
+    inputs:
+      generate:
+        description: Generate notes with Sol and report usage
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  trial:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/scribe/grouped-trial'
+    environment: release-notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - range: next
+            base: v0.2.18
+            target: 1093745b263ed68965e7f7b4bd7cef6aa7490591
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: baptiste0928/cargo-install@v3
+        with:
+          crate: release-scribe
+          git: https://github.com/tmandry/release-scribe
+          commit: 90a43dadbca659346e94102850385326964dfa2c
+          locked: true
+      - uses: actions/cache/restore@v4
+        if: github.event_name == 'push' || inputs.generate
+        with:
+          path: ${{ runner.temp }}/groups
+          key: groups-v1-${{ matrix.range }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            groups-v1-${{ matrix.range }}-
+      - name: Investigate the pinned range
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ (github.event_name == 'push' || inputs.generate) && secrets.OPENAI_API_KEY || '' }}
+          GENERATE: ${{ github.event_name == 'push' || inputs.generate }}
+          BASE: ${{ matrix.base }}
+          TARGET: ${{ matrix.target }}
+          RANGE: ${{ matrix.range }}
+        run: |
+          set -euo pipefail
+          args=(--repo . --config .github/release-scribe/config.json --cache "$RUNNER_TEMP/groups" --base "$BASE")
+          if [[ "$GENERATE" == true ]]; then args+=(--generate); fi
+          replay() {
+            local ref="$1" label="$2" out="$RUNNER_TEMP/results/$2"
+            release-scribe grouped "${args[@]}" --target "$ref" --output "$out"
+            {
+              echo "### $label · $(git rev-parse --short "$ref")"
+              jq -r '"\(.calls|length) calls, \(.input_tokens) input tokens, \(.investigation_cache_hits) reused investigations."' "$out/metrics.json"
+              if [[ -f "$out/notes.md" ]]; then cat "$out/notes.md"; fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          replay "$TARGET" "$RANGE"
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && (github.event_name == 'push' || inputs.generate) }}
+        with:
+          path: ${{ runner.temp }}/groups
+          key: groups-v1-${{ matrix.range }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: grouped-notes-${{ matrix.range }}
+          path: |
+            ${{ runner.temp }}/results/*/notes.md
+            ${{ runner.temp }}/results/*/coverage.json
+            ${{ runner.temp }}/results/*/review.md
+            ${{ runner.temp }}/results/*/metrics.json
+          if-no-files-found: ignore
+          retention-days: 7
