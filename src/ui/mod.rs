@@ -9,4 +9,4 @@ pub mod icon;
 pub mod permission_flow;
 pub mod status_bar;
 
-pub use group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind};
+pub use group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind, TabLabel};

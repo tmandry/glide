@@ -733,7 +733,9 @@ impl State {
                 }
             }
             kAXTitleChangedNotification => {
-                // TODO
+                let Ok(wid) = self.id(&elem) else { return };
+                let title = elem.title().map(|t| t.to_string()).unwrap_or_default();
+                self.send_event(Event::WindowTitleChanged(wid, title.into()));
             }
             _ => {
                 error!("Unhandled notification {notif:?} on {elem:#?}");
