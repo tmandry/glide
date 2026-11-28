@@ -90,6 +90,12 @@ pub enum LayoutEvent {
         frame: CGRect,
     },
     SpaceExposed(SpaceId, CGSize),
+    /// A child of a group was dragged from index `from` to index `to`.
+    GroupChildMoved {
+        group: NodeId,
+        from: usize,
+        to: usize,
+    },
     MouseMovedOverWindow {
         over: (SpaceId, WindowId),
         current_main: Option<(SpaceId, WindowId)>,
@@ -728,6 +734,9 @@ impl LayoutManager {
                         );
                     }
                 }
+            }
+            LayoutEvent::GroupChildMoved { group, from, to } => {
+                self.tree.move_child(group, from, to);
             }
             LayoutEvent::MouseMovedOverWindow {
                 over: (new_space, new_wid),

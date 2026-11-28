@@ -9,8 +9,8 @@ use std::ptr::NonNull;
 use accessibility::{AXAttribute, AXAttributeValue, AXError, AXUIElement, AXUIElementAttributes};
 pub use accessibility_sys::pid_t;
 use accessibility_sys::{
-    kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute, kAXStandardWindowSubrole,
-    kAXWindowRole,
+    kAXCloseButtonAttribute, kAXFocusedApplicationAttribute, kAXFocusedUIElementAttribute,
+    kAXStandardWindowSubrole, kAXWindowRole,
 };
 use objc2::rc::Retained;
 use objc2::{class, msg_send};
@@ -155,6 +155,9 @@ pub trait AXUIElementExt {
     /// system-wide element.
     fn focused_ui_element(&self) -> Result<CFRetained<AXUIElement>, accessibility::Error>;
 
+    /// The close button of a window.
+    fn close_button(&self) -> Result<CFRetained<AXUIElement>, accessibility::Error>;
+
     fn privacy_sensitive_inspect(&self) -> Inspect<'_>;
 }
 
@@ -184,6 +187,12 @@ impl AXUIElementExt for AXUIElement {
 
     fn focused_ui_element(&self) -> Result<CFRetained<AXUIElement>, accessibility::Error> {
         AXUIElement::downcast(self.attribute(&system_wide_attribute(kAXFocusedUIElementAttribute))?)
+    }
+
+    fn close_button(&self) -> Result<CFRetained<AXUIElement>, accessibility::Error> {
+        AXUIElement::downcast(self.attribute(&AXAttribute::new(&CFString::from_static_str(
+            kAXCloseButtonAttribute,
+        )))?)
     }
 
     fn privacy_sensitive_inspect(&self) -> Inspect<'_> {
