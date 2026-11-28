@@ -7,6 +7,7 @@
 //! responsible for managing the UI components themselves, and forwarding events
 //! between them and the reactor.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,11 +21,12 @@ use objc2_core_foundation::CGRect;
 use objc2_foundation::NSZeroRect;
 use tracing::debug;
 
-use crate::actor;
+use crate::actor::{self, reactor};
 use crate::collections::HashMap;
 use crate::config::Config;
 use crate::model::{ContainerKind, GroupBarInfo, NodeId};
 use crate::sys::screen::{CoordinateConverter, SpaceId};
+use crate::sys::window_server::WindowId;
 use crate::ui::group_bar::{GroupDisplayData, GroupIndicatorNSView, GroupKind};
 
 #[derive(Debug)]
@@ -50,6 +52,7 @@ pub enum Event {
 pub struct GroupBars {
     config: Arc<Config>,
     rx: Receiver,
+    events_tx: reactor::Sender,
     mtm: MainThreadMarker,
     indicators: HashMap<SpaceId, HashMap<NodeId, Indicator>>,
     coordinate_converter: CoordinateConverter,
@@ -59,6 +62,8 @@ pub struct GroupBars {
 struct Indicator {
     view: GroupIndicatorNSView,
     window: Retained<NSWindow>,
+    /// The window shown by each tab, shared with the click callback.
+    windows: Rc<RefCell<Vec<WindowId>>>,
 }
 
 impl Drop for Indicator {
@@ -72,10 +77,16 @@ pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
 impl GroupBars {
-    pub fn new(config: Arc<Config>, rx: Receiver, mtm: MainThreadMarker) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        rx: Receiver,
+        events_tx: reactor::Sender,
+        mtm: MainThreadMarker,
+    ) -> Self {
         Self {
             config,
             rx,
+            events_tx,
             mtm,
             indicators: HashMap::default(),
             coordinate_converter: CoordinateConverter::default(),
@@ -152,10 +163,6 @@ impl GroupBars {
         }
     }
 
-    fn handle_indicator_clicked(node_id: NodeId, segment_index: usize) {
-        tracing::debug!(?node_id, segment_index, "Group indicator clicked");
-    }
-
     fn update_or_create_indicator(&mut self, space_id: SpaceId, group: GroupBarInfo) {
         let group_kind = match group.container_kind {
             ContainerKind::Tabbed => GroupKind::Horizontal,
@@ -170,23 +177,34 @@ impl GroupBars {
         let indicator = space_indicators.entry(group.node_id).or_insert_with(|| {
             let mut view =
                 GroupIndicatorNSView::new(CGRect::ZERO, &self.config.settings.group_bars, self.mtm);
-            view.set_click_callback(Rc::new(move |segment_index| {
-                Self::handle_indicator_clicked(group.node_id, segment_index);
+            let windows = Rc::new(RefCell::new(Vec::new()));
+            let events_tx = self.events_tx.clone();
+            let node_id = group.node_id;
+            view.set_click_callback(Rc::new({
+                let windows = windows.clone();
+                move |segment_index| {
+                    let Some(&wid) = windows.borrow().get(segment_index) else {
+                        return;
+                    };
+                    debug!(?node_id, segment_index, ?wid, "Group bar tab clicked");
+                    events_tx.send(reactor::Event::GroupBarTabClicked(wid));
+                }
             }));
             let window = make_indicator_window(self.mtm);
             window.setContentView(Some(view.view()));
-            Indicator { view, window }
+            Indicator { view, window, windows }
         });
         if let Some(frame) = self.coordinate_converter.convert_rect(group.indicator_frame) {
             indicator.window.setFrame_display(frame, false);
         }
         indicator.view.update(GroupDisplayData {
             group_kind,
-            total_count: group.total_count,
+            total_count: group.windows.len(),
             selected_index: group.selected_index,
             frame: group.indicator_frame,
             is_selected: group.is_selected,
         });
+        *indicator.windows.borrow_mut() = group.windows;
         indicator.window.setIsVisible(group.is_visible);
         indicator.window.setLevel(if group.is_on_top {
             NSFloatingWindowLevel
@@ -221,7 +239,6 @@ fn make_indicator_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     window.setLevel(NSFloatingWindowLevel);
     window.setBackgroundColor(Some(&NSColor::clearColor()));
     window.setOpaque(false);
-    window.setIgnoresMouseEvents(true);
 
     window
 }
